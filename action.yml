@@ -1,179 +1,51 @@
-name: Verify approved Skill
+name: mago-ski verify
 
 description: >-
-  Verifies one candidate Skill's bytes, trusted signature, and exact digest
-  approval using policy from the protected base revision. The caller must grant
-  only contents: read; this action does not request identity-token permission.
+  Verifies that every Skill in the repository carries a certificate from an
+  approver your organization's root trusts, for its exact current bytes.
+  On pull requests, the policy, trust root and revocation list are read from
+  the protected base revision, so a pull request cannot change who is trusted.
+
+branding:
+  icon: shield
+  color: blue
 
 inputs:
-  skill-path:
-    description: >-
-      One candidate Skill directory, relative to GITHUB_WORKSPACE; use a
-      separate job for each Skill.
-    required: true
-  manifest-path:
-    description: >-
-      Candidate manifest, relative to GITHUB_WORKSPACE and outside the Skill
-      directory.
-    required: true
-  signature-path:
-    description: >-
-      Candidate signature or Cosign bundle, relative to GITHUB_WORKSPACE and
-      outside the Skill directory.
-    required: true
-  profile:
-    description: Signature profile, ed25519 or sigstore.
-    required: true
-  trust-path:
-    description: >-
-      Trust JSON path relative to the protected base revision checkout.
-    required: true
-  approvals-path:
-    description: >-
-      Exact-digest approvals JSON path relative to the protected base revision
-      checkout.
-    required: true
-  identity:
-    description: >-
-      Exact trusted Sigstore certificate identity; required for sigstore.
+  policy:
+    description: Policy file, relative to the repository root.
     required: false
-  issuer:
-    description: Exact trusted Sigstore OIDC issuer; required for sigstore.
-    required: false
-  cosign-path:
-    description: >-
-      Official Cosign v3.1.3 binary path; required for sigstore and checked by
-      the core against its checksum and version pins.
-    required: false
+    default: .mago-ski/policy.json
 
 runs:
   using: composite
   steps:
-    - name: Validate event and protected revision
-      shell: bash
-      env:
-        MAGO_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      run: |
-        set -euo pipefail
-        case "$GITHUB_EVENT_NAME" in
-          pull_request) ;;
-          *)
-            echo "Only pull_request base authority is supported." >&2
-            exit 2
-            ;;
-        esac
-        if [[ ! "$MAGO_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-          echo "Protected base commit is unavailable." >&2
-          exit 2
-        fi
-        base_checkout="$GITHUB_WORKSPACE/.mago-ski-base"
-        if [[ -e "$base_checkout" || -L "$base_checkout" ]]; then
-          echo "Protected checkout path already exists." >&2
-          exit 2
-        fi
+    - name: Set up Node.js
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.18.0
 
-    - name: Checkout protected base revision
+    - name: Check out the protected base revision
+      if: github.event_name == 'pull_request'
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       with:
         repository: ${{ github.repository }}
         ref: ${{ github.event.pull_request.base.sha }}
-        token: ${{ github.token }}
         path: .mago-ski-base
         fetch-depth: 1
         persist-credentials: false
 
-    - name: Verify candidate bytes and exact approval
+    - name: Verify Skill certificates
       shell: bash
       env:
-        MAGO_SKILL_PATH: ${{ inputs.skill-path }}
-        MAGO_MANIFEST_PATH: ${{ inputs.manifest-path }}
-        MAGO_SIGNATURE_PATH: ${{ inputs.signature-path }}
-        MAGO_PROFILE: ${{ inputs.profile }}
-        MAGO_TRUST_PATH: ${{ inputs.trust-path }}
-        MAGO_APPROVALS_PATH: ${{ inputs.approvals-path }}
-        MAGO_IDENTITY: ${{ inputs.identity }}
-        MAGO_ISSUER: ${{ inputs.issuer }}
-        MAGO_COSIGN_PATH: ${{ inputs.cosign-path }}
+        MAGO_POLICY: ${{ inputs.policy }}
+        MAGO_EVENT: ${{ github.event_name }}
+        MAGO_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-
-        fail() {
-          echo "$1" >&2
-          exit 2
-        }
-        relative_path() {
-          local value="$1" label="$2"
-          [[ -n "$value" ]] || fail "$label is required."
-          [[ "$value" != /* ]] || fail "$label must be relative."
-          case "$value" in
-            *\\*) fail "$label must not contain backslashes." ;;
-          esac
-          [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || \
-            fail "$label must not contain control newlines."
-          case "/$value/" in
-            */../*|*/./*) fail "$label has a dot path component." ;;
-          esac
-        }
-        within_root() {
-          local root="$1" value="$2" label="$3" resolved
-          relative_path "$value" "$label"
-          if ! resolved="$(realpath -e -- "$root/$value")"; then
-            fail "$label does not exist."
-          fi
-          case "$resolved" in
-            "$root"/*) ;;
-            *) fail "$label resolves outside its allowed checkout." ;;
-          esac
-          printf '%s' "$resolved"
-        }
-
-        workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
-        base_root="$workspace/.mago-ski-base"
-        [[ -d "$base_root" ]] || fail "Protected base checkout is missing."
-        base_root="$(realpath -e -- "$base_root")"
-        skill_path="$GITHUB_WORKSPACE/$MAGO_SKILL_PATH"
-        manifest_path="$GITHUB_WORKSPACE/$MAGO_MANIFEST_PATH"
-        signature_path="$GITHUB_WORKSPACE/$MAGO_SIGNATURE_PATH"
-        skill_real="$(within_root "$workspace" "$MAGO_SKILL_PATH" "Skill path")"
-        [[ -d "$skill_real" ]] || fail "Skill path is not a directory."
-        within_root "$workspace" "$MAGO_MANIFEST_PATH" \
-          "Manifest path" >/dev/null
-        within_root "$workspace" "$MAGO_SIGNATURE_PATH" \
-          "Signature path" >/dev/null
-        trust_path="$base_root/$MAGO_TRUST_PATH"
-        approvals_path="$base_root/$MAGO_APPROVALS_PATH"
-        within_root "$base_root" "$MAGO_TRUST_PATH" "Trust path" >/dev/null
-        within_root "$base_root" "$MAGO_APPROVALS_PATH" \
-          "Approvals path" >/dev/null
-
-        [[ "$MAGO_PROFILE" == ed25519 || "$MAGO_PROFILE" == sigstore ]] || \
-          fail "Profile must be ed25519 or sigstore."
-        node_major="$(node -p 'process.versions.node.split(".")[0]')"
-        [[ "$node_major" =~ ^[0-9]+$ && "$node_major" -ge 22 ]] || \
-          fail "Node.js 22 or newer is required."
-        cli="$base_root/bin/mago-ski.mjs"
-        [[ -f "$cli" && ! -L "$cli" ]] || \
-          fail "The protected-base mago-ski verifier is missing."
-        args=(
-          verify
-          --skill "$skill_path"
-          --manifest "$manifest_path"
-          --profile "$MAGO_PROFILE"
-          --signature "$signature_path"
-          --trust "$trust_path"
-          --approvals "$approvals_path"
-        )
-        if [[ "$MAGO_PROFILE" == sigstore ]]; then
-          [[ -n "$MAGO_IDENTITY" && -n "$MAGO_ISSUER" && \
-            -n "$MAGO_COSIGN_PATH" ]] || \
-            fail "Sigstore requires identity, issuer, and Cosign v3.1.3."
-          args+=(
-            --identity "$MAGO_IDENTITY"
-            --issuer "$MAGO_ISSUER"
-            --cosign "$MAGO_COSIGN_PATH"
-          )
-        elif [[ -n "$MAGO_IDENTITY" || -n "$MAGO_ISSUER" || \
-          -n "$MAGO_COSIGN_PATH" ]]; then
-          fail "Identity, issuer, and Cosign path are Sigstore-only."
+        policy_root="$GITHUB_WORKSPACE"
+        if [[ "$MAGO_EVENT" == pull_request ]]; then
+          policy_root="$GITHUB_WORKSPACE/.mago-ski-base"
         fi
-        node "$cli" "${args[@]}"
+        # The verifier runs from this action's own checkout (pinned by the caller's `uses:` ref),
+        # never from code in the repository under review.
+        node "$MAGO_ACTION_PATH/hosts/github/run.ts" "$policy_root" "$GITHUB_WORKSPACE" "$MAGO_POLICY"
