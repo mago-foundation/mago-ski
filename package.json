@@ -3,6 +3,14 @@
   "version": "0.1.0-preview.1",
   "private": true,
   "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "skills",
+    "pki",
+    "supply-chain",
+    "signing"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -16,6 +24,11 @@
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
     }
+  },
+  "pi": {
+    "extensions": [
+      "./hosts/pi/index.ts"
+    ]
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
