@@ -13,6 +13,7 @@ Start at the Skill root (the directory that holds `SKILL.md`) and walk it recurs
   - the file `.mago-ski-cert.json` at the root (the in-tree certificate);
   - paths listed in `.skilldigestignore` at the root (below).
 - `.skilldigestignore` itself is covered when present.
+- `SKILL.md` at the root is required and always covered. A tree without it is not a Skill and has no digest.
 - These make the whole tree **unverifiable** (the digest is not computed):
   - symbolic links, sockets, FIFOs, devices;
   - a path component that is not valid UTF-8, is not in Unicode NFC, is empty, `.` or `..`, contains `/`, `\`, `:` or a control character, ends with a dot or space, or is a reserved Windows device name;
@@ -28,7 +29,7 @@ UTF-8 text, at most 64 KiB and 256 patterns. Blank lines and lines starting with
 - `name/` excludes the directory `name` and everything under it;
 - `name` excludes a file or directory with that exact relative path.
 
-Globs (`* ? [ ] !`), absolute paths, `.` or `..` segments, backslashes and the ignore file itself are rejected.
+Globs (`* ? [ ] !`), absolute paths, `.` or `..` segments, backslashes, the ignore file itself and `SKILL.md` are rejected.
 
 Excluded files are not approved. Hosts must not serve them as Skill content: the Pi host refuses to read any file inside a verified Skill that is not in the certificate's file list.
 

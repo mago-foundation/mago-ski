@@ -41,7 +41,7 @@ The payload is canonical JSON:
 | Field | Rule |
 |---|---|
 | `subject` | Exactly one. `name`: 1–128 ASCII letters, digits, `.`, `_`, `-`, starting with a letter or digit. `digest.magoSkillTreeV2`: the [tree digest](skill-tree-v2.md) without the `sha256:` prefix |
-| `files` | The per-file records of the tree, sorted as in the digest. Their digest must equal the subject digest |
+| `files` | The per-file records of the tree, sorted as in the digest. Must include `SKILL.md`. Their digest must equal the subject digest |
 | `approver_key_id` | Must equal the envelope's `keyid` |
 | `issued_at`, `expires_at` | UTC, second precision, `YYYY-MM-DDTHH:MM:SSZ`; `expires_at` after `issued_at` |
 | `reason` | Free text, 1–1024 characters, no control characters |

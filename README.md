@@ -18,7 +18,7 @@ Host (Pi, CI)       pins the root fingerprint and loads a Skill only if a certif
 
 - **Approval binds an exact digest.** Every byte and the executable bit are covered. A one-sentence change needs a new certificate, even if no capability changed.
 - **Hosts trust the root, not individual keys.** Approvers are delegated by the root, limited to Skill-name scopes, and expire.
-- **Revocation is immediate.** Revoke a key and every certificate it signed stops verifying; revoke a digest to pull one version.
+- **Revocation reaches every certificate at once.** Revoke a key and every certificate it signed stops verifying as soon as a host has the updated revocation list; revoke a digest to pull one version. Lists expire (30 days by default), which bounds how long a host can keep using an old one.
 - **The model never holds a credential.** The host verifies; the model only sees the Skills that passed.
 - **No maliciousness judgment.** A certificate records who approved what. It does not certify that a Skill is safe.
 - **Shadow mode first.** Log what would be blocked before you enforce.

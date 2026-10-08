@@ -1,6 +1,6 @@
 # Pi host
 
-The Pi extension (`hosts/pi/index.ts`) enforces certificates inside a normal [Pi](https://github.com/earendil-works/pi) session. Tested with Pi 1.0.4.
+The Pi extension (`hosts/pi/index.ts`) enforces certificates inside a normal [Pi](https://github.com/earendil-works/pi) session. Tested with Pi 1.0.4 and 1.1.0.
 
 ## Install
 
@@ -20,8 +20,10 @@ Start in `"mode": "shadow"` to see what would be blocked (the decision log recor
 |---|---|---|
 | Before each run (`before_agent_start`) | Verifies every discovered Skill; only `VERIFIED` Skills stay in the list sent to the model. Status bar: `mago-ski enforce: 3/4 Skills verified` | Same check, nothing removed |
 | `/skill:name` (`input`) | Verified: re-verified and expanded from the verified bytes, so Pi never re-reads the file. Unverified: refused, the model is not called. Not seen yet in this session: rewritten into a plain request, so Pi does not expand it unchecked | Allowed |
-| `read`, `grep`, `find`, `ls`, `edit`, `write` (`tool_call`) | Refused for files of unverified Skills. Reads from verified Skills are re-hashed against the certificate; changed or uncovered files are refused. Edits to verified Skills are refused. `grep` over a directory containing an unverified Skill is refused | Logged |
-| `bash` | Refused when the command names an unverified Skill's directory; verified Skills it names are re-verified first. Best-effort (see the [threat model](../threat-model.md)) | Logged |
+| `read`, `find`, `ls`, `edit`, `write` (`tool_call`) | Refused for paths in unverified Skills, matched both before and after resolving symlinks. Reads from verified Skills are re-hashed against the certificate; changed files, files not in the certificate, and paths that leave the Skill through a link are refused. Edits to verified Skills are refused. `find` and `ls` of verified Skills are allowed (names only) | Logged |
+| `grep` | Refused when it searches in or over an unverified Skill, or a verified Skill that has files excluded from its certificate (`.git`, ignored files). Otherwise the Skill is re-verified first | Logged |
+| `bash`, `powershell` | Refused when the command names an unverified Skill's directory; verified Skills it names are re-verified first. Best-effort (see the [threat model](../threat-model.md)) | Logged |
+| Verification error | A Skill that cannot be checked is `UNVERIFIABLE`. If checking crashes outright, no Skills are advertised and file and shell tools touching any Skill path are blocked for that run | Logged |
 
 Each change of verdict is written to the policy's `decision_log` with the event, verdict and reason, and shown as a notification.
 

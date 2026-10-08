@@ -1,4 +1,4 @@
-// Integration tests: a real Pi 1.0.4 session (SDK), the mago-ski extension, and Pi's faux model.
+// Integration tests: a real Pi session (SDK, version pinned in devDependencies), the mago-ski extension, and Pi's faux model.
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
