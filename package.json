@@ -1,0 +1,17 @@
+{
+  "name": "mago-ski",
+  "version": "0.1.0-preview.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mago-ski": "bin/mago-ski.mjs"
+  },
+  "exports": "./src/index.mjs",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/*.node.mjs"
+  },
+  "license": "Apache-2.0"
+}
