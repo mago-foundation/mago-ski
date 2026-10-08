@@ -4,7 +4,8 @@
 // never from the project directory, because project files may be controlled by the code under review.
 //
 // Enforce mode: unverified Skills are not advertised to the model, `/skill:name` cannot load them,
-// and the structured file tools refuse their files. Shadow mode allows everything and logs
+// and the structured file tools refuse their files. Shell tools (bash, powershell) are checked
+// best-effort by matching Skill paths in the command text. Shadow mode allows everything and logs
 // what enforce mode would have blocked.
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { realpath } from 'node:fs/promises';
@@ -13,8 +14,8 @@ import path from 'node:path';
 import { isInside, readRegularFile } from '../../src/fs-safe.ts';
 import { appendDecision, loadPolicy, loadPolicyTrust, verifyWithPolicy, type DecisionRecord, type Mode, type Policy } from '../../src/policy.ts';
 import { formatTimestamp } from '../../src/time.ts';
-import { hashFile, sha256Hex } from '../../src/tree-digest.ts';
-import { unverifiable, type VerificationResult } from '../../src/verify.ts';
+import { CERTIFICATE_FILENAME, hashFile, sha256Hex } from '../../src/tree-digest.ts';
+import { unverifiable, type TrustContextResult, type VerificationResult } from '../../src/verify.ts';
 
 export interface MagoSkiPiOptions {
   /** Policy file; defaults to $MAGO_SKI_POLICY, then ~/.mago-ski/policy.json. */
@@ -30,21 +31,26 @@ interface PiSkill {
 
 interface Entry {
   name: string;
-  /** Directory as Pi reports it and its canonical form. */
+  /** Directory as Pi reports it, its absolute lexical form, and its canonical (symlink-free) form. */
   baseDir: string;
+  lexDir: string;
   realDir: string;
   filePath: string;
   result: VerificationResult;
 }
 
 type Verdictish = VerificationResult['verdict'];
+type Block = { block: true; reason: string } | undefined;
+
+const SHELL_TOOLS = new Set(['bash', 'powershell']);
+const FILE_TOOLS = new Set(['read', 'edit', 'write', 'grep', 'find', 'ls']);
 
 function defaultPolicyPath(): string {
   return process.env.MAGO_SKI_POLICY || path.join(homedir(), '.mago-ski', 'policy.json');
 }
 
+/** Resolves symlinks on the longest existing prefix. Throws on errors other than ENOENT. */
 async function canonical(target: string): Promise<string> {
-  // Resolve symlinks on the longest existing prefix so a link cannot hide a Skill path.
   let current = path.resolve(target);
   const rest: string[] = [];
   while (true) {
@@ -71,6 +77,15 @@ export function skillBlock(name: string, filePath: string, baseDir: string, cont
   return args ? `${block}\n\n${args}` : block;
 }
 
+function dirsOf(entry: Entry): string[] {
+  return entry.lexDir === entry.realDir ? [entry.lexDir] : [entry.lexDir, entry.realDir];
+}
+
+/** Excluded paths that a tool could expose; the in-tree certificate is signed public data. */
+function riskyExclusions(entry: Entry): string[] {
+  return entry.result.excluded.filter((item) => item !== CERTIFICATE_FILENAME);
+}
+
 export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
   return function magoSki(pi: ExtensionAPI): void {
     const now = options.now ?? (() => new Date());
@@ -78,11 +93,16 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     /** Set when a policy file exists but cannot be loaded; the extension then fails closed. */
     let policyError: string | null = null;
     let loaded = false;
-    const entries = new Map<string, Entry>();
+    let entries: Entry[] = [];
+    /** Lexical Skill directories from the last run, recorded before any verification can fail. */
+    let knownDirs: string[] = [];
+    /** Enforce-mode latch: verification itself crashed, so every Skill path is treated as unverified. */
+    let failedClosed = false;
     const lastLogged = new Map<string, Verdictish>();
 
     const mode = (): Mode => (policy ? policy.mode : 'enforce');
     const active = () => policy !== null || policyError !== null;
+    const enforcing = () => mode() === 'enforce';
 
     async function ensurePolicy(ctx: ExtensionContext): Promise<void> {
       if (loaded) return;
@@ -102,9 +122,40 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
 
     async function log(record: Omit<DecisionRecord, 'timestamp' | 'host' | 'mode' | 'action'>, verified: boolean): Promise<void> {
       if (!policy?.decisionLogPath) return;
-      const action = verified ? 'allow' : mode() === 'enforce' ? 'block' : 'would-block';
+      const action = verified ? 'allow' : enforcing() ? 'block' : 'would-block';
       await appendDecision(policy.decisionLogPath, { timestamp: formatTimestamp(now()), host: hostname(), mode: mode(), action, ...record })
         .catch(() => {});
+    }
+
+    async function trustContext(): Promise<TrustContextResult> {
+      if (!policy) return { ok: false, verdict: 'UNVERIFIABLE', reason: policyError ?? 'no policy' };
+      try {
+        return await loadPolicyTrust(policy, now());
+      } catch (error) {
+        return { ok: false, verdict: 'UNVERIFIABLE', reason: (error as Error).message };
+      }
+    }
+
+    /** Never throws: any failure becomes an UNVERIFIABLE entry for that Skill. */
+    async function verifyEntry(skill: PiSkill, context: TrustContextResult): Promise<Entry> {
+      const lexDir = path.resolve(skill.baseDir);
+      const entry: Entry = {
+        name: skill.name, baseDir: skill.baseDir, lexDir, realDir: lexDir, filePath: skill.filePath,
+        result: unverifiable(lexDir, skill.name, 'verification did not complete', now()),
+      };
+      try {
+        entry.realDir = await canonical(lexDir);
+        if (path.basename(skill.filePath) !== 'SKILL.md') {
+          entry.result = unverifiable(entry.realDir, skill.name, 'standalone Markdown Skills cannot be certified; use a directory with SKILL.md', now());
+        } else if (!context.ok) {
+          entry.result = unverifiable(entry.realDir, skill.name, context.reason, now(), context.verdict);
+        } else {
+          entry.result = await verifyWithPolicy(policy!, entry.realDir, { now: now(), skillName: skill.name, context: context.context });
+        }
+      } catch (error) {
+        entry.result = unverifiable(entry.realDir, skill.name, `verification failed: ${(error as Error).message}`, now());
+      }
+      return entry;
     }
 
     function recordFor(entry: Entry, event: string, verdict: Verdictish = entry.result.verdict, reason = entry.result.reason) {
@@ -114,35 +165,18 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       };
     }
 
-    async function verifyEntry(skill: PiSkill, context: Awaited<ReturnType<typeof loadPolicyTrust>>): Promise<Entry> {
-      const realDir = await canonical(skill.baseDir);
-      let result: VerificationResult;
-      if (policyError || !policy) {
-        result = unverifiable(realDir, skill.name, policyError ?? 'no policy', now());
-      } else if (path.basename(skill.filePath) !== 'SKILL.md') {
-        result = unverifiable(realDir, skill.name, 'standalone Markdown Skills cannot be certified; use a directory with SKILL.md', now());
-      } else if (!context.ok) {
-        result = unverifiable(realDir, skill.name, context.reason, now(), context.verdict);
-      } else {
-        result = await verifyWithPolicy(policy, realDir, { now: now(), skillName: skill.name, context: context.context });
-      }
-      return { name: skill.name, baseDir: skill.baseDir, realDir, filePath: skill.filePath, result };
-    }
-
     async function refresh(skills: PiSkill[], ctx: ExtensionContext): Promise<Entry[]> {
-      const context = policy ? await loadPolicyTrust(policy, now()) : { ok: false as const, verdict: 'UNVERIFIABLE' as const, reason: policyError ?? 'no policy' };
+      const context = await trustContext();
       const fresh: Entry[] = [];
       for (const skill of skills) fresh.push(await verifyEntry(skill, context));
-      entries.clear();
+      entries = fresh;
       for (const entry of fresh) {
-        entries.set(entry.realDir, entry);
-        if (lastLogged.get(entry.realDir) !== entry.result.verdict) {
-          lastLogged.set(entry.realDir, entry.result.verdict);
-          await log(recordFor(entry, 'advertise'), entry.result.verdict === 'VERIFIED');
-          if (entry.result.verdict !== 'VERIFIED' && ctx.hasUI) {
-            const verb = mode() === 'enforce' ? 'blocked' : 'would block (shadow)';
-            ctx.ui.notify(`mago-ski ${verb} Skill "${entry.name}": ${entry.result.verdict} - ${entry.result.reason}`, mode() === 'enforce' ? 'error' : 'warning');
-          }
+        if (lastLogged.get(entry.lexDir) === entry.result.verdict) continue;
+        lastLogged.set(entry.lexDir, entry.result.verdict);
+        await log(recordFor(entry, 'advertise'), entry.result.verdict === 'VERIFIED');
+        if (entry.result.verdict !== 'VERIFIED' && ctx.hasUI) {
+          const verb = enforcing() ? 'blocked' : 'would block (shadow)';
+          ctx.ui.notify(`mago-ski ${verb} Skill "${entry.name}": ${entry.result.verdict} - ${entry.result.reason}`, enforcing() ? 'error' : 'warning');
         }
       }
       if (ctx.hasUI) {
@@ -152,27 +186,110 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       return fresh;
     }
 
-    function entryFor(target: string): Entry | undefined {
-      for (const entry of entries.values()) if (isInside(entry.realDir, target)) return entry;
-      return undefined;
+    async function reverify(entry: Entry): Promise<Entry> {
+      const updated = await verifyEntry({ name: entry.name, baseDir: entry.baseDir, filePath: entry.filePath }, await trustContext());
+      entries = entries.map((item) => (item === entry ? updated : item));
+      return updated;
     }
 
     function byName(name: string): Entry | undefined {
-      for (const entry of entries.values()) if (entry.name === name) return entry;
+      return entries.find((entry) => entry.name === name);
+    }
+
+    /** Skills a path is inside, matching the lexical and the canonical path against both Skill forms. */
+    function containing(paths: string[]): Entry[] {
+      return entries.filter((entry) => dirsOf(entry).some((dir) => paths.some((target) => isInside(dir, target))));
+    }
+
+    /** Skills inside a directory a tool would search. */
+    function contained(paths: string[]): Entry[] {
+      return entries.filter((entry) => dirsOf(entry).some((dir) => paths.some((target) => target !== dir && isInside(target, dir))));
+    }
+
+    /** Logs the decision; returns a block in enforce mode, undefined in shadow mode. */
+    async function judge(entry: Entry, event: string, verdict: Verdictish, reason: string): Promise<Block> {
+      await log(recordFor(entry, event, verdict, reason), false);
+      return enforcing() ? { block: true, reason: `mago-ski: Skill "${entry.name}" ${verdict}: ${reason}` } : undefined;
+    }
+
+    async function checkShell(toolName: string, command: string): Promise<Block> {
+      // Best-effort: shell commands can reach files in ways a string match cannot see.
+      for (const entry of [...entries]) {
+        const forms = new Set([...dirsOf(entry), entry.baseDir]);
+        for (const dir of [...forms]) if (dir.startsWith(homedir())) forms.add(`~${dir.slice(homedir().length)}`);
+        if (![...forms].some((form) => command.includes(form))) continue;
+        const current = entry.result.verdict === 'VERIFIED' ? await reverify(entry) : entry;
+        if (current.result.verdict !== 'VERIFIED') {
+          const blocked = await judge(current, `tool:${toolName}`, current.result.verdict, current.result.reason);
+          if (blocked) return blocked;
+        }
+      }
       return undefined;
     }
 
-    /** Returns a block reason, or undefined to allow. Shadow mode logs the reason and allows. */
-    async function judge(entry: Entry, event: string, verdict: Verdictish, reason: string): Promise<string | undefined> {
-      await log(recordFor(entry, event, verdict, reason), false);
-      return mode() === 'enforce' ? `mago-ski: Skill "${entry.name}" ${verdict}: ${reason}` : undefined;
+    async function checkGrep(affected: Entry[]): Promise<Block> {
+      for (const entry of affected) {
+        if (entry.result.verdict !== 'VERIFIED') {
+          const blocked = await judge(entry, 'tool:grep', entry.result.verdict, entry.result.reason);
+          if (blocked) return blocked;
+          continue;
+        }
+        const risky = riskyExclusions(entry);
+        if (risky.length > 0) {
+          const blocked = await judge(entry, 'tool:grep', 'UNAPPROVED_CHANGE',
+            `the Skill has files excluded from its certificate (${risky.slice(0, 3).join(', ')}); grep could return them. Use read on specific files`);
+          if (blocked) return blocked;
+          continue;
+        }
+        const current = await reverify(entry);
+        if (current.result.verdict !== 'VERIFIED') {
+          const blocked = await judge(current, 'tool:grep', current.result.verdict, current.result.reason);
+          if (blocked) return blocked;
+        }
+      }
+      return undefined;
     }
 
-    async function reverify(entry: Entry): Promise<Entry> {
-      const context = policy ? await loadPolicyTrust(policy, now()) : { ok: false as const, verdict: 'UNVERIFIABLE' as const, reason: policyError ?? 'no policy' };
-      const updated = await verifyEntry({ name: entry.name, baseDir: entry.baseDir, filePath: entry.filePath }, context);
-      entries.set(updated.realDir, updated);
-      return updated;
+    async function checkFileTool(toolName: string, rawPath: string, cwd: string): Promise<Block> {
+      const lexical = path.resolve(cwd, expandHome(rawPath));
+      // An unresolvable path (for example, permission denied) is still matched lexically.
+      const resolved = await canonical(lexical).catch(() => lexical);
+      const targets = lexical === resolved ? [lexical] : [lexical, resolved];
+      const inside = containing(targets);
+
+      if (toolName === 'grep') return await checkGrep([...inside, ...contained(targets).filter((entry) => !inside.includes(entry))]);
+
+      const unverified = inside.find((entry) => entry.result.verdict !== 'VERIFIED');
+      if (unverified) return await judge(unverified, `tool:${toolName}`, unverified.result.verdict, unverified.result.reason);
+      const entry = inside[0];
+      if (!entry) return undefined;
+      if (toolName === 'edit' || toolName === 'write') {
+        return await judge(entry, `tool:${toolName}`, 'UNAPPROVED_CHANGE', 'changing an approved Skill would invalidate its certificate');
+      }
+      if (toolName !== 'read') return undefined; // find and ls show names, not contents
+      if (!isInside(entry.realDir, resolved)) {
+        return await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', `${rawPath} leaves the Skill directory through a link`);
+      }
+      const relative = path.relative(entry.realDir, resolved).split(path.sep).join('/');
+      const approved = entry.result.files?.find((file) => file.path === relative);
+      if (!approved) return await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', `${relative} is not covered by the Skill's certificate`);
+      try {
+        const actual = await hashFile(resolved, relative);
+        if (actual.sha256 !== approved.sha256 || actual.exec !== approved.exec) throw new Error(`${relative} changed after verification`);
+      } catch (error) {
+        entry.result = { ...entry.result, verdict: 'UNAPPROVED_CHANGE', reason: (error as Error).message, files: null };
+        return await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', (error as Error).message);
+      }
+      return undefined;
+    }
+
+    /** Used only after verification itself crashed in enforce mode. */
+    function latchBlock(toolName: string, input: Record<string, unknown>, cwd: string): Block {
+      const text = SHELL_TOOLS.has(toolName)
+        ? String(input.command ?? '')
+        : path.resolve(cwd, expandHome(typeof input.path === 'string' && input.path !== '' ? input.path : '.'));
+      const touches = knownDirs.some((dir) => (SHELL_TOOLS.has(toolName) ? text.includes(dir) : isInside(dir, text) || isInside(text, dir)));
+      return touches ? { block: true, reason: 'mago-ski: Skill verification failed earlier in this run; Skill files are blocked until it succeeds' } : undefined;
     }
 
     pi.on('session_start', async (_event, ctx) => {
@@ -182,17 +299,20 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     pi.on('before_agent_start', async (event, ctx) => {
       await ensurePolicy(ctx);
       if (!active()) return;
+      knownDirs = event.systemPromptOptions.skills.map((skill) => path.resolve(skill.baseDir));
       try {
         const checked = await refresh(event.systemPromptOptions.skills, ctx);
-        if (mode() === 'enforce') {
-          const allowed = new Set(checked.filter((entry) => entry.result.verdict === 'VERIFIED').map((entry) => entry.realDir));
-          const keep = [];
-          for (const skill of event.systemPromptOptions.skills) if (allowed.has(await canonical(skill.baseDir))) keep.push(skill);
-          event.systemPromptOptions.skills = keep;
+        failedClosed = false;
+        if (enforcing()) {
+          const allowed = new Set(checked.filter((entry) => entry.result.verdict === 'VERIFIED').map((entry) => entry.lexDir));
+          event.systemPromptOptions.skills = event.systemPromptOptions.skills.filter((skill) => allowed.has(path.resolve(skill.baseDir)));
         }
       } catch (error) {
-        // Fail closed: an unexpected error must not leave unchecked Skills advertised.
-        if (mode() === 'enforce') event.systemPromptOptions.skills = [];
+        // Fail closed: an unexpected error must not leave unchecked Skills advertised or readable.
+        if (enforcing()) {
+          failedClosed = true;
+          event.systemPromptOptions.skills = [];
+        }
         if (ctx.hasUI) ctx.ui.notify(`mago-ski: verification failed (${(error as Error).message}); no Skills advertised`, 'error');
       }
     });
@@ -207,7 +327,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!known) {
         // Not seen yet (first prompt of a session). Never let Pi expand it unchecked: turn it into a
         // plain request; the model can only use the Skill if it is advertised, and reads are checked.
-        if (mode() !== 'enforce') return { action: 'continue' };
+        if (!enforcing()) return { action: 'continue' };
         return { action: 'transform', text: `Use the "${name}" skill.${args ? ` ${args}` : ''}` };
       }
       const entry = await reverify(known);
@@ -218,84 +338,28 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
           if (!approved || approved.sha256 !== sha256Hex(bytes)) throw new Error('SKILL.md changed after verification');
           return { action: 'transform', text: skillBlock(entry.name, entry.filePath, entry.baseDir, bytes.toString('utf8'), args) };
         } catch (error) {
-          const reason = await judge(entry, 'skill-command', 'UNAPPROVED_CHANGE', (error as Error).message);
-          if (reason) {
-            if (ctx.hasUI) ctx.ui.notify(reason, 'error');
-            return { action: 'handled' };
-          }
-          return { action: 'continue' };
+          const blocked = await judge(entry, 'skill-command', 'UNAPPROVED_CHANGE', (error as Error).message);
+          if (!blocked) return { action: 'continue' };
+          if (ctx.hasUI) ctx.ui.notify(blocked.reason, 'error');
+          return { action: 'handled' };
         }
       }
-      const reason = await judge(entry, 'skill-command', entry.result.verdict, entry.result.reason);
-      if (!reason) return { action: 'continue' };
-      if (ctx.hasUI) ctx.ui.notify(reason, 'error');
+      const blocked = await judge(entry, 'skill-command', entry.result.verdict, entry.result.reason);
+      if (!blocked) return { action: 'continue' };
+      if (ctx.hasUI) ctx.ui.notify(blocked.reason, 'error');
       return { action: 'handled' };
     });
 
     pi.on('tool_call', async (event, ctx) => {
-      if (!active() || entries.size === 0) return undefined;
+      if (!active()) return undefined;
       const input = event.input as Record<string, unknown>;
       const toolName = event.toolName;
-
-      if (toolName === 'bash') {
-        const command = typeof input.command === 'string' ? input.command : '';
-        for (const entry of [...entries.values()]) {
-          const forms = new Set([entry.realDir, entry.baseDir]);
-          if (entry.baseDir.startsWith(homedir())) forms.add(`~${entry.baseDir.slice(homedir().length)}`);
-          if (![...forms].some((form) => command.includes(form))) continue;
-          // Best-effort: shell commands can reach files in ways a string match cannot see.
-          const current = entry.result.verdict === 'VERIFIED' ? await reverify(entry) : entry;
-          if (current.result.verdict !== 'VERIFIED') {
-            const reason = await judge(current, 'tool:bash', current.result.verdict, current.result.reason);
-            if (reason) return { block: true, reason };
-          }
-        }
-        return undefined;
-      }
-
-      if (!['read', 'edit', 'write', 'grep', 'find', 'ls'].includes(toolName)) return undefined;
+      if (!SHELL_TOOLS.has(toolName) && !FILE_TOOLS.has(toolName)) return undefined;
+      if (failedClosed && enforcing()) return latchBlock(toolName, input, ctx.cwd);
+      if (entries.length === 0) return undefined;
+      if (SHELL_TOOLS.has(toolName)) return await checkShell(toolName, typeof input.command === 'string' ? input.command : '');
       const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
-      const target = await canonical(path.resolve(ctx.cwd, expandHome(rawPath)));
-      const entry = entryFor(target);
-
-      if (!entry) {
-        // Searching a parent directory with grep would return lines from unverified Skills inside it.
-        if (toolName === 'grep') {
-          for (const inner of entries.values()) {
-            if (inner.result.verdict !== 'VERIFIED' && isInside(target, inner.realDir)) {
-              const reason = await judge(inner, 'tool:grep', inner.result.verdict, `search covers an unverified Skill directory (${inner.result.reason})`);
-              if (reason) return { block: true, reason };
-            }
-          }
-        }
-        return undefined;
-      }
-
-      if (entry.result.verdict !== 'VERIFIED') {
-        const reason = await judge(entry, `tool:${toolName}`, entry.result.verdict, entry.result.reason);
-        return reason ? { block: true, reason } : undefined;
-      }
-      if (toolName === 'edit' || toolName === 'write') {
-        const reason = await judge(entry, `tool:${toolName}`, 'UNAPPROVED_CHANGE', 'changing an approved Skill would invalidate its certificate');
-        return reason ? { block: true, reason } : undefined;
-      }
-      if (toolName === 'read') {
-        const relative = path.relative(entry.realDir, target).split(path.sep).join('/');
-        const approved = entry.result.files?.find((file) => file.path === relative);
-        if (!approved) {
-          const reason = await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', `${relative} is not covered by the Skill's certificate`);
-          return reason ? { block: true, reason } : undefined;
-        }
-        try {
-          const actual = await hashFile(target, relative);
-          if (actual.sha256 !== approved.sha256 || actual.exec !== approved.exec) throw new Error(`${relative} changed after verification`);
-        } catch (error) {
-          entry.result = { ...entry.result, verdict: 'UNAPPROVED_CHANGE', reason: (error as Error).message, files: null };
-          const reason = await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', (error as Error).message);
-          return reason ? { block: true, reason } : undefined;
-        }
-      }
-      return undefined;
+      return await checkFileTool(toolName, rawPath, ctx.cwd);
     });
   };
 }
