@@ -16,6 +16,7 @@ import { appendDecision, loadPolicy, loadPolicyTrust, verifyWithPolicy, type Dec
 import { formatTimestamp } from '../../src/time.ts';
 import { CERTIFICATE_FILENAME, hashFile, sha256Hex } from '../../src/tree-digest.ts';
 import { unverifiable, type TrustContextResult, type VerificationResult } from '../../src/verify.ts';
+import { piReadTarget, piReadVariants, piResolveToCwd } from './paths.ts';
 
 export interface MagoSkiPiOptions {
   /** Policy file; defaults to $MAGO_SKI_POLICY, then ~/.mago-ski/policy.json. */
@@ -245,16 +246,37 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
         if (current.result.verdict !== 'VERIFIED') {
           const blocked = await judge(current, 'tool:grep', current.result.verdict, current.result.reason);
           if (blocked) return blocked;
+          continue;
+        }
+        // Files can appear in excluded locations after the run started; check the fresh result too.
+        const late = riskyExclusions(current);
+        if (late.length > 0) {
+          const blocked = await judge(current, 'tool:grep', 'UNAPPROVED_CHANGE',
+            `the Skill has files excluded from its certificate (${late.slice(0, 3).join(', ')}); grep could return them. Use read on specific files`);
+          if (blocked) return blocked;
         }
       }
       return undefined;
     }
 
+    /**
+     * Every path a file tool call could touch: Pi's own resolution of the argument (and, for read,
+     * the filename variants Pi tries), a plain resolution as a fallback, and each one's canonical form.
+     */
+    async function toolTargets(toolName: string, rawPath: string, cwd: string): Promise<{ targets: string[]; piPath: string }> {
+      const piPath = piResolveToCwd(rawPath, cwd);
+      const lexicals = new Set([...(toolName === 'read' ? piReadVariants(piPath) : [piPath]), path.resolve(cwd, expandHome(rawPath))]);
+      const targets = new Set<string>();
+      for (const lexical of lexicals) {
+        targets.add(lexical);
+        // An unresolvable path (for example, permission denied) is still matched lexically.
+        targets.add(await canonical(lexical).catch(() => lexical));
+      }
+      return { targets: [...targets], piPath };
+    }
+
     async function checkFileTool(toolName: string, rawPath: string, cwd: string): Promise<Block> {
-      const lexical = path.resolve(cwd, expandHome(rawPath));
-      // An unresolvable path (for example, permission denied) is still matched lexically.
-      const resolved = await canonical(lexical).catch(() => lexical);
-      const targets = lexical === resolved ? [lexical] : [lexical, resolved];
+      const { targets, piPath } = await toolTargets(toolName, rawPath, cwd);
       const inside = containing(targets);
 
       if (toolName === 'grep') return await checkGrep([...inside, ...contained(targets).filter((entry) => !inside.includes(entry))]);
@@ -267,6 +289,8 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
         return await judge(entry, `tool:${toolName}`, 'UNAPPROVED_CHANGE', 'changing an approved Skill would invalidate its certificate');
       }
       if (toolName !== 'read') return undefined; // find and ls show names, not contents
+      const opened = piReadTarget(piPath);
+      const resolved = await canonical(opened).catch(() => opened);
       if (!isInside(entry.realDir, resolved)) {
         return await judge(entry, 'tool:read', 'UNAPPROVED_CHANGE', `${rawPath} leaves the Skill directory through a link`);
       }
@@ -283,13 +307,19 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       return undefined;
     }
 
-    /** Used only after verification itself crashed in enforce mode. */
-    function latchBlock(toolName: string, input: Record<string, unknown>, cwd: string): Block {
-      const text = SHELL_TOOLS.has(toolName)
-        ? String(input.command ?? '')
-        : path.resolve(cwd, expandHome(typeof input.path === 'string' && input.path !== '' ? input.path : '.'));
-      const touches = knownDirs.some((dir) => (SHELL_TOOLS.has(toolName) ? text.includes(dir) : isInside(dir, text) || isInside(text, dir)));
-      return touches ? { block: true, reason: 'mago-ski: Skill verification failed earlier in this run; Skill files are blocked until it succeeds' } : undefined;
+    /** Used only after verification itself crashed in enforce mode. Matches Skill dirs in every known form. */
+    async function latchBlock(toolName: string, input: Record<string, unknown>, cwd: string): Promise<Block> {
+      const reason = 'mago-ski: Skill verification failed earlier in this run; Skill files are blocked until it succeeds';
+      if (SHELL_TOOLS.has(toolName)) {
+        const command = String(input.command ?? '');
+        const forms = new Set(knownDirs);
+        for (const dir of knownDirs) if (dir.startsWith(homedir())) forms.add(`~${dir.slice(homedir().length)}`);
+        return [...forms].some((form) => command.includes(form)) ? { block: true, reason } : undefined;
+      }
+      const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
+      const { targets } = await toolTargets(toolName, rawPath, cwd);
+      const touches = knownDirs.some((dir) => targets.some((target) => isInside(dir, target) || isInside(target, dir)));
+      return touches ? { block: true, reason } : undefined;
     }
 
     pi.on('session_start', async (_event, ctx) => {
@@ -301,6 +331,10 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!active()) return;
       knownDirs = event.systemPromptOptions.skills.map((skill) => path.resolve(skill.baseDir));
       try {
+        for (const dir of [...knownDirs]) {
+          const real = await canonical(dir).catch(() => dir);
+          if (!knownDirs.includes(real)) knownDirs.push(real);
+        }
         const checked = await refresh(event.systemPromptOptions.skills, ctx);
         failedClosed = false;
         if (enforcing()) {
@@ -355,7 +389,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       const input = event.input as Record<string, unknown>;
       const toolName = event.toolName;
       if (!SHELL_TOOLS.has(toolName) && !FILE_TOOLS.has(toolName)) return undefined;
-      if (failedClosed && enforcing()) return latchBlock(toolName, input, ctx.cwd);
+      if (failedClosed && enforcing()) return await latchBlock(toolName, input, ctx.cwd);
       if (entries.length === 0) return undefined;
       if (SHELL_TOOLS.has(toolName)) return await checkShell(toolName, typeof input.command === 'string' ? input.command : '');
       const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';

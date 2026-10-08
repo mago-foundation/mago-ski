@@ -108,3 +108,11 @@ test('F7: keygen refuses to write a key inside a Skill directory tree', async (t
   assert.equal(result.status, 2);
   assert.match(result.stderr, /inside a Skill directory/u);
 });
+
+test('R1: Skills deeper than the discovery limit fail the check instead of being skipped', async (t) => {
+  const { base, pr } = await actionRepo(t);
+  let deep = path.join(pr, 'skills');
+  for (let level = 0; level < 20; level += 1) deep = path.join(deep, `d${level}`);
+  await writeSkill(deep, 'deep-skill');
+  await assert.rejects(runGitHubCheck({ policyRoot: base, workspace: pr, policy: '.mago-ski/policy.json', now: T0 }), /depth limit/u);
+});

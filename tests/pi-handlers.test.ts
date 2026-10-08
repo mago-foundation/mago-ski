@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { createMagoSkiExtension } from '../hosts/pi/index.ts';
 import { IGNORE_FILENAME } from '../src/tree-digest.ts';
 import { approve, setupOrg, T0, tempDir, writeSkill, type Org } from './helpers.ts';
@@ -40,7 +41,7 @@ async function setup(t: TestContext, mode: 'enforce' | 'shadow' = 'enforce') {
     return event.systemPromptOptions.skills.map((entry: { name: string }) => entry.name);
   };
   const tool = (toolName: string, input: Record<string, unknown>) => emit('tool_call', { type: 'tool_call', toolCallId: 't1', toolName, input }, ctx);
-  return { org, root, approved, unapproved, run, tool };
+  return { org, root, approved, unapproved, run, tool, ctx };
 }
 
 test('baseline: only the approved Skill stays advertised', async (t) => {
@@ -111,4 +112,51 @@ test('shadow mode never blocks', async (t) => {
   const s = await setup(t, 'shadow');
   assert.deepEqual(await s.run(), ['approved-skill', 'unapproved-skill']);
   assert.equal(await s.tool('powershell', { command: `cat ${s.unapproved}/SKILL.md` }), undefined);
+});
+
+// Review 002 residuals.
+test('R2: grep after a newly excluded directory appears is blocked', async (t) => {
+  const s = await setup(t);
+  await writeFile(path.join(s.approved, IGNORE_FILENAME), 'cache/\n');
+  await approve(s.org, s.approved);
+  await s.run();
+  await mkdir(path.join(s.approved, 'cache'));
+  await writeFile(path.join(s.approved, 'cache', 'late.txt'), 'LATE-UNCERTIFIED\n');
+  const result = await s.tool('grep', { pattern: 'LATE', path: s.approved });
+  assert.equal(result?.block, true);
+  assert.match(result.reason, /excluded from its certificate/u);
+});
+
+test('R3: Pi path aliases (@ prefix, file:// URL) cannot reach an unverified Skill', async (t) => {
+  const s = await setup(t);
+  await s.run();
+  const target = path.join(s.unapproved, 'SKILL.md');
+  for (const alias of [`@${target}`, pathToFileURL(target).href]) {
+    const result = await s.tool('read', { path: alias });
+    assert.equal(result?.block, true, alias);
+  }
+});
+
+test('R3: read filename variants that Pi tries (NFD) cannot reach an unverified Skill', async (t) => {
+  const s = await setup(t);
+  const nfdDir = path.join(s.root, 'café-skill');
+  await mkdir(nfdDir);
+  await writeFile(path.join(nfdDir, 'SKILL.md'), '---\nname: cafe-skill\ndescription: x\n---\nNFD-BODY\n');
+  await s.run([s.approved, s.unapproved, nfdDir]);
+  const nfcPath = path.join(s.root, 'café-skill', 'SKILL.md');
+  const result = await s.tool('read', { path: nfcPath });
+  assert.equal(result?.block, true);
+});
+
+test('R4: after a refresh crash, the latch also blocks a Skill reached through its real path', async (t) => {
+  const s = await setup(t);
+  const aliasRoot = path.join(await tempDir(t), 'alias');
+  await symlink(s.root, aliasRoot);
+  s.ctx.hasUI = true;
+  s.ctx.ui.notify = () => { throw new Error('ui exploded'); };
+  // Pi reports the Skills through the symlinked alias; the request uses the real path.
+  await s.run([path.join(aliasRoot, 'approved-skill'), path.join(aliasRoot, 'unapproved-skill')]).catch(() => {});
+  const result = await s.tool('read', { path: path.join(s.unapproved, 'SKILL.md') });
+  assert.equal(result?.block, true);
+  assert.match(result.reason, /verification failed earlier/u);
 });

@@ -38,7 +38,7 @@ skills/
 
 On pull requests, `policy.json`, `trust-root.json` and `revocations.json` are read from the **base** revision. A pull request can add or update certificates (they are signed), but changes it makes to the trust documents take effect only after merge, so a pull request cannot add its own approver. Certificate directories and Skill directories are read from the pull request.
 
-Symlinked Skill directories and symlinked `SKILL.md` files are reported as `UNVERIFIABLE`, not skipped (Pi follows such links). Policy, trust and Skill directories must resolve inside their checkout.
+Symlinked Skill directories and symlinked `SKILL.md` files are reported as `UNVERIFIABLE`, not skipped (Pi follows such links). Discovery searches up to 16 directory levels below each `skill_dirs` entry and fails the check, rather than skipping, if anything is deeper. Policy, trust and Skill directories must resolve inside their checkout.
 
 The action writes a summary table to the job summary and an annotation on each failing Skill's `SKILL.md`. In `shadow` mode it reports but does not fail. CI keeps no state file; rollback protection comes from reading trust documents from the protected base revision.
 

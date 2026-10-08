@@ -152,7 +152,7 @@ export async function discoverCertificates(skillName: string, skillRoot: string,
  * Symbolic links are never skipped silently: hosts such as Pi follow them, so a linked Skill
  * directory or a linked SKILL.md is returned as a Skill, and verification then rejects it.
  */
-export async function findSkillDirs(roots: string[], maxDepth = 6): Promise<string[]> {
+export async function findSkillDirs(roots: string[], maxDepth = 16): Promise<string[]> {
   const found = new Set<string>();
   async function walk(directory: string, depth: number): Promise<void> {
     try {
@@ -162,7 +162,6 @@ export async function findSkillDirs(roots: string[], maxDepth = 6): Promise<stri
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
     }
-    if (depth >= maxDepth) return;
     let dir;
     try {
       dir = await opendir(directory);
@@ -181,6 +180,10 @@ export async function findSkillDirs(roots: string[], maxDepth = 6): Promise<stri
         continue;
       }
       if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') continue;
+      // Hosts such as Pi search without a depth limit, so never skip deeper directories silently.
+      if (depth + 1 > maxDepth) {
+        throw new Error(`Skill discovery depth limit (${maxDepth}) reached at ${childPath}; Skills below it would not be checked. Point skill_dirs closer to the Skills.`);
+      }
       await walk(childPath, depth + 1);
     }
   }
