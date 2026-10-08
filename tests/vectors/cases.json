@@ -1,0 +1,78 @@
+{
+  "root_fingerprint": "sha256:35b1c78471f2402dfab60838855ca49f0fae0089d5b5c615b92ed799b178647d",
+  "skill_name": "vector-skill",
+  "cases": [
+    {
+      "name": "verified",
+      "description": "Exact approved bytes, valid chain.",
+      "tree": "basic",
+      "certificate": "valid.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "VERIFIED"
+    },
+    {
+      "name": "text-only-change",
+      "description": "One sentence added; capabilities unchanged.",
+      "tree": "text-change",
+      "certificate": "valid.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "UNAPPROVED_CHANGE"
+    },
+    {
+      "name": "exec-bit-change",
+      "description": "Script made executable after approval.",
+      "tree": "exec-bit",
+      "certificate": "valid.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "UNAPPROVED_CHANGE"
+    },
+    {
+      "name": "expired",
+      "description": "Checked after the 90-day certificate expired.",
+      "tree": "basic",
+      "certificate": "valid.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-12-31T00:00:00Z",
+      "expected_verdict": "EXPIRED"
+    },
+    {
+      "name": "revoked-approver",
+      "description": "The approver key is on the revocation list.",
+      "tree": "basic",
+      "certificate": "valid.cert.json",
+      "revocations": "revocations-v2.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "REVOKED"
+    },
+    {
+      "name": "rogue-signer",
+      "description": "Signed by a key that is not in the trust root.",
+      "tree": "basic",
+      "certificate": "rogue.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "UNTRUSTED_SIGNER"
+    },
+    {
+      "name": "tampered-signature",
+      "description": "One signature bit flipped.",
+      "tree": "basic",
+      "certificate": "tampered.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "UNVERIFIABLE"
+    },
+    {
+      "name": "wrong-skill-name",
+      "description": "Certificate is for a different Skill name.",
+      "tree": "basic",
+      "certificate": "other-name.cert.json",
+      "revocations": "revocations-v1.json",
+      "now": "2026-10-01T12:00:00Z",
+      "expected_verdict": "NO_CERTIFICATE"
+    }
+  ]
+}
