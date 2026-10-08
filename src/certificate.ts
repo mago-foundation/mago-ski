@@ -3,7 +3,7 @@ import { envelopeBytes, parseEnvelope, signEnvelope } from './dsse.ts';
 import type { PrivateKeyInfo } from './keys.ts';
 import { validateDigest, validateSkillName } from './names.ts';
 import { formatTimestamp, parseTimestamp } from './time.ts';
-import { digestFileList, MAX_RELATIVE_PATH_BYTES, MAX_TREE_FILES, sha256Hex, TREE_PROFILE, type TreeFile } from './tree-digest.ts';
+import { digestFileList, MAX_RELATIVE_PATH_BYTES, MAX_TREE_FILES, sha256Hex, SKILL_FILENAME, TREE_PROFILE, type TreeFile } from './tree-digest.ts';
 
 export const STATEMENT_TYPE = 'https://in-toto.io/Statement/v1';
 export const STATEMENT_PAYLOAD_TYPE = 'application/vnd.in-toto+json';
@@ -38,6 +38,7 @@ export interface IssueOptions {
 
 export function issueCertificate(options: IssueOptions): Buffer {
   validateSkillName(options.skillName);
+  if (!options.files.some((file) => file.path === SKILL_FILENAME)) throw new Error(`Certificate file list must include ${SKILL_FILENAME}`);
   if (digestFileList(options.files) !== options.digest) throw new Error('File list does not match the tree digest');
   if (options.expiresAt <= options.issuedAt) throw new Error('Certificate must expire after it is issued');
   const statement = {
@@ -95,6 +96,7 @@ export function parseCertificate(bytes: Uint8Array): Certificate {
   const predicate = exactKeys(statement.predicate, ['tree_profile', 'files', 'approval', 'previous_digest'], `${label} predicate`);
   if (predicate.tree_profile !== TREE_PROFILE) throw new Error(`${label} uses unsupported tree profile ${String(predicate.tree_profile)}`);
   const files = parseFiles(predicate.files, `${label} files`);
+  if (!files.some((file) => file.path === SKILL_FILENAME)) throw new Error(`${label} file list does not include ${SKILL_FILENAME}`);
   if (digestFileList(files) !== digest) throw new Error(`${label} file list does not match its subject digest`);
   const approval = exactKeys(predicate.approval, ['approver_key_id', 'issued_at', 'expires_at', 'reason'], `${label} approval`);
   const approverKeyId = String(approval.approver_key_id);

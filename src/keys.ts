@@ -51,10 +51,27 @@ export function parseSpki(spki: unknown, label: string, expectedKeyId?: string):
   return info;
 }
 
+/** Private keys must never be written where a Skill (and so its certificate and hosts) could include them. */
+async function refuseInsideSkill(filePath: string): Promise<void> {
+  let directory = path.dirname(filePath);
+  while (true) {
+    try {
+      await lstat(path.join(directory, 'SKILL.md'));
+      throw new Error(`Refusing to write a private key inside a Skill directory (${directory}); keep keys outside every Skill tree`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT' && (error as NodeJS.ErrnoException)?.code !== 'ENOTDIR') throw error;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return;
+    directory = parent;
+  }
+}
+
 export async function generateKeyPair(privatePath: string, publicPath: string): Promise<PublicKeyInfo & { privatePath: string; publicPath: string }> {
   const privateTarget = path.resolve(privatePath);
   const publicTarget = path.resolve(publicPath);
   if (privateTarget === publicTarget) throw new Error('Private and public key paths must differ');
+  await refuseInsideSkill(privateTarget);
   const pair = generateKeyPairSync('ed25519');
   const privatePem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
   const publicPem = pair.publicKey.export({ type: 'spki', format: 'pem' });

@@ -7,6 +7,8 @@ import { canonicalBytes } from './canonical-json.ts';
 export const TREE_PROFILE = 'mago.skill-tree/v2';
 export const CERTIFICATE_FILENAME = '.mago-ski-cert.json';
 export const IGNORE_FILENAME = '.skilldigestignore';
+/** Always covered: it holds the instructions and the description hosts show the model. */
+export const SKILL_FILENAME = 'SKILL.md';
 export const MAX_TREE_FILES = 20_000;
 export const MAX_TREE_ENTRIES = 50_000;
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -134,7 +136,7 @@ export function parseIgnoreFile(text: string): IgnoreRule[] {
     if (
       pattern === '' || pattern.startsWith('/') || pattern.includes('\\') || /[*?[\]!]/u.test(pattern) ||
       segments.some((segment) => segment === '' || segment === '.' || segment === '..') ||
-      pattern === IGNORE_FILENAME || pattern.normalize('NFC') !== pattern
+      pattern === IGNORE_FILENAME || pattern === SKILL_FILENAME || pattern.normalize('NFC') !== pattern
     ) {
       fail(`${IGNORE_FILENAME} contains an unsupported pattern: ${JSON.stringify(line)} (use plain relative paths; globs are not supported)`);
     }
@@ -250,6 +252,7 @@ export async function collectSkillTree(rootPath: string, { includeContents = fal
     files.push({ path: record.path, size: content.length, sha256: sha256Hex(content), exec: isExecutable(stat.mode) });
     contents?.set(record.path, content);
   }
+  if (!files.some((file) => file.path === SKILL_FILENAME)) fail(`Skill tree must contain ${SKILL_FILENAME} at its root`);
   const tree: SkillTree & { contents?: Map<string, Buffer> } = {
     profile: TREE_PROFILE, digest: digestFileList(files), root, files, totalBytes, excluded,
   };

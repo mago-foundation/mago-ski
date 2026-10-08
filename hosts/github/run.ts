@@ -2,7 +2,7 @@
 // GitHub Action runner. Trust comes from the protected base revision (policy, trust root,
 // revocation list); Skills and certificates come from the pull request. A pull request can
 // therefore add certificates but cannot change who is trusted to issue them.
-import { appendFile } from 'node:fs/promises';
+import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInside } from '../../src/fs-safe.ts';
@@ -31,32 +31,51 @@ function within(root: string, target: string, label: string): string {
   return target;
 }
 
+/** Containment on resolved paths, so a symlink cannot point a policy path outside its checkout. */
+async function withinReal(root: string, target: string, label: string): Promise<string> {
+  within(root, target, label);
+  let resolved: string;
+  try {
+    resolved = await realpath(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return target;
+    throw error;
+  }
+  if (!isInside(await realpath(root), resolved)) throw new Error(`${label} must stay inside ${root} (it resolves to ${resolved})`);
+  return target;
+}
+
 /** Re-anchors a path from the policy checkout into the workspace checkout. */
-function toWorkspace(policyRoot: string, workspace: string, target: string, label: string): string {
-  return within(workspace, path.join(workspace, path.relative(policyRoot, within(policyRoot, target, label))), label);
+async function toWorkspace(policyRoot: string, workspace: string, target: string, label: string): Promise<string> {
+  const relative = path.relative(policyRoot, within(policyRoot, target, label));
+  return await withinReal(workspace, path.join(workspace, relative), label);
 }
 
 export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHubCheckResult> {
   const now = options.now ?? new Date();
   const policyRoot = path.resolve(options.policyRoot);
   const workspace = path.resolve(options.workspace);
-  const policyPath = within(policyRoot, path.resolve(policyRoot, options.policy), 'policy');
+  const policyPath = await withinReal(policyRoot, path.resolve(policyRoot, options.policy), 'policy');
   const base = await loadPolicy(policyPath);
-  within(policyRoot, base.trustRootPath, 'trust_root');
-  within(policyRoot, base.revocationsPath, 'revocations');
+  await withinReal(policyRoot, base.trustRootPath, 'trust_root');
+  await withinReal(policyRoot, base.revocationsPath, 'revocations');
+  const certificateDirs: string[] = [];
+  for (const dir of base.certificateDirs) certificateDirs.push(await toWorkspace(policyRoot, workspace, dir, 'certificate_dirs'));
+  const skillDirs: string[] = [];
+  for (const dir of base.skillDirs) skillDirs.push(await toWorkspace(policyRoot, workspace, dir, 'skill_dirs'));
   const policy: Policy = {
     ...base,
-    certificateDirs: base.certificateDirs.map((dir) => toWorkspace(policyRoot, workspace, dir, 'certificate_dirs')),
-    skillDirs: base.skillDirs.map((dir) => toWorkspace(policyRoot, workspace, dir, 'skill_dirs')),
+    certificateDirs,
+    skillDirs,
     // CI has no persistent host state; rollback protection comes from the protected base revision.
     statePath: null,
     decisionLogPath: null,
   };
   if (policy.skillDirs.length === 0) throw new Error('Policy has no skill_dirs; list the directories that hold Skills');
-  const skillDirs = await findSkillDirs(policy.skillDirs);
+  const found = await findSkillDirs(policy.skillDirs);
   const trust = await loadPolicyTrust(policy, now);
   const results: VerificationResult[] = [];
-  for (const skillDir of skillDirs) {
+  for (const skillDir of found) {
     results.push(trust.ok
       ? await verifyWithPolicy(policy, skillDir, { now, context: trust.context })
       : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict));

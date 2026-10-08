@@ -1,4 +1,4 @@
-import { appendFile, lstat, opendir } from 'node:fs/promises';
+import { appendFile, lstat, opendir, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
@@ -147,16 +147,18 @@ export async function discoverCertificates(skillName: string, skillRoot: string,
   return sources;
 }
 
-/** Finds Skill directories (directories containing SKILL.md) under the given roots. */
+/**
+ * Finds Skill directories (directories containing SKILL.md) under the given roots.
+ * Symbolic links are never skipped silently: hosts such as Pi follow them, so a linked Skill
+ * directory or a linked SKILL.md is returned as a Skill, and verification then rejects it.
+ */
 export async function findSkillDirs(roots: string[], maxDepth = 6): Promise<string[]> {
-  const found: string[] = [];
+  const found = new Set<string>();
   async function walk(directory: string, depth: number): Promise<void> {
     try {
-      const entry = await lstat(path.join(directory, 'SKILL.md'));
-      if (entry.isFile()) {
-        found.push(directory);
-        return;
-      }
+      await lstat(path.join(directory, 'SKILL.md'));
+      found.add(directory);
+      return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
     }
@@ -169,12 +171,21 @@ export async function findSkillDirs(roots: string[], maxDepth = 6): Promise<stri
       throw error;
     }
     for await (const child of dir) {
+      const childPath = path.join(directory, child.name);
+      if (child.isSymbolicLink()) {
+        try {
+          if ((await stat(childPath)).isDirectory()) found.add(childPath);
+        } catch {
+          // A dangling link has nothing a host could load.
+        }
+        continue;
+      }
       if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') continue;
-      await walk(path.join(directory, child.name), depth + 1);
+      await walk(childPath, depth + 1);
     }
   }
   for (const root of roots) await walk(path.resolve(root), 0);
-  return found.sort();
+  return [...found].sort();
 }
 
 export interface DecisionRecord {

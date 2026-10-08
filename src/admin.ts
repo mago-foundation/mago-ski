@@ -11,6 +11,7 @@ import { resolveSkillName } from './verify.ts';
 
 export const DEFAULT_TRUST_ROOT_EXPIRY = '365d';
 export const DEFAULT_REVOCATIONS_EXPIRY = '30d';
+const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/u;
 
 export async function initRoot(options: {
   rootKeyPath: string;
@@ -111,7 +112,12 @@ export async function approveSkill(options: {
   const approver = await loadPrivateKey(options.approverKeyPath);
   await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
   const skillName = await resolveSkillName(skillDir, options.name);
-  const tree = await collectSkillTree(skillDir);
+  const tree = await collectSkillTree(skillDir, { includeContents: true });
+  for (const [filePath, content] of tree.contents!) {
+    if (PRIVATE_KEY_PATTERN.test(content.toString('latin1'))) {
+      throw new Error(`Refusing to approve: ${filePath} contains a private key. Remove it from the Skill and rotate that key.`);
+    }
+  }
   let previousDigest: string | null = null;
   if (options.previous) {
     previousDigest = options.previous.startsWith('sha256:')

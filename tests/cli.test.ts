@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -100,7 +100,9 @@ test('digest prints the tree digest; --explain lists files and exclusions', asyn
 test('approve refuses an approver key stored inside the Skill directory', async (t) => {
   const dir = await tempDir(t);
   const skill = await writeSkill(dir, 'demo');
-  assert.equal(run(['keygen', '--private-key', path.join(skill, 'key.pem'), '--public-key', path.join(dir, 'key.pub')]).code, 0);
+  assert.equal(run(['keygen', '--private-key', path.join(dir, 'key.pem'), '--public-key', path.join(dir, 'key.pub')]).code, 0);
+  await copyFile(path.join(dir, 'key.pem'), path.join(skill, 'key.pem'));
+  await chmod(path.join(skill, 'key.pem'), 0o600);
   const result = run(['approve', skill, '--key', path.join(skill, 'key.pem'), '--expires', '1d', '--reason', 'x']);
   assert.equal(result.code, 2);
   assert.match(result.stderr, /must be outside/u);
