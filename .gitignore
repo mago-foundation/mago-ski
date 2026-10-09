@@ -1,4 +1,6 @@
 node_modules/
+dist/
 *.pem
 *.key
 .mago-ski-base/
+!tests/vectors/keys/*.pem

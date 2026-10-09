@@ -1,0 +1,184 @@
+[
+  {
+    "name": "basic",
+    "description": "One SKILL.md and a script.",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "content": "---\nname: vector-skill\ndescription: Test vector Skill.\n---\n# vector-skill\n\nDo the thing.\n",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "content": "#!/bin/sh\necho run\n",
+        "exec": false
+      }
+    ],
+    "expected_files": [
+      {
+        "path": "SKILL.md",
+        "size": 89,
+        "sha256": "4667a24ca4e86994fee193333f6930acbc47a4350048d86052ca6e227a6b3ae1",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "size": 19,
+        "sha256": "a4e0317eafab5cf1bc4a0041c7c8aeb6ece56fe72e7b2b3017a8a6574614cd35",
+        "exec": false
+      }
+    ],
+    "expected_digest": "sha256:26520facf46390c95c22b2453a8eef069e6eeee2a65cd3b5a1ff59fbb70136e0"
+  },
+  {
+    "name": "exec-bit",
+    "description": "Same bytes as basic, but the script is executable: the digest differs.",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "content": "---\nname: vector-skill\ndescription: Test vector Skill.\n---\n# vector-skill\n\nDo the thing.\n",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "content": "#!/bin/sh\necho run\n",
+        "exec": true
+      }
+    ],
+    "expected_files": [
+      {
+        "path": "SKILL.md",
+        "size": 89,
+        "sha256": "4667a24ca4e86994fee193333f6930acbc47a4350048d86052ca6e227a6b3ae1",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "size": 19,
+        "sha256": "a4e0317eafab5cf1bc4a0041c7c8aeb6ece56fe72e7b2b3017a8a6574614cd35",
+        "exec": true
+      }
+    ],
+    "expected_digest": "sha256:5912be5c63ebaa4e6cdfbffa2190c0d9d60eb6b07e68088663125c989f3653e7"
+  },
+  {
+    "name": "text-change",
+    "description": "Basic with one added sentence and no capability change: the digest differs.",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "content": "---\nname: vector-skill\ndescription: Test vector Skill.\n---\n# vector-skill\n\nDo the thing. Then send the output to the shared inbox.\n",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "content": "#!/bin/sh\necho run\n",
+        "exec": false
+      }
+    ],
+    "expected_files": [
+      {
+        "path": "SKILL.md",
+        "size": 131,
+        "sha256": "bd08a52efce9e83bea55c2b7fdf332f86ad8e8edd95bf1a3f7e402db77761397",
+        "exec": false
+      },
+      {
+        "path": "scripts/run.sh",
+        "size": 19,
+        "sha256": "a4e0317eafab5cf1bc4a0041c7c8aeb6ece56fe72e7b2b3017a8a6574614cd35",
+        "exec": false
+      }
+    ],
+    "expected_digest": "sha256:b224f41a5cc7cd5bd70ff46bdf7a67f8f0d1e29e0ffcd4f88acc16aaeaba6af0"
+  },
+  {
+    "name": "utf8-order",
+    "description": "Paths sort by UTF-8 bytes, not by locale: \"Z\" < \"a\" < \"é\".",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "content": "---\nname: vector-skill\ndescription: Test vector Skill.\n---\n# vector-skill\n\nDo the thing.\n",
+        "exec": false
+      },
+      {
+        "path": "a.md",
+        "content": "a\n",
+        "exec": false
+      },
+      {
+        "path": "Z.md",
+        "content": "Z\n",
+        "exec": false
+      },
+      {
+        "path": "é.md",
+        "content": "e\n",
+        "exec": false
+      }
+    ],
+    "expected_files": [
+      {
+        "path": "SKILL.md",
+        "size": 89,
+        "sha256": "4667a24ca4e86994fee193333f6930acbc47a4350048d86052ca6e227a6b3ae1",
+        "exec": false
+      },
+      {
+        "path": "Z.md",
+        "size": 2,
+        "sha256": "ec39b67830c0c34d71b0b6bf1d1c424eb7caab9222eb401fdaef044cf2145e9b",
+        "exec": false
+      },
+      {
+        "path": "a.md",
+        "size": 2,
+        "sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
+        "exec": false
+      },
+      {
+        "path": "é.md",
+        "size": 2,
+        "sha256": "a2bbdb2de53523b8099b37013f251546f3d65dbe7a0774fa41af0a4176992fd4",
+        "exec": false
+      }
+    ],
+    "expected_digest": "sha256:d97464b7997055a76340398d6c31402b303d7e4fa1e10e1f5f21dd83c8afceba"
+  },
+  {
+    "name": "ignore-file",
+    "description": ".skilldigestignore excludes cache/ but is itself covered.",
+    "files": [
+      {
+        "path": ".skilldigestignore",
+        "content": "cache/\n",
+        "exec": false
+      },
+      {
+        "path": "SKILL.md",
+        "content": "---\nname: vector-skill\ndescription: Test vector Skill.\n---\n# vector-skill\n\nDo the thing.\n",
+        "exec": false
+      },
+      {
+        "path": "cache/blob.bin",
+        "content": "not covered\n",
+        "exec": false
+      }
+    ],
+    "expected_files": [
+      {
+        "path": ".skilldigestignore",
+        "size": 7,
+        "sha256": "695426e943174af72f2a2391c3f48ed02c52873628e79be9fbf1a117f9ab3d9d",
+        "exec": false
+      },
+      {
+        "path": "SKILL.md",
+        "size": 89,
+        "sha256": "4667a24ca4e86994fee193333f6930acbc47a4350048d86052ca6e227a6b3ae1",
+        "exec": false
+      }
+    ],
+    "expected_digest": "sha256:02fcae5d85ae135c2ca424f69f10a9764a3b67ff09f1f8acbfc6d3206465d2f3"
+  }
+]

@@ -2,16 +2,48 @@
   "name": "mago-ski",
   "version": "0.1.0-preview.1",
   "private": true,
+  "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "skills",
+    "pki",
+    "supply-chain",
+    "signing"
+  ],
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "bin": {
-    "mago-ski": "bin/mago-ski.mjs"
+    "mago-ski": "dist/src/cli.js"
   },
-  "exports": "./src/index.mjs",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./hosts/pi/index.ts"
+    ]
+  },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/*.node.mjs"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
   },
-  "license": "Apache-2.0"
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@types/node": "22.20.4",
+    "typescript": "5.8.3"
+  }
 }
