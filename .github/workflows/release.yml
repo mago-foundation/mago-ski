@@ -1,10 +1,14 @@
 # Publishes mago-ski to npm when a version tag (v1.2.3) is pushed on main.
 #
 # One-time setup (outside this file):
-# - npmjs.com → mago-ski → Settings → Trusted publishing: add GitHub Actions publisher
-#   mago-foundation/mago-ski, workflow file release.yml, environment release.
-#   Publishing then uses short-lived OIDC credentials; no NPM_TOKEN secret exists anywhere.
 # - GitHub → Settings → Environments: create "release" with required reviewers (the release owner).
+# - First release only: npm lets you configure trusted publishing only for a package that already
+#   exists. For that release, store a short-lived npm granular access token (read and write,
+#   expiring in a day) as the secret NPM_TOKEN on the "release" environment (not a repository secret).
+# - After the first release: npmjs.com → mago-ski → Settings → Trusted publishing: add GitHub Actions
+#   publisher mago-foundation/mago-ski, workflow release.yml, environment release. Then delete the
+#   NPM_TOKEN secret and revoke the token. From then on npm uses short-lived OIDC credentials and no
+#   long-lived token exists anywhere. Provenance is attached either way (id-token: write).
 #
 # The tarball is built and checked once, in a job with no publish rights, and the reviewed
 # environment publishes exactly that file.
@@ -137,6 +141,10 @@ jobs:
             }' "$npm_version"
 
       - name: Publish to npm with provenance
+        # npm tries trusted publishing (OIDC) first. NPM_TOKEN is only for the first release, before
+        # trusted publishing can be configured; leave it unset afterwards.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish "release/${{ needs.build.outputs.tarball }}" --provenance --access public
 
   github-release:
