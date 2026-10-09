@@ -7,7 +7,7 @@ import { diffSkillTrees } from './diff.ts';
 import { readRegularFile } from './fs-safe.ts';
 import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
-  appendDecision, decisionRecord, DEFAULT_POLICY_PATH, findSkillDirs, loadPolicy, loadPolicyTrust, verifyWithPolicy,
+  appendDecision, decisionRecord, DEFAULT_POLICY_PATH, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy,
 } from './policy.ts';
 import { formatTimestamp } from './time.ts';
 import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
@@ -183,19 +183,23 @@ async function runVerifyAll(parsed: Parsed, now: Date): Promise<number> {
   allow(parsed, ['--policy'], 0);
   const policy = await loadPolicy(optional(parsed, '--policy') ?? DEFAULT_POLICY_PATH);
   if (policy.skillDirs.length === 0) throw new UsageError('Policy has no skill_dirs to scan');
-  const skillDirs = await findSkillDirs(policy.skillDirs);
+  const { skillDirs, tooDeep } = await findSkillDirs(policy.skillDirs);
   const trust = await loadPolicyTrust(policy, now);
   let failures = 0;
+  const results: VerificationResult[] = [];
   for (const skillDir of skillDirs) {
-    const result = trust.ok
+    results.push(trust.ok
       ? await verifyWithPolicy(policy, skillDir, { now, context: trust.context })
-      : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict);
+      : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict));
+  }
+  for (const directory of tooDeep) results.push(tooDeepResult(directory, now));
+  for (const result of results) {
     if (result.verdict !== 'VERIFIED') failures += 1;
     await appendDecision(policy.decisionLogPath, decisionRecord(result, policy.mode, 'cli-verify-all'));
     printResult(result, parsed.booleans.has('--json'));
   }
   if (!parsed.booleans.has('--json')) {
-    process.stdout.write(`${skillDirs.length - failures}/${skillDirs.length} Skills verified (mode: ${policy.mode})\n`);
+    process.stdout.write(`${results.length - failures}/${results.length} Skills verified (mode: ${policy.mode})\n`);
   }
   return failures === 0 ? 0 : 1;
 }

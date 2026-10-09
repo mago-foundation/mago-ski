@@ -152,8 +152,17 @@ export async function discoverCertificates(skillName: string, skillRoot: string,
  * Symbolic links are never skipped silently: hosts such as Pi follow them, so a linked Skill
  * directory or a linked SKILL.md is returned as a Skill, and verification then rejects it.
  */
-export async function findSkillDirs(roots: string[], maxDepth = 16): Promise<string[]> {
+export const MAX_DISCOVERY_DEPTH = 16;
+
+export interface SkillDiscovery {
+  skillDirs: string[];
+  /** Directories at the depth limit that have subdirectories; Skills below them were not searched. */
+  tooDeep: string[];
+}
+
+export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DEPTH): Promise<SkillDiscovery> {
   const found = new Set<string>();
+  const tooDeep = new Set<string>();
   async function walk(directory: string, depth: number): Promise<void> {
     try {
       await lstat(path.join(directory, 'SKILL.md'));
@@ -182,13 +191,20 @@ export async function findSkillDirs(roots: string[], maxDepth = 16): Promise<str
       if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') continue;
       // Hosts such as Pi search without a depth limit, so never skip deeper directories silently.
       if (depth + 1 > maxDepth) {
-        throw new Error(`Skill discovery depth limit (${maxDepth}) reached at ${childPath}; Skills below it would not be checked. Point skill_dirs closer to the Skills.`);
+        tooDeep.add(childPath);
+        continue;
       }
       await walk(childPath, depth + 1);
     }
   }
   for (const root of roots) await walk(path.resolve(root), 0);
-  return [...found].sort();
+  return { skillDirs: [...found].sort(), tooDeep: [...tooDeep].sort() };
+}
+
+/** Result for a directory discovery could not search; it fails in enforce mode and is reported in shadow mode. */
+export function tooDeepResult(directory: string, now: Date): VerificationResult {
+  return unverifiable(directory, path.basename(directory),
+    `directory is deeper than the discovery limit (${MAX_DISCOVERY_DEPTH} levels below skill_dirs); Skills below it were not checked. Point skill_dirs closer to the Skills`, now);
 }
 
 export interface DecisionRecord {

@@ -6,7 +6,7 @@ import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInside } from '../../src/fs-safe.ts';
-import { findSkillDirs, loadPolicy, loadPolicyTrust, verifyWithPolicy, type Policy } from '../../src/policy.ts';
+import { findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy, type Policy } from '../../src/policy.ts';
 import { unverifiable, type VerificationResult } from '../../src/verify.ts';
 
 export interface GitHubCheckOptions {
@@ -72,7 +72,7 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
     decisionLogPath: null,
   };
   if (policy.skillDirs.length === 0) throw new Error('Policy has no skill_dirs; list the directories that hold Skills');
-  const found = await findSkillDirs(policy.skillDirs);
+  const { skillDirs: found, tooDeep } = await findSkillDirs(policy.skillDirs);
   const trust = await loadPolicyTrust(policy, now);
   const results: VerificationResult[] = [];
   for (const skillDir of found) {
@@ -80,6 +80,7 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
       ? await verifyWithPolicy(policy, skillDir, { now, context: trust.context })
       : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict));
   }
+  for (const directory of tooDeep) results.push(tooDeepResult(directory, now));
   const failures = results.filter((result) => result.verdict !== 'VERIFIED');
   const rows = results.map((result) => {
     const relative = path.relative(workspace, result.skillDir) || '.';

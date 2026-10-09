@@ -82,9 +82,13 @@ function dirsOf(entry: Entry): string[] {
   return entry.lexDir === entry.realDir ? [entry.lexDir] : [entry.lexDir, entry.realDir];
 }
 
-/** Excluded paths that a tool could expose; the in-tree certificate is signed public data. */
+/**
+ * Excluded paths that a tool could expose. The in-tree certificate is safe only when it is the
+ * certificate that verified this Skill; otherwise its bytes are unchecked and may hold anything.
+ */
 function riskyExclusions(entry: Entry): string[] {
-  return entry.result.excluded.filter((item) => item !== CERTIFICATE_FILENAME);
+  const verifiedInTree = entry.result.certificateSource === path.join(entry.realDir, CERTIFICATE_FILENAME);
+  return entry.result.excluded.filter((item) => !(item === CERTIFICATE_FILENAME && verifiedInTree));
 }
 
 export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {

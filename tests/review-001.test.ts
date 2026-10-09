@@ -109,10 +109,27 @@ test('F7: keygen refuses to write a key inside a Skill directory tree', async (t
   assert.match(result.stderr, /inside a Skill directory/u);
 });
 
-test('R1: Skills deeper than the discovery limit fail the check instead of being skipped', async (t) => {
+test('R1: a directory deeper than the discovery limit fails the check in enforce mode', async (t) => {
   const { base, pr } = await actionRepo(t);
   let deep = path.join(pr, 'skills');
   for (let level = 0; level < 20; level += 1) deep = path.join(deep, `d${level}`);
   await writeSkill(deep, 'deep-skill');
-  await assert.rejects(runGitHubCheck({ policyRoot: base, workspace: pr, policy: '.mago-ski/policy.json', now: T0 }), /depth limit/u);
+  const result = await runGitHubCheck({ policyRoot: base, workspace: pr, policy: '.mago-ski/policy.json', now: T0 });
+  assert.equal(result.exitCode, 1);
+  const overflow = result.results.find((entry) => /discovery limit/u.test(entry.reason));
+  assert.equal(overflow?.verdict, 'UNVERIFIABLE');
+});
+
+test('003-L: in shadow mode a too-deep directory is reported, not a hard failure', async (t) => {
+  const { base, pr } = await actionRepo(t);
+  const policyPath = path.join(base, '.mago-ski', 'policy.json');
+  const policy = JSON.parse(await readFile(policyPath, 'utf8'));
+  policy.mode = 'shadow';
+  await writeFile(policyPath, JSON.stringify(policy));
+  let deep = path.join(pr, 'skills');
+  for (let level = 0; level < 20; level += 1) deep = path.join(deep, `d${level}`);
+  await mkdir(deep, { recursive: true });
+  const result = await runGitHubCheck({ policyRoot: base, workspace: pr, policy: '.mago-ski/policy.json', now: T0 });
+  assert.equal(result.exitCode, 0);
+  assert.ok(result.results.some((entry) => /discovery limit/u.test(entry.reason)));
 });
