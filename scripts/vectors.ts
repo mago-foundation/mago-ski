@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalBytes } from '../src/canonical-json.ts';
 import { issueCertificate } from '../src/certificate.ts';
 import { keyIdFromSpkiDer, type PrivateKeyInfo } from '../src/keys.ts';
+import { isMainModule } from '../src/main-module.ts';
 import { signRevocations } from '../src/revocations.ts';
 import { digestFileList, sha256Hex, TREE_PROFILE, type TreeFile } from '../src/tree-digest.ts';
 import { signTrustRoot } from '../src/trust-root.ts';
@@ -155,7 +156,7 @@ async function main(): Promise<void> {
   process.stdout.write(`wrote ${VECTOR_DIR}\n`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((error: unknown) => {
     process.stderr.write(`${(error as Error).message}\n`);
     process.exitCode = 1;

@@ -37,6 +37,17 @@ bash examples/demo.sh
 
 One test needs the official, checksum-pinned Cosign v3.1.3 binary and is skipped without it: set `MAGO_COSIGN_BIN` to run it.
 
+### Testing the installed package
+
+`npm test` runs the sources. Before a release, also check what npm will ship, through the installed command (npm installs it as a symlink in `node_modules/.bin`):
+
+```bash
+npm run build && npm pack --pack-destination /tmp
+cd "$(mktemp -d)" && npm init -y && npm install --ignore-scripts /tmp/mago-ski-*.tgz
+npx --no-install mago-ski --help
+MAGO_SKI="npx --no-install mago-ski" bash /path/to/mago-ski/examples/demo.sh
+```
+
 ## Project layout
 
 ```

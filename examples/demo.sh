@@ -4,7 +4,12 @@
 #   node --test tests/pi-host.test.ts
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mago() { node "$repo/src/cli.ts" "$@"; }
+# Runs the repo sources by default. To test an installed package instead: MAGO_SKI="npx --no-install mago-ski" bash demo.sh
+if [[ -n "${MAGO_SKI:-}" ]]; then
+  mago() { $MAGO_SKI "$@"; }
+else
+  mago() { node "$repo/src/cli.ts" "$@"; }
+fi
 step() { printf '\n== %s\n' "$*"; }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[process.argv[1]]))' "$1"; }
 
