@@ -1,14 +1,15 @@
-# Publishes mago-ski to npm when a version tag (v1.2.3) is pushed on main.
+# Publishes @mago-foundation/mago-ski to npm when a version tag (v1.2.3) is pushed on main.
 #
 # One-time setup (outside this file):
 # - GitHub → Settings → Environments: create "release" with required reviewers (the release owner).
-# - First release only: npm lets you configure trusted publishing only for a package that already
-#   exists. For that release, store a short-lived npm granular access token (read and write,
-#   expiring in a day) as the secret NPM_TOKEN on the "release" environment (not a repository secret).
-# - After the first release: npmjs.com → mago-ski → Settings → Trusted publishing: add GitHub Actions
-#   publisher mago-foundation/mago-ski, workflow release.yml, environment release. Then delete the
-#   NPM_TOKEN secret and revoke the token. From then on npm uses short-lived OIDC credentials and no
-#   long-lived token exists anywhere. Provenance is attached either way (id-token: write).
+# - npm only allows trusted publishing for a package that already exists. Create it once from a
+#   maintainer's machine with a placeholder version (npm publish --access public --tag bootstrap),
+#   then deprecate the placeholder after the first real release.
+# - npmjs.com → @mago-foundation/mago-ski → Settings → Trusted publishing: add GitHub Actions
+#   publisher mago-foundation/mago-ski, workflow release.yml, environment release. npm then uses
+#   short-lived OIDC credentials and no long-lived token exists anywhere.
+# - NPM_TOKEN (an environment secret) is supported only as a fallback; npm is restricting tokens
+#   that bypass 2FA for publishing, so prefer trusted publishing and leave it unset.
 #
 # The tarball is built and checked once, in a job with no publish rights, and the reviewed
 # environment publishes exactly that file.
@@ -31,6 +32,7 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  PACKAGE_NAME: '@mago-foundation/mago-ski'
 
 concurrency:
   group: release
@@ -86,6 +88,11 @@ jobs:
           fi
           if ! git merge-base --is-ancestor "$commit" origin/main; then
             echo "::error::Tag $tag points to a commit that is not on main"
+            exit 1
+          fi
+          name="$(node -p 'require("./package.json").name')"
+          if [[ "$name" != "$PACKAGE_NAME" ]]; then
+            echo "::error::package.json name is $name, expected $PACKAGE_NAME"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -175,8 +182,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [[ -z "${NODE_AUTH_TOKEN:-}" ]] && ! npm view mago-ski version > /dev/null 2>&1; then
-            echo "::error::mago-ski is not on npm yet, so trusted publishing cannot be used. For the first release, add a short-lived npm token as the secret NPM_TOKEN on the 'release' environment (Settings → Environments → release), not as a repository secret."
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]] && ! npm view "$PACKAGE_NAME" version > /dev/null 2>&1; then
+            echo "::error::$PACKAGE_NAME is not on npm yet, so trusted publishing cannot be set up for it. Publish a placeholder version from a maintainer's machine first (see the comment at the top of release.yml), configure trusted publishing, then re-run this workflow."
             exit 1
           fi
 
@@ -208,7 +215,7 @@ jobs:
           SHA256: ${{ needs.build.outputs.sha256 }}
         run: |
           set -euo pipefail
-          notes="Published to npm with provenance: https://www.npmjs.com/package/mago-ski/v/${TAG#v}
+          notes="Published to npm with provenance: https://www.npmjs.com/package/$PACKAGE_NAME/v/${TAG#v}
 
           Tarball: \`$TARBALL\`
           SHA-256: \`$SHA256\`

@@ -29,7 +29,8 @@ Host (Pi, CI)       pins the root fingerprint and checks that a certificate chai
 Requires Node.js 22 or newer, on Linux or macOS. No runtime dependencies.
 
 ```bash
-npm install -g mago-ski        # or run it without installing: npx mago-ski --help
+npm install -g @mago-foundation/mago-ski   # installs the mago-ski command
+# or without installing: npx @mago-foundation/mago-ski --help
 mago-ski --help                # every command; "mago-ski <command> --help" for its options
 ```
 

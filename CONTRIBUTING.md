@@ -43,7 +43,7 @@ One test needs the official, checksum-pinned Cosign v3.1.3 binary and is skipped
 
 ```bash
 npm run build && npm pack --pack-destination /tmp
-cd "$(mktemp -d)" && npm init -y && npm install --ignore-scripts /tmp/mago-ski-*.tgz
+cd "$(mktemp -d)" && npm init -y && npm install --ignore-scripts /tmp/mago-foundation-mago-ski-*.tgz
 npx --no-install mago-ski --help
 MAGO_SKI="npx --no-install mago-ski" bash /path/to/mago-ski/examples/demo.sh
 ```

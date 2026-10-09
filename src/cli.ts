@@ -159,7 +159,7 @@ function readVersion(): string {
   for (const candidate of ['../package.json', '../../package.json']) {
     try {
       const pkg = JSON.parse(readFileSync(fileURLToPath(new URL(candidate, import.meta.url)), 'utf8')) as { name?: string; version?: string };
-      if (pkg.name === 'mago-ski' && pkg.version) return pkg.version;
+      if ((pkg.name === '@mago-foundation/mago-ski' || pkg.name === 'mago-ski') && pkg.version) return pkg.version;
     } catch {
       // try the next location (source tree vs. built dist/)
     }
