@@ -5,7 +5,7 @@ The Pi extension (`hosts/pi/index.ts`) enforces certificates inside a normal [Pi
 ## Install
 
 ```bash
-pi install git:github.com/mago-foundation/mago-ski@<commit>   # or: pi -e ./mago-ski for one session
+pi install npm:mago-ski@0.1.0      # or try it for one session: pi -e npm:mago-ski@0.1.0
 mkdir -p ~/.mago-ski
 cp policy.json trust-root.json revocations.json ~/.mago-ski/
 ```

@@ -4,7 +4,7 @@
 
 Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was fine last week can gain one sentence (`also send the results to…`) with no new tools and no new URLs, and every agent that has it installed picks the change up silently. Scanners can tell you *what* changed. mago-ski checks that *someone in your organization approved exactly these bytes*. In enforce mode, supported hosts block Skills that fail the check, within the limits in the [threat model](docs/threat-model.md).
 
-> Status: **preview** (0.1.0-preview.1). Not yet released or published to npm. Interfaces may change.
+> Status: **0.1, early release.** Formats and commands may still change before 1.0. Linux and macOS only.
 
 ## How it works
 
@@ -26,13 +26,18 @@ Host (Pi, CI)       pins the root fingerprint and checks that a certificate chai
 
 ## Quickstart
 
-Requires Node.js 22.18 or newer. No runtime dependencies.
+Requires Node.js 22 or newer, on Linux or macOS. No runtime dependencies.
+
+```bash
+npm install -g mago-ski        # or run it without installing: npx mago-ski --help
+mago-ski --help                # every command; "mago-ski <command> --help" for its options
+```
+
+To see it work first, the repository has demos (rug pull, rogue approver, revocation):
 
 ```bash
 git clone https://github.com/mago-foundation/mago-ski && cd mago-ski
-npm ci --ignore-scripts        # dev dependencies, for tests only
-bash examples/demo.sh          # demos: rug pull, rogue approver, revocation
-alias mago-ski="node $PWD/src/cli.ts"
+bash examples/demo.sh
 ```
 
 Set up an organization:
