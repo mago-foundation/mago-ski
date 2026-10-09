@@ -327,6 +327,9 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     }
 
     pi.on('session_start', async (_event, ctx) => {
+      if (process.platform === 'win32' && ctx.hasUI) {
+        ctx.ui.notify('mago-ski: Windows is not supported in 0.1. Executable bits are not covered, so Skills approved on Linux or macOS may not verify.', 'warning');
+      }
       await ensurePolicy(ctx);
     });
 

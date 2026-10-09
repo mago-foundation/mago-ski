@@ -16,6 +16,10 @@
   "engines": {
     "node": ">=22.18"
   },
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "bin": {
     "mago-ski": "dist/src/cli.js"
   },

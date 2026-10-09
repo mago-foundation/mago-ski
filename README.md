@@ -71,6 +71,10 @@ mago-ski verify skills/docs-helper        # FAIL UNAPPROVED_CHANGE  docs-helper 
 mago-ski verify-all                       # every Skill under skill_dirs
 ```
 
+## Platforms
+
+mago-ski 0.1 supports **Linux and macOS** (Node.js 22.18 or newer). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
+
 ## Where it runs
 
 | Host | What it does | Docs |

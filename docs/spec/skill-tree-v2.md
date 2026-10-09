@@ -55,5 +55,5 @@ Because the digest is computed from the record list, anyone holding a certificat
 
 ## Known limitations
 
-- On Windows the executable bit is always `false`, so a Skill approved on Linux or macOS with an executable script will not verify on Windows.
+- On Windows the executable bit is always `false`, so a Skill approved on Linux or macOS with an executable script will not verify on Windows. mago-ski 0.1 does not support Windows for this reason.
 - Some file systems report every file as executable (for example WSL's DrvFs mounts of Windows drives). Digest Skills on a native Linux or macOS file system.

@@ -20,7 +20,7 @@ jobs:
           policy: .mago-ski/policy.json
 ```
 
-Pin the action to a full commit SHA: the verifier runs from the action's own checkout, so the pin decides which verifier code runs.
+Use a Linux or macOS runner; the action stops on Windows runners (not supported in 0.1). Pin the action to a full commit SHA: the verifier runs from the action's own checkout, so the pin decides which verifier code runs.
 
 ## Repository layout
 

@@ -30,7 +30,7 @@ mago-ski answers one question: **is the Skill this agent is about to use the exa
 - **A compromised host.** Root or same-user malware can change files, the policy, the state file or the extension itself. This includes racing directory replacement between path resolution and reading; the digest re-checks file identity, but a same-user attacker controls the file system.
 - **A compromised root key.** Everything chains to it. Keep it offline. Root key rotation is designed but not implemented in v1.
 - **Files excluded from the digest** (`.skilldigestignore`, root `.git`) are not approved. The Pi host refuses to read them from a verified Skill, but other tools may still use them.
-- **Windows executable bits.** Not covered on Windows (no POSIX modes); see the [digest spec](spec/skill-tree-v2.md).
+- **Windows.** Not supported in 0.1. Windows has no POSIX executable bit, so it cannot reproduce Linux and macOS digests; see the [digest spec](spec/skill-tree-v2.md).
 
 ## Revocation timing
 

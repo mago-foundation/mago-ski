@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'node:test';
@@ -12,7 +12,8 @@ export function daysAfter(base: Date, days: number): Date {
 }
 
 export async function tempDir(t: TestContext, prefix = 'mago-ski-test-'): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  // Resolved, because macOS temp dirs sit under /var, a symlink to /private/var.
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
   t.after(async () => await rm(directory, { recursive: true, force: true }));
   return directory;
 }
