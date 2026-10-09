@@ -25,7 +25,7 @@ Start in `"mode": "shadow"` to see what would be blocked (the decision log recor
 | `bash`, `powershell` | Refused when the command names an unverified Skill's directory; verified Skills it names are re-verified first. Best-effort (see the [threat model](../threat-model.md)) | Logged |
 | Verification error | A Skill that cannot be checked is `UNVERIFIABLE`. If checking crashes outright, no Skills are advertised and file and shell tools touching any Skill path are blocked for that run | Logged |
 
-Each change of verdict is written to the policy's `decision_log` with the event, verdict and reason, and shown as a notification.
+When a verdict changes, it is written to the policy's `decision_log` (if configured and writable) with the event, verdict and reason. Verdicts other than `VERIFIED` are also shown as a notification when Pi has a UI.
 
 ## Limits
 

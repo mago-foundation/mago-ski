@@ -1,8 +1,8 @@
 # mago-ski
 
-**Skills PKI: make sure the agent only loads the exact Skill versions your organization approved.**
+**Skills PKI: approve exact Skill versions, and enforce those approvals on supported agent hosts.**
 
-Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was fine last week can gain one sentence (`also send the results to…`) with no new tools and no new URLs, and every agent that has it installed picks the change up silently. Scanners can tell you *what* changed. mago-ski makes sure *someone in your organization approved exactly these bytes*, and refuses to load anything else.
+Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was fine last week can gain one sentence (`also send the results to…`) with no new tools and no new URLs, and every agent that has it installed picks the change up silently. Scanners can tell you *what* changed. mago-ski checks that *someone in your organization approved exactly these bytes*. In enforce mode, supported hosts block Skills that fail the check, within the limits in the [threat model](docs/threat-model.md).
 
 > Status: **preview** (0.1.0-preview.1). Not yet released or published to npm. Interfaces may change.
 
@@ -12,14 +12,15 @@ Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was
 Root key (offline)  ──signs──▶  trust-root.json    who may approve which Skills, until when
                     ──signs──▶  revocations.json   revoked approver keys and Skill versions
 Approver key        ──signs──▶  certificate        "I approved Skill X at digest D until T"
-Host (Pi, CI)       pins the root fingerprint and loads a Skill only if a certificate
-                    chains to it, matches the bytes on disk, and is not revoked or expired
+Host (Pi, CI)       pins the root fingerprint and checks that a certificate chains to it,
+                    matches the bytes on disk, and is not revoked or expired; enforce mode
+                    blocks Skills that fail
 ```
 
-- **Approval binds an exact digest.** Every byte and the executable bit are covered. A one-sentence change needs a new certificate, even if no capability changed.
+- **Approval binds an exact digest.** Every byte of every covered file is included, plus its executable bit on Linux and macOS; files excluded from the digest are not approved. A one-sentence change needs a new certificate, even if no capability changed.
 - **Hosts trust the root, not individual keys.** Approvers are delegated by the root, limited to Skill-name scopes, and expire.
 - **Revocation reaches every certificate at once.** Revoke a key and every certificate it signed stops verifying as soon as a host has the updated revocation list; revoke a digest to pull one version. Lists expire (30 days by default), which bounds how long a host can keep using an old one.
-- **The model never holds a credential.** The host verifies; the model only sees the Skills that passed.
+- **The model never holds a credential.** The host verifies; in Pi enforce mode, only Skills that passed are advertised to the model.
 - **No maliciousness judgment.** A certificate records who approved what. It does not certify that a Skill is safe.
 - **Shadow mode first.** Log what would be blocked before you enforce.
 
@@ -74,18 +75,18 @@ mago-ski verify-all                       # every Skill under skill_dirs
 
 | Host | What it does | Docs |
 |---|---|---|
-| **Pi** | Extension: unverified Skills are not advertised to the model, `/skill:` cannot load them, file tools refuse their files, and verified files are re-hashed on read | [docs/hosts/pi.md](docs/hosts/pi.md) |
-| **GitHub Actions** | Fails a pull request whose Skills lack a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
+| **Pi** | Extension, in enforce mode: unverified Skills are not advertised to the model, `/skill:` cannot load them, file tools refuse their files, and verified files are re-hashed on read | [docs/hosts/pi.md](docs/hosts/pi.md) |
+| **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
 | **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect`, plus key, root, revoke and approve commands. Run `mago-ski --help` | |
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
 
 ## Verdicts
 
-`VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks in enforce mode and is logged as `would-block` in shadow mode. See [docs/spec/verification.md](docs/spec/verification.md).
+`VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead). See [docs/spec/verification.md](docs/spec/verification.md).
 
 ## Works alongside scanners
 
-Capability scanners such as SkilLock report what a Skill change does at pull-request time. mago-ski covers what happens after: only the version someone approved runs on the host, including Skills installed outside any pull request. `mago-ski diff` gives a basic per-file and per-section diff with network-origin changes, and always reports that a changed digest needs a new certificate.
+Capability scanners such as SkilLock report what a Skill change does at pull-request time. mago-ski covers what happens after: Pi enforce mode checks approvals even for Skills installed outside any pull request, within the documented host and tool limits. `mago-ski diff` gives a basic per-file and per-section diff with network-origin changes, and always reports that a changed digest needs a new certificate.
 
 ## Documentation
 

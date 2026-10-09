@@ -22,7 +22,7 @@ An organization's trust is anchored in one **root key**, kept offline. Hosts pin
 }
 ```
 
-- `version`: positive integer, increased on every change. Hosts reject a version lower than one they have already seen.
+- `version`: positive integer, increased on every change. Hosts with a configured state file reject versions lower than those recorded there.
 - `root.public_key` must hash to `root.key_id`, which must equal the pinned fingerprint and the envelope's `keyid`.
 - `approvers`: sorted by `key_id`, unique, at most 256. The root key may not also be an approver.
 - `scopes`: sorted, unique, 1–64 per approver. `*` matches every Skill name; `prefix*` matches names starting with `prefix`; anything else matches one exact name.
@@ -99,5 +99,5 @@ One JSON object per line:
 
 ## Key rotation
 
-- **Approver keys:** add the new key (`root add-approver`), re-approve the Skills, then remove the old key (`root remove-approver`). Certificates from a removed approver stop verifying immediately; revoke the old key instead if it may be compromised.
+- **Approver keys:** add the new key (`root add-approver`), re-approve the Skills, then remove the old key (`root remove-approver`). Certificates from a removed approver stop verifying once a host reads the updated trust root; revoke the old key instead if it may be compromised.
 - **Root key:** not implemented in v1. Planned design: the new root's first trust root is also signed by the old root, and hosts that pin the old fingerprint accept the new one only through that cross-signed document. Until then, replacing the root means distributing a new fingerprint to every host.

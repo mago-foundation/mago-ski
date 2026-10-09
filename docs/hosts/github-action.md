@@ -1,6 +1,6 @@
 # GitHub Action
 
-Fails a pull request when a Skill in the repository is not covered by a valid certificate for its exact bytes.
+In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` is not covered by a valid certificate for its exact bytes.
 
 ```yaml
 # .github/workflows/skills.yml

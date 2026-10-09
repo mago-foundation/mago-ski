@@ -1,8 +1,8 @@
 name: mago-ski verify
 
 description: >-
-  Verifies that every Skill in the repository carries a certificate from an
-  approver your organization's root trusts, for its exact current bytes.
+  Verifies Skills found under the policy's skill_dirs against certificates
+  from approvers your organization's root trusts, for their exact current bytes.
   On pull requests, the policy, trust root and revocation list are read from
   the protected base revision, so a pull request cannot change who is trusted.
 

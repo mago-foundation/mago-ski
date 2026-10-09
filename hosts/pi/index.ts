@@ -5,8 +5,8 @@
 //
 // Enforce mode: unverified Skills are not advertised to the model, `/skill:name` cannot load them,
 // and the structured file tools refuse their files. Shell tools (bash, powershell) are checked
-// best-effort by matching Skill paths in the command text. Shadow mode allows everything and logs
-// what enforce mode would have blocked.
+// best-effort by matching Skill paths in the command text. Shadow mode allows everything and, when a
+// decision log is configured, records what enforce mode would have blocked.
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { realpath } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';

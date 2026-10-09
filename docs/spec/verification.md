@@ -14,7 +14,7 @@ Status: draft, implemented by mago-ski 0.1 (`src/verify.ts`). Verdict test vecto
 | `EXPIRED` | The certificate, the approver key, the trust root or the revocation list has expired | Renew the expired item |
 | `UNVERIFIABLE` | Something could not be checked: malformed or tampered documents, a trust root not signed by the pinned key, rollback, unreadable Skill files | Fix the input; treat as blocked |
 
-Every verdict except `VERIFIED` blocks in enforce mode and is logged as `would-block` in shadow mode.
+Every verdict except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead).
 
 ## Order of checks
 
