@@ -26,6 +26,14 @@ export interface GitHubCheckResult {
   summary: string;
 }
 
+/** Names and paths come from the pull request; keep them inert inside a Markdown table cell. */
+export function markdownCell(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, ' ')
+    .replace(/[\\`*_[\]<>|#!~(){}]/gu, (char) => `\\${char}`)
+    .slice(0, 500);
+}
+
 function within(root: string, target: string, label: string): string {
   if (!isInside(root, target)) throw new Error(`${label} must stay inside ${root}`);
   return target;
@@ -84,7 +92,7 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   const failures = results.filter((result) => result.verdict !== 'VERIFIED');
   const rows = results.map((result) => {
     const relative = path.relative(workspace, result.skillDir) || '.';
-    return `| ${result.verdict === 'VERIFIED' ? 'pass' : 'fail'} | \`${result.skillName}\` | \`${relative}\` | ${result.verdict} | ${result.reason.replace(/\|/gu, '\\|')} |`;
+    return `| ${result.verdict === 'VERIFIED' ? 'pass' : 'fail'} | ${markdownCell(result.skillName)} | ${markdownCell(relative)} | ${result.verdict} | ${markdownCell(result.reason)} |`;
   });
   const summary = [
     `### mago-ski: ${results.length - failures.length}/${results.length} Skills verified (${policy.mode} mode)`,

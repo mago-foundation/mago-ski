@@ -133,3 +133,19 @@ test('003-L: in shadow mode a too-deep directory is reported, not a hard failure
   assert.equal(result.exitCode, 0);
   assert.ok(result.results.some((entry) => /discovery limit/u.test(entry.reason)));
 });
+
+test('004-L: PR-controlled directory names cannot inject Markdown into the Action summary', async (t) => {
+  const { base, pr } = await actionRepo(t);
+  let deep = path.join(pr, 'skills');
+  for (let level = 0; level < 16; level += 1) deep = path.join(deep, `d${level}`);
+  // The hostile directory sits one level past the limit, so it is the one reported.
+  const hostile = 'x|`y`\n## Forged row | pass |';
+  await mkdir(path.join(deep, hostile), { recursive: true });
+  const result = await runGitHubCheck({ policyRoot: base, workspace: pr, policy: '.mago-ski/policy.json', now: T0 });
+  const lines = result.summary.split('\n');
+  assert.ok(!lines.some((line) => line.startsWith('## Forged')), 'no injected heading line');
+  const row = lines.find((line) => line.includes('Forged'));
+  assert.ok(row);
+  assert.equal(row.split(/(?<!\\)\|/u).length, 7, 'row keeps exactly five cells');
+  assert.doesNotMatch(row, /(?<!\\)`/u);
+});
