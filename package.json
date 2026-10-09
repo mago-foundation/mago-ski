@@ -1,8 +1,16 @@
 {
   "name": "mago-ski",
-  "version": "0.1.0-preview.1",
-  "private": true,
+  "version": "0.1.0",
+  "author": "The Mago Foundation",
   "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mago-foundation/mago-ski.git"
+  },
+  "homepage": "https://magofoundation.dev",
+  "bugs": {
+    "url": "https://github.com/mago-foundation/mago-ski/issues"
+  },
   "keywords": [
     "pi-package",
     "agent-skills",
@@ -14,7 +22,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.0.0"
   },
   "os": [
     "linux",
@@ -31,19 +39,38 @@
   },
   "pi": {
     "extensions": [
-      "./hosts/pi/index.ts"
+      "./dist/hosts/pi/index.js"
     ]
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check && npm run build"
   },
+  "files": [
+    "dist",
+    "action.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "docs/spec",
+    "docs/hosts/",
+    "docs/threat-model.md"
+  ],
   "devDependencies": {
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-coding-agent": "1.1.0",
     "@types/node": "22.20.4",
     "typescript": "5.8.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }
