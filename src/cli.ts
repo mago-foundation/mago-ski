@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addApprover, approveSkill, initRoot, removeApprover, updateRevocations } from './admin.ts';
@@ -9,6 +10,7 @@ import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
   appendDecision, decisionRecord, DEFAULT_POLICY_PATH, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy,
 } from './policy.ts';
+import { isMainModule } from './main-module.ts';
 import { formatTimestamp } from './time.ts';
 import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
 import { verifyTrustRoot } from './trust-root.ts';
@@ -38,8 +40,132 @@ Checking Skills (uses .mago-ski/policy.json unless --policy is given):
 
 Verdicts: VERIFIED, UNAPPROVED_CHANGE, NO_CERTIFICATE, UNTRUSTED_SIGNER, REVOKED, EXPIRED, UNVERIFIABLE.
 Exit codes: 0 success or VERIFIED; 1 any other verdict or a required re-certification; 2 usage or input error.
+Run "mago-ski <command> --help" for a command's options, and "mago-ski --version" for the version.
 
 A certificate records who approved an exact Skill version. It does not certify that the Skill is safe.`;
+
+const DURATION_NOTE = 'Durations are a number plus d, h or m, for example 90d, 12h or 30m.';
+
+/** Per-command help: `mago-ski <command> --help`. Keys are "command" or "command subcommand". */
+const COMMAND_HELP: Record<string, string> = {
+  keygen: `Usage: mago-ski keygen --private-key FILE --public-key FILE
+
+Creates an Ed25519 key pair for a root key or an approver key.
+
+  --private-key FILE   where to write the private key (created with mode 600; must not exist yet)
+  --public-key FILE    where to write the public key
+
+Keep private keys secret and outside every Skill directory; keygen refuses to write inside one.
+Prints the key id (sha256:...), which identifies the key in trust roots and revocations.`,
+  root: `Usage: mago-ski root <init | add-approver | remove-approver | show> [options]
+
+Manages the organization's signed trust root (who may approve which Skills).
+Run "mago-ski root <subcommand> --help" for details.`,
+  'root init': `Usage: mago-ski root init --root-key FILE --trust-root OUT --revocations OUT [options]
+
+Creates version 1 of the signed trust root (no approvers yet) and an empty signed revocation list.
+
+  --root-key FILE              the root private key (keep it offline)
+  --trust-root OUT             where to write trust-root.json (must not exist yet)
+  --revocations OUT            where to write revocations.json (must not exist yet)
+  --trust-root-expires DUR     trust root lifetime (default 365d)
+  --revocations-expires DUR    revocation list lifetime (default 30d; republish before it expires)
+
+Prints root_fingerprint: put it in every host policy as "root_fingerprint".
+${DURATION_NOTE}`,
+  'root add-approver': `Usage: mago-ski root add-approver --root-key FILE --trust-root FILE --public-key FILE --name LABEL --scope PATTERN [--scope ...] --expires DUR [options]
+
+Adds (or replaces) an approver and re-signs the trust root with the next version.
+
+  --root-key FILE              the root private key
+  --trust-root FILE            the current trust root (updated in place unless --out is given)
+  --public-key FILE            the approver's public key
+  --name LABEL                 a readable name, shown in verdicts
+  --scope PATTERN              Skill names this approver may approve; repeat for several.
+                               "*" = every Skill, "docs-*" = names starting with docs-, otherwise an exact name
+  --expires DUR                how long the approver key stays valid
+  --out FILE                   write the new trust root here instead
+  --trust-root-expires DUR     also set a new trust root lifetime
+${DURATION_NOTE}`,
+  'root remove-approver': `Usage: mago-ski root remove-approver --root-key FILE --trust-root FILE --key-id ID [--out FILE] [--trust-root-expires DUR]
+
+Removes an approver and re-signs the trust root. Certificates from that approver stop verifying once hosts read
+the new trust root. If the key may be compromised, also revoke it with "mago-ski revoke key".`,
+  'root show': `Usage: mago-ski root show --trust-root FILE --root-fingerprint ID
+
+Verifies a trust root against the pinned root fingerprint and prints its version, expiry and approvers.`,
+  revoke: `Usage: mago-ski revoke <key | digest | refresh> [options]
+
+Updates the organization's signed revocation list. Run "mago-ski revoke <subcommand> --help" for details.`,
+  'revoke key': `Usage: mago-ski revoke key --root-key FILE --revocations FILE --key-id ID --reason TEXT [--expires DUR] [--out FILE]
+
+Revokes an approver key: every certificate it signed stops verifying once hosts read the new list.
+
+  --key-id ID       the approver's key id (sha256:...)
+  --reason TEXT     shown in verdicts
+  --expires DUR     lifetime of the new list (default 30d)
+${DURATION_NOTE}`,
+  'revoke digest': `Usage: mago-ski revoke digest --root-key FILE --revocations FILE --digest sha256:... --reason TEXT [--expires DUR] [--out FILE]
+
+Revokes one approved Skill version (its tree digest), whoever signed it.
+${DURATION_NOTE}`,
+  'revoke refresh': `Usage: mago-ski revoke refresh --root-key FILE --revocations FILE [--expires DUR] [--out FILE]
+
+Re-signs the revocation list with the next version and a new expiry, without changing its entries.
+Hosts refuse an expired list, so refresh it before it expires (default lifetime 30d).`,
+  approve: `Usage: mago-ski approve SKILL_DIR --key FILE --expires DUR --reason TEXT [options]
+
+Issues a certificate for the exact current bytes of a Skill, signed with your approver key.
+
+  --key FILE           your approver private key (must be outside the Skill directory)
+  --expires DUR        how long the approval is valid
+  --reason TEXT        what you reviewed; stored in the certificate
+  --name NAME          Skill name (default: "name" in SKILL.md, else the directory name)
+  --previous CERT|DIG  the previously approved certificate or digest, for the update history
+  --out FILE           where to write the certificate (default: SKILL_DIR/.mago-ski-cert.json)
+
+Refuses a Skill that contains a private key. A certificate records who approved which exact version;
+it does not certify that the Skill is safe.
+${DURATION_NOTE}`,
+  verify: `Usage: mago-ski verify SKILL_DIR [--policy FILE] [--name NAME] [--certificate FILE] [--json]
+
+Checks one Skill against the policy's trust root and revocation list, and prints its verdict.
+
+  --policy FILE        policy file (default: .mago-ski/policy.json)
+  --name NAME          Skill name to check (default: "name" in SKILL.md, else the directory name)
+  --certificate FILE   also try this certificate
+  --json               print the result as JSON
+
+Exit code 0 when VERIFIED, 1 for any other verdict, 2 for usage or input errors.`,
+  'verify-all': `Usage: mago-ski verify-all [--policy FILE] [--json]
+
+Checks every Skill found under the policy's skill_dirs and prints one line per Skill and a summary.
+Exits 1 if any Skill is not VERIFIED, in shadow mode too (shadow mode affects hosts, not this exit code).`,
+  digest: `Usage: mago-ski digest SKILL_DIR [--explain]
+
+Prints the Skill's tree digest (sha256:...). --explain also lists every covered file, its hash and
+executable bit, and the paths excluded from the digest.`,
+  diff: `Usage: mago-ski diff --base DIR --candidate DIR
+
+Compares two versions of a Skill: changed files and Markdown sections, executable-bit changes, and added
+or removed network origins. Exits 1 when the digest changed, since that always needs a new certificate.`,
+  inspect: `Usage: mago-ski inspect CERTIFICATE
+
+Prints a certificate's Skill, digest, approver, dates and reason. Checks structure only; use
+"mago-ski verify" to check its signature against your trust root.`,
+};
+
+function readVersion(): string {
+  for (const candidate of ['../package.json', '../../package.json']) {
+    try {
+      const pkg = JSON.parse(readFileSync(fileURLToPath(new URL(candidate, import.meta.url)), 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === 'mago-ski' && pkg.version) return pkg.version;
+    } catch {
+      // try the next location (source tree vs. built dist/)
+    }
+  }
+  return 'unknown';
+}
 
 class UsageError extends Error {}
 
@@ -205,11 +331,24 @@ async function runVerifyAll(parsed: Parsed, now: Date): Promise<number> {
 }
 
 export async function runCli(argv: string[] = process.argv.slice(2), now: Date = new Date()): Promise<number> {
+  if (argv[0] === '--version' || argv[0] === '-V' || argv[0] === 'version') {
+    process.stdout.write(`mago-ski ${readVersion()}\n`);
+    return 0;
+  }
+  // "mago-ski help verify" is the same as "mago-ski verify --help".
+  if (argv[0] === 'help' && argv.length > 1) argv = [...argv.slice(1), '--help'];
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h' || argv[0] === 'help') {
     process.stdout.write(`${usage}\n`);
     return 0;
   }
   const [command, maybeSub] = argv;
+  if (argv.slice(1).some((arg) => arg === '--help' || arg === '-h')) {
+    const sub = maybeSub && !maybeSub.startsWith('-') ? `${command} ${maybeSub}` : undefined;
+    const text = (sub && COMMAND_HELP[sub]) ?? COMMAND_HELP[command!];
+    if (!text) throw new UsageError(`Unknown command: ${command}`);
+    process.stdout.write(`${text}\n`);
+    return 0;
+  }
   const hasSub = command === 'root' || command === 'revoke';
   const parsed = parseArgs(argv.slice(hasSub ? 2 : 1));
   switch (command) {
@@ -273,8 +412,7 @@ export async function runCli(argv: string[] = process.argv.slice(2), now: Date =
   }
 }
 
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   runCli().then((code) => {
     process.exitCode = code;
   }, (error: unknown) => {

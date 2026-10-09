@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -106,4 +106,33 @@ test('approve refuses an approver key stored inside the Skill directory', async 
   const result = run(['approve', skill, '--key', path.join(skill, 'key.pem'), '--expires', '1d', '--reason', 'x']);
   assert.equal(result.code, 2);
   assert.match(result.stderr, /must be outside/u);
+});
+
+test('the CLI runs when invoked through a symlink, as npm installs it in node_modules/.bin', async (t) => {
+  const dir = await tempDir(t);
+  const link = path.join(dir, 'mago-ski');
+  await symlink(cli, link);
+  const result = spawnSync(process.execPath, [link, '--help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^mago-ski: organization-approved Skill certificates/u);
+});
+
+test('every command has its own --help, and "help <command>" works too', () => {
+  for (const args of [
+    ['keygen'], ['root'], ['root', 'init'], ['root', 'add-approver'], ['root', 'remove-approver'], ['root', 'show'],
+    ['revoke'], ['revoke', 'key'], ['revoke', 'digest'], ['revoke', 'refresh'], ['approve'], ['verify'],
+    ['verify-all'], ['digest'], ['diff'], ['inspect'],
+  ]) {
+    const result = run([...args, '--help']);
+    assert.equal(result.code, 0, `${args.join(' ')}: ${result.stderr}`);
+    assert.match(result.stdout, new RegExp(`^Usage: mago-ski ${args.join(' ')}`, 'u'), args.join(' '));
+  }
+  assert.match(run(['help', 'verify']).stdout, /^Usage: mago-ski verify /u);
+  assert.match(run(['approve', '-h']).stdout, /^Usage: mago-ski approve /u);
+  assert.equal(run(['nope', '--help']).code, 2);
+});
+
+test('--version prints the package version', async () => {
+  const pkg = JSON.parse(await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
+  assert.equal(run(['--version']).stdout.trim(), `mago-ski ${pkg.version}`);
 });

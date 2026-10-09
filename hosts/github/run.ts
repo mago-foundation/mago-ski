@@ -4,8 +4,8 @@
 // therefore add certificates but cannot change who is trusted to issue them.
 import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { isInside } from '../../src/fs-safe.ts';
+import { isMainModule } from '../../src/main-module.ts';
 import { findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy, type Policy } from '../../src/policy.ts';
 import { unverifiable, type VerificationResult } from '../../src/verify.ts';
 
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
   process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((error: unknown) => {
     process.stdout.write(`::error title=mago-ski::${escapeAnnotation((error as Error).message)}\n`);
     process.exitCode = 2;
