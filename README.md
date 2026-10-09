@@ -104,6 +104,9 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 - Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md)
 - [Test vectors](tests/vectors/) for other implementations
 - [Pi interception spike](docs/phase1/pi-interception.md)
+- [Security policy](SECURITY.md): how to report a vulnerability
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Development
 
