@@ -1,28 +1,5 @@
 # Publishes @mago-foundation/mago-ski to npm when a version tag (v1.2.3) is pushed on main.
-#
-# One-time setup (outside this file; the checks below run inside this YAML, so they cannot stop
-# someone who can push a branch with a modified copy of it. These settings are what do):
-# - GitHub → Settings → Environments: create "release" with required reviewers (the release owner)
-#   AND deployment branches and tags limited to "Selected branches and tags" with only the tag
-#   rule v* (no branch rules, not even main). Then no branch run can enter the environment.
-# - npm only allows trusted publishing for a package that already exists. Create it once from a
-#   maintainer's machine with a placeholder version (npm publish --access public --tag bootstrap),
-#   then deprecate the placeholder after the first real release.
-# - npmjs.com → @mago-foundation/mago-ski → Settings → Trusted publishing: add GitHub Actions
-#   publisher mago-foundation/mago-ski, workflow release.yml, environment release. npm then uses
-#   short-lived OIDC credentials and no long-lived token exists anywhere.
-# - Delete the NPM_TOKEN secret (repository and environment) if it still exists. This workflow
-#   never reads it: publishing is only through trusted publishing (OIDC), with provenance.
-# - Protect the v* tags (Settings → Rules → Rulesets) so only the release owner can create them:
-#   a tag run uses the copy of this file at the tagged commit.
-#
-# There is deliberately no manual (workflow_dispatch) trigger: a manual run can select any branch
-# and would execute that branch's copy of this file. To re-run a release (for example after a
-# transient failure), use "Re-run jobs" on the tag's workflow run. Fixing the workflow itself
-# needs a new version tag.
-#
-# The tarball is built and checked once, in a job with no publish rights, and the reviewed
-# environment publishes exactly that file.
+
 name: release
 
 on:
