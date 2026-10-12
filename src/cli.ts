@@ -8,7 +8,7 @@ import { diffSkillTrees } from './diff.ts';
 import { readRegularFile } from './fs-safe.ts';
 import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
-  appendDecision, decisionRecord, DEFAULT_POLICY_PATH, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy,
+  appendDecision, decisionRecord, defaultPolicyPath, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy,
 } from './policy.ts';
 import { isMainModule } from './main-module.ts';
 import { formatTimestamp } from './time.ts';
@@ -31,7 +31,7 @@ Keys and trust (run by the organization's root key holder):
 Approving Skills (run by a reviewer with an approver key):
   mago-ski approve SKILL_DIR --key FILE --expires 90d --reason TEXT [--name NAME] [--previous CERT|DIGEST] [--out FILE]
 
-Checking Skills (uses .mago-ski/policy.json unless --policy is given):
+Checking Skills (policy: --policy FILE, else $MAGO_SKI_POLICY, else ~/.mago-ski/policy.json; never read from the current directory):
   mago-ski verify SKILL_DIR [--policy FILE] [--name NAME] [--certificate FILE] [--json]
   mago-ski verify-all [--policy FILE] [--json]
   mago-ski digest SKILL_DIR [--explain]
@@ -131,7 +131,8 @@ ${DURATION_NOTE}`,
 
 Checks one Skill against the policy's trust root and revocation list, and prints its verdict.
 
-  --policy FILE        policy file (default: .mago-ski/policy.json)
+  --policy FILE        policy file (default: $MAGO_SKI_POLICY, which must be absolute, else ~/.mago-ski/policy.json;
+                       never a file in the current directory, which the code under review may control)
   --name NAME          Skill name to check (default: "name" in SKILL.md, else the directory name)
   --certificate FILE   also try this certificate
   --json               print the result as JSON
@@ -292,9 +293,28 @@ async function runRevoke(sub: string | undefined, parsed: Parsed, now: Date): Pr
   return 0;
 }
 
+/** Loads the policy named by --policy, else the host default. The checkout being verified never chooses its own root. */
+async function loadCliPolicy(parsed: Parsed) {
+  const explicit = optional(parsed, '--policy');
+  let policyPath: string;
+  try {
+    policyPath = explicit ?? defaultPolicyPath();
+  } catch (error) {
+    throw new UsageError((error as Error).message);
+  }
+  try {
+    return await loadPolicy(policyPath);
+  } catch (error) {
+    if (!explicit && (error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new UsageError(`No policy at ${policyPath}. Pass --policy FILE, or set MAGO_SKI_POLICY to an absolute path`);
+    }
+    throw error;
+  }
+}
+
 async function runVerify(parsed: Parsed, now: Date): Promise<number> {
   allow(parsed, ['--policy', '--name', '--certificate'], 1);
-  const policy = await loadPolicy(optional(parsed, '--policy') ?? DEFAULT_POLICY_PATH);
+  const policy = await loadCliPolicy(parsed);
   const skillDir = parsed.positional[0]!;
   const result = await verifyWithPolicy(policy, skillDir, {
     now, ...(optional(parsed, '--name') ? { skillName: one(parsed, '--name') } : {}),
@@ -307,7 +327,7 @@ async function runVerify(parsed: Parsed, now: Date): Promise<number> {
 
 async function runVerifyAll(parsed: Parsed, now: Date): Promise<number> {
   allow(parsed, ['--policy'], 0);
-  const policy = await loadPolicy(optional(parsed, '--policy') ?? DEFAULT_POLICY_PATH);
+  const policy = await loadCliPolicy(parsed);
   if (policy.skillDirs.length === 0) throw new UsageError('Policy has no skill_dirs to scan');
   const { skillDirs, tooDeep } = await findSkillDirs(policy.skillDirs);
   const trust = await loadPolicyTrust(policy, now);

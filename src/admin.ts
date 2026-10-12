@@ -11,7 +11,25 @@ import { resolveSkillName } from './verify.ts';
 
 export const DEFAULT_TRUST_ROOT_EXPIRY = '365d';
 export const DEFAULT_REVOCATIONS_EXPIRY = '30d';
-const PRIVATE_KEY_PATTERN = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/u;
+/**
+ * Private-key encodings `approve` refuses to certify (a certified file can reach the model through Pi):
+ * PEM/OpenSSH/PKCS#8/SSH2 armor ("BEGIN [RSA |EC |DSA |ENCRYPTED |OPENSSH |...]PRIVATE KEY"), OpenPGP armor
+ * ("BEGIN PGP PRIVATE KEY BLOCK"), PuTTY .ppk files, and age secret keys. Public keys and PGP PUBLIC KEY
+ * BLOCKs do not match. This is a best-effort guard, not a secret scanner.
+ */
+// Every quantifier is bounded, so scanning is linear in the input (no backtracking blow-up on long runs of
+// dashes, spaces or "BEGIN "). Three dashes are enough to anchor the header; "---- BEGIN SSH2 ..." contains them.
+const PRIVATE_KEY_PATTERNS: RegExp[] = [
+  /-{3}\s{0,4}BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY/iu,
+  /PuTTY-User-Key-File-\d{1,4}:/u,
+  /AGE-SECRET-KEY-1[0-9A-Z]{20,200}/iu,
+];
+
+/** True if the bytes contain recognizable private-key material. */
+export function containsPrivateKey(content: Uint8Array): boolean {
+  const text = Buffer.from(content).toString('latin1');
+  return PRIVATE_KEY_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 export async function initRoot(options: {
   rootKeyPath: string;
@@ -114,7 +132,7 @@ export async function approveSkill(options: {
   const skillName = await resolveSkillName(skillDir, options.name);
   const tree = await collectSkillTree(skillDir, { includeContents: true });
   for (const [filePath, content] of tree.contents!) {
-    if (PRIVATE_KEY_PATTERN.test(content.toString('latin1'))) {
+    if (containsPrivateKey(content)) {
       throw new Error(`Refusing to approve: ${filePath} contains a private key. Remove it from the Skill and rotate that key.`);
     }
   }

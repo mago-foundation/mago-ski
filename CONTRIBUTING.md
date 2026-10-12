@@ -4,7 +4,7 @@ Thanks for helping. mago-ski is security tooling: it decides whether an agent ho
 
 ## Reporting security issues
 
-**Do not open a public issue for a vulnerability.** Report it privately through GitHub's private vulnerability reporting (the repository's **Security** tab → **Report a vulnerability**). Examples: any input that makes the verifier return `VERIFIED` when it should not, a way for a pull request to change who is trusted in the GitHub Action, a way for an unverified Skill to reach the model in Pi enforce mode, or exposure of key material. Limits already listed in [docs/threat-model.md](docs/threat-model.md) are known and are not vulnerabilities on their own.
+**Do not open a public issue for a vulnerability.** Report it privately as described in [SECURITY.md](SECURITY.md) (the repository's **Security** tab → **Report a vulnerability**). Examples: any input that makes the verifier return `VERIFIED` when it should not, a way for a pull request to change who is trusted in the GitHub Action, a way for an unverified Skill to reach the model in Pi enforce mode, or exposure of key material. Limits already listed in [docs/threat-model.md](docs/threat-model.md) are known and are not vulnerabilities on their own.
 
 ## Requirements
 
