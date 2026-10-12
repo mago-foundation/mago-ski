@@ -2,7 +2,7 @@ import { lstat, opendir, stat } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
-import { appendToRegularFile, readRegularFile, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
+import { appendToRegularFile, isInside, readRegularFile, realpathAllowingMissing, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
 import { validateKeyId } from './keys.ts';
 import { CERTIFICATE_FILENAME } from './tree-digest.ts';
 import {
@@ -14,13 +14,14 @@ export const POLICY_VERSION = 'mago.policy/v1';
 export const STATE_TYPE = 'mago.host-state/v1';
 
 /**
- * Where hosts and the CLI read policy when none is given: $MAGO_SKI_POLICY (absolute), else ~/.mago-ski/policy.json.
+ * Where hosts and the CLI read policy when none is given: $MAGO_SKI_POLICY (absolute, or "~/..."), else ~/.mago-ski/policy.json.
  * Never a path in the current directory, because the project being checked may be controlled by the code under review.
  */
 export function defaultPolicyPath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
   const configured = env.MAGO_SKI_POLICY;
   if (!configured) return path.join(home, '.mago-ski', 'policy.json');
-  if (!path.isAbsolute(configured)) throw new Error(`MAGO_SKI_POLICY must be an absolute path; got "${configured}"`);
+  if (configured === '~' || configured.startsWith('~/')) return path.join(home, configured.slice(2));
+  if (!path.isAbsolute(configured)) throw new Error(`MAGO_SKI_POLICY must be an absolute path (or start with "~/"); got "${configured}"`);
   return configured;
 }
 const MAX_CERTIFICATE_BYTES = 8 * 1024 * 1024;
@@ -66,7 +67,7 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
   const writablePath = async (item: unknown, label: string) =>
     item === undefined || item === null ? null : await resolveInsideDirectory(base, requireString(item, `Policy ${label}`, 4096), `Policy ${label}`);
   const optionalList = (item: unknown, label: string) => item === undefined ? [] : requireArray(item, `Policy ${label}`, 256).map((entry, index) => resolvePath(entry, `${label}[${index}]`));
-  return {
+  const policy: Policy = {
     path: absolute,
     mode: value.mode,
     rootKeyId: validateKeyId(value.root_fingerprint, 'Policy root_fingerprint'),
@@ -77,6 +78,37 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
     statePath: await writablePath(value.state_file, 'state_file'),
     decisionLogPath: await writablePath(value.decision_log, 'decision_log'),
   };
+  await rejectWriteTargetsThatOverlapInputs(policy);
+  return policy;
+}
+
+/** A path with symlinks resolved where possible; falls back to the lexical path (the read itself will fail later). */
+async function canonicalOrLexical(target: string): Promise<string> {
+  try {
+    return await realpathAllowingMissing(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+/** decision_log and state_file are overwritten or appended to, so they must not be a file the policy reads. */
+async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void> {
+  const inputs: Array<[string, string]> = [
+    ['the policy file', policy.path], ['trust_root', policy.trustRootPath], ['revocations', policy.revocationsPath],
+  ];
+  const directories = await Promise.all(policy.certificateDirs.map(canonicalOrLexical));
+  const targets: Array<[string, string | null]> = [['state_file', policy.statePath], ['decision_log', policy.decisionLogPath]];
+  const seen: Array<[string, string]> = [];
+  for (const [label, target] of targets) {
+    if (!target) continue;
+    const canonical = await canonicalOrLexical(target);
+    for (const [name, input] of inputs) {
+      if (canonical === await canonicalOrLexical(input)) throw new Error(`Policy ${label} must not be ${name}`);
+    }
+    if (directories.some((directory) => isInside(directory, canonical))) throw new Error(`Policy ${label} must not be inside a certificate_dirs directory`);
+    for (const [other, otherPath] of seen) if (canonical === otherPath) throw new Error(`Policy ${label} must not be the same file as ${other}`);
+    seen.push([label, canonical]);
+  }
 }
 
 interface RootState {
@@ -299,8 +331,8 @@ export function actionFor(mode: Mode, verified: boolean): DecisionRecord['action
 export async function appendDecision(logPath: string | null, record: DecisionRecord): Promise<void> {
   if (!logPath) return;
   // One JSON object per line. JSON.stringify escapes newlines and control characters; also escape the Unicode
-  // line separators some JSON Lines readers split on. The text is data, not shell syntax: never source a log.
-  const line = JSON.stringify(record).replace(/[\u0085\u2028\u2029]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  // line separators some JSON Lines readers split on, plus C1 controls, DEL and bidi controls. The text is data, not shell syntax: never source a log.
+  const line = JSON.stringify(record).replace(/[\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
   await appendToRegularFile(logPath, `${line}\n`, 'Decision log');
 }
 

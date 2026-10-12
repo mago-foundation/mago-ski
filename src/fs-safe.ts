@@ -103,7 +103,7 @@ export async function writeFileAtomic(filePath: string, bytes: Uint8Array, mode 
 }
 
 /** Canonical path of `target`, resolving symlinks on the longest existing prefix. A dangling link on the way is an error. */
-async function realpathAllowingMissing(target: string): Promise<string> {
+export async function realpathAllowingMissing(target: string): Promise<string> {
   let current = path.resolve(target);
   const rest: string[] = [];
   while (true) {

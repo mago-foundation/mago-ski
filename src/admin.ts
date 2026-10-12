@@ -17,8 +17,10 @@ export const DEFAULT_REVOCATIONS_EXPIRY = '30d';
  * ("BEGIN PGP PRIVATE KEY BLOCK"), PuTTY .ppk files, and age secret keys. Public keys and PGP PUBLIC KEY
  * BLOCKs do not match. This is a best-effort guard, not a secret scanner.
  */
+// Every quantifier is bounded, so scanning is linear in the input (no backtracking blow-up on long runs of
+// dashes, spaces or "BEGIN "). Three dashes are enough to anchor the header; "---- BEGIN SSH2 ..." contains them.
 const PRIVATE_KEY_PATTERNS: RegExp[] = [
-  /-{3,}\s*BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?\s*-{3,}/iu,
+  /-{3}\s{0,4}BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY/iu,
   /PuTTY-User-Key-File-\d+:/u,
   /AGE-SECRET-KEY-1[0-9A-Z]{20,}/iu,
 ];

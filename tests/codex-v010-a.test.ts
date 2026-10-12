@@ -232,3 +232,71 @@ for (const [label, content] of Object.entries(NOT_PRIVATE)) {
     await approve(org, skill);
   });
 }
+
+// ---- Review follow-ups ----
+
+test('F4: the private-key scan is linear on adversarial input (no ReDoS)', () => {
+  const MB = 1024 * 1024;
+  const inputs = {
+    dashes: '-'.repeat(MB),
+    'BEGIN repeated': 'BEGIN '.repeat(MB / 6),
+    'dashes then BEGIN repeated': `---${'BEGIN '.repeat(MB / 6)}`,
+    'dash/space runs': '--- '.repeat(MB / 4),
+    'BEGIN then spaces': `--- BEGIN ${' '.repeat(MB)}`,
+    'age prefix repeated': 'AGE-SECRET-KEY-1'.repeat(MB / 16),
+    'PuTTY prefix repeated': 'PuTTY-User-Key-File-'.repeat(MB / 20),
+  };
+  for (const [label, text] of Object.entries(inputs)) {
+    const started = performance.now();
+    containsPrivateKey(Buffer.from(text, 'latin1'));
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `${label} took ${Math.round(elapsed)} ms`);
+  }
+  // Still found inside large input.
+  assert.equal(containsPrivateKey(Buffer.from(`${'-'.repeat(MB)} BEGIN RSA PRIVATE KEY-----`)), true);
+});
+
+test('F2: decision_log and state_file cannot name a file the policy reads or each other', async (t) => {
+  const org = await setupOrg(t);
+  const policyDir = path.dirname(org.policyPath);
+  await mkdir(path.join(policyDir, 'certs', 'nested'), { recursive: true });
+  await symlink(org.policyPath, path.join(policyDir, 'alias.json'));
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    ['policy file', { decision_log: 'policy.json' }, /must not be the policy file/u],
+    ['policy file (state)', { state_file: 'policy.json' }, /must not be the policy file/u],
+    ['trust root', { decision_log: 'trust-root.json' }, /must not be trust_root/u],
+    ['revocations', { state_file: 'revocations.json' }, /must not be revocations/u],
+    ['same file', { decision_log: 'shared.json', state_file: 'shared.json' }, /same file as state_file/u],
+    ['certificate dir', { decision_log: 'certs/log.jsonl' }, /certificate_dirs/u],
+    ['nested certificate dir', { state_file: 'certs/nested/state.json' }, /certificate_dirs/u],
+    ['dot-dot spelling', { decision_log: 'certs/../policy.json' }, /must not be the policy file/u],
+    ['symlink spelling', { decision_log: 'alias.json' }, /regular|policy file/u],
+  ];
+  for (const [label, changes, message] of cases) {
+    await rewritePolicy(org, { state_file: 'state.json', decision_log: 'decisions.jsonl', ...changes });
+    await assert.rejects(loadPolicy(org.policyPath), message, label);
+  }
+  // The untouched defaults still load.
+  await rewritePolicy(org, { state_file: 'state.json', decision_log: 'decisions.jsonl' });
+  await loadPolicy(org.policyPath);
+  assert.equal((await readFile(org.policyPath, 'utf8')).includes('policy_version'), true);
+});
+
+test('F2: C1 controls, DEL and bidi controls are escaped in decision-log JSON', async (t) => {
+  const log = path.join(await tempDir(t), 'decisions.jsonl');
+  const hostile = 'a\u007fb\u0080c\u009fd‪e‮f⁦g⁩h‏i';
+  await appendDecision(log, decisionRecord(unverifiable('/s', hostile, 'r', T0), 'shadow', 'test', 'h'));
+  const text = await readFile(log, 'utf8');
+  assert.doesNotMatch(text, /[\u007f-\u009f‪-‮⁦-⁩]/u);
+  for (const escape of ['\\u007f', '\\u0080', '\\u009f', '\\u202a', '\\u202e', '\\u2066', '\\u2069']) assert.ok(text.includes(escape), escape);
+  assert.equal(JSON.parse(text.trimEnd()).skill, hostile);
+  assert.equal(text.trimEnd().split('\n').length, 1);
+});
+
+test('F5: MAGO_SKI_POLICY may start with ~/ ; other relative values are still rejected', () => {
+  assert.equal(defaultPolicyPath({ MAGO_SKI_POLICY: '~/org/policy.json' }, '/home/u'), path.join('/home/u', 'org', 'policy.json'));
+  assert.equal(defaultPolicyPath({ MAGO_SKI_POLICY: '~' }, '/home/u'), '/home/u');
+  for (const value of ['org/policy.json', './policy.json', '~user/policy.json', '~policy.json']) {
+    assert.throws(() => defaultPolicyPath({ MAGO_SKI_POLICY: value }, '/home/u'), /absolute/u, value);
+  }
+});
