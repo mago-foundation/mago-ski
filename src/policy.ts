@@ -14,6 +14,9 @@ export const POLICY_VERSION = 'mago.policy/v1';
 export const STATE_TYPE = 'mago.host-state/v1';
 export const DEFAULT_POLICY_PATH = path.join('.mago-ski', 'policy.json');
 const MAX_CERTIFICATE_BYTES = 8 * 1024 * 1024;
+/** Per-Skill budget across all certificate candidates (explicit file, policy directories, in-Skill file). */
+export const MAX_CERTIFICATE_CANDIDATES = 64;
+export const MAX_CERTIFICATE_TOTAL_BYTES = 32 * 1024 * 1024;
 
 export type Mode = 'shadow' | 'enforce';
 
@@ -129,21 +132,46 @@ async function readOptional(filePath: string, label: string): Promise<Buffer | u
   }
 }
 
-/** Certificate lookup order: explicit file, policy certificate directories (<name>.cert.json), then the in-Skill certificate. */
-export async function discoverCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): Promise<CertificateSource[]> {
-  const sources: CertificateSource[] = [];
+/**
+ * Certificate lookup order: explicit file, policy certificate directories (<name>.cert.json), then the in-Skill certificate.
+ * Candidates are read lazily, one at a time, so a caller that stops early never reads the rest and none are retained here.
+ * Candidates come from the checkout under review, so a Skill may have at most MAX_CERTIFICATE_CANDIDATES candidate files
+ * totalling MAX_CERTIFICATE_TOTAL_BYTES; going over throws (the Skill is UNVERIFIABLE) instead of reading further.
+ */
+export async function* iterateCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): AsyncGenerator<CertificateSource> {
+  let count = 0;
+  let totalBytes = 0;
+  const seen = new Set<string>();
+  const account = (source: string, bytes: Buffer): CertificateSource => {
+    count += 1;
+    totalBytes += bytes.length;
+    if (count > MAX_CERTIFICATE_CANDIDATES) throw new Error(`more than ${MAX_CERTIFICATE_CANDIDATES} certificate candidates for this Skill; reduce certificate_dirs or remove stray certificates`);
+    if (totalBytes > MAX_CERTIFICATE_TOTAL_BYTES) throw new Error(`certificate candidates for this Skill exceed ${MAX_CERTIFICATE_TOTAL_BYTES} bytes in total`);
+    return { source, bytes };
+  };
   if (explicit) {
-    const bytes = await readRegularFile(path.resolve(explicit), 'Certificate', MAX_CERTIFICATE_BYTES);
-    sources.push({ source: path.resolve(explicit), bytes });
+    const candidate = path.resolve(explicit);
+    seen.add(candidate);
+    yield account(candidate, await readRegularFile(candidate, 'Certificate', MAX_CERTIFICATE_BYTES));
   }
   for (const directory of certificateDirs) {
     const candidate = path.join(directory, `${skillName}.cert.json`);
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     const bytes = await readOptional(candidate, 'Certificate');
-    if (bytes) sources.push({ source: candidate, bytes });
+    if (bytes) yield account(candidate, bytes);
   }
   const inSkill = path.join(skillRoot, CERTIFICATE_FILENAME);
-  const bytes = await readOptional(inSkill, 'Certificate');
-  if (bytes) sources.push({ source: inSkill, bytes });
+  if (!seen.has(inSkill)) {
+    const bytes = await readOptional(inSkill, 'Certificate');
+    if (bytes) yield account(inSkill, bytes);
+  }
+}
+
+/** Collects every candidate (within the same budget). Prefer `iterateCertificates`, which retains nothing. */
+export async function discoverCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): Promise<CertificateSource[]> {
+  const sources: CertificateSource[] = [];
+  for await (const source of iterateCertificates(skillName, skillRoot, certificateDirs, explicit)) sources.push(source);
   return sources;
 }
 
@@ -220,6 +248,7 @@ export interface DecisionRecord {
   verdict: string;
   reason: string;
 }
+        checkSkills();
 
 export function actionFor(mode: Mode, verified: boolean): DecisionRecord['action'] {
   if (verified) return 'allow';

@@ -4,27 +4,41 @@ import { lstat, open, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+// Never block in open(2) on a FIFO swapped in after the lstat check; the fstat below then rejects it.
+const nonBlock = fsConstants.O_NONBLOCK ?? 0;
 
 export function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-/** Reads a regular, non-symlink file, failing if it changes while being read. */
+/**
+ * Reads a regular, non-symlink file, failing if it changes while being read.
+ * The type and size are checked before any content is read, and at most `maxBytes` (+1 to detect growth) are read.
+ */
 export async function readRegularFile(filePath: string, label: string, maxBytes = 1024 * 1024): Promise<Buffer> {
   const entry = await lstat(filePath);
   if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`${label} must be a regular, non-symlink file`);
   if (entry.size > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
-  const handle = await open(filePath, fsConstants.O_RDONLY | noFollow);
+  const handle = await open(filePath, fsConstants.O_RDONLY | noFollow | nonBlock);
   try {
     const before = await handle.stat();
     if (!before.isFile() || before.dev !== entry.dev || before.ino !== entry.ino) throw new Error(`${label} changed while being read`);
-    const bytes = await handle.readFile();
+    if (before.size > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= maxBytes) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
     const after = await handle.stat();
-    if (bytes.length > maxBytes || before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== after.size) {
+    if (total > maxBytes || before.size !== after.size || before.mtimeMs !== after.mtimeMs || total !== after.size) {
       throw new Error(`${label} changed while being read or exceeds its size limit`);
     }
-    return bytes;
+    return Buffer.concat(chunks, total);
   } finally {
     await handle.close();
   }

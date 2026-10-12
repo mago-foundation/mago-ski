@@ -1,11 +1,11 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseCertificate, type Certificate } from './certificate.ts';
 import { verifyEnvelopeSignature } from './dsse.ts';
+import { readRegularFile } from './fs-safe.ts';
 import { scopeMatches, skillNameFromFrontmatter, validateSkillName } from './names.ts';
 import { verifyRevocations, type Revocations } from './revocations.ts';
 import { CLOCK_SKEW_MS, formatTimestamp } from './time.ts';
-import { collectSkillTree, type SkillTree, type TreeFile } from './tree-digest.ts';
+import { collectSkillTree, MAX_FILE_BYTES, SKILL_FILENAME, type SkillTree, type TreeFile } from './tree-digest.ts';
 import { TrustDocumentError, verifyTrustRoot, type TrustRoot } from './trust-root.ts';
 
 export const VERDICTS = ['VERIFIED', 'UNAPPROVED_CHANGE', 'NO_CERTIFICATE', 'UNTRUSTED_SIGNER', 'REVOKED', 'EXPIRED', 'UNVERIFIABLE'] as const;
@@ -116,17 +116,50 @@ export interface VerificationResult {
   checkedAt: string;
 }
 
+/**
+ * Resolves the Skill name. SKILL.md comes from an untrusted checkout, so it is read only if it is a regular,
+ * non-symlink file no larger than the tree collector's per-file limit; anything else throws (UNVERIFIABLE).
+ */
 export async function resolveSkillName(skillDir: string, explicit?: string): Promise<string> {
   if (explicit) return validateSkillName(explicit);
   let text: string | undefined;
   try {
-    text = await readFile(path.join(skillDir, 'SKILL.md'), 'utf8');
+    text = (await readRegularFile(path.join(skillDir, SKILL_FILENAME), SKILL_FILENAME, MAX_FILE_BYTES)).toString('utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
   }
   const fromFrontmatter = text === undefined ? undefined : skillNameFromFrontmatter(text);
   if (fromFrontmatter) return validateSkillName(fromFrontmatter, 'SKILL.md name');
   return validateSkillName(path.basename(path.resolve(skillDir)), 'Skill directory name');
+}
+
+type Decision = Pick<VerificationResult, 'verdict' | 'reason' | 'files' | 'certificateId' | 'certificateSource' | 'approverKeyId'>;
+interface Candidate { source: CertificateSource; evaluation: CertificateEvaluation }
+
+/** Keeps the best candidate seen so far: VERIFIED beats any failure, then FAILURE_PRIORITY; the first of equals wins. */
+function better(current: Candidate | undefined, next: Candidate): Candidate {
+  if (!current) return next;
+  return FAILURE_PRIORITY.indexOf(next.evaluation.verdict) < FAILURE_PRIORITY.indexOf(current.evaluation.verdict) ? next : current;
+}
+
+function decision(chosen: Candidate | undefined): Decision {
+  if (!chosen) return { verdict: 'NO_CERTIFICATE', reason: 'no certificate found for this Skill', files: null, certificateId: null, certificateSource: null, approverKeyId: null };
+  const certificate = chosen.evaluation.certificate;
+  return {
+    verdict: chosen.evaluation.verdict,
+    reason: chosen.evaluation.reason,
+    files: chosen.evaluation.verdict === 'VERIFIED' ? certificate!.files : null,
+    certificateId: certificate?.id ?? null,
+    certificateSource: chosen.source.source,
+    approverKeyId: certificate?.approverKeyId ?? null,
+  };
+}
+
+function baseResult(options: { tree: SkillTree; skillName: string; now: Date }) {
+  return {
+    skillName: options.skillName, skillDir: options.tree.root, digest: options.tree.digest,
+    excluded: options.tree.excluded, checkedAt: formatTimestamp(options.now),
+  };
 }
 
 export function decide(options: {
@@ -137,36 +170,41 @@ export function decide(options: {
   context: TrustContext;
   now: Date;
 }): VerificationResult {
-  const base = {
-    skillName: options.skillName, skillDir: options.tree.root, digest: options.tree.digest,
-    excluded: options.tree.excluded, checkedAt: formatTimestamp(options.now),
-  };
-  if (options.certificates.length === 0) {
-    return { ...base, verdict: 'NO_CERTIFICATE', reason: 'no certificate found for this Skill', files: null, certificateId: null, certificateSource: null, approverKeyId: null };
+  let best: Candidate | undefined;
+  for (const source of options.certificates) {
+    const evaluation = evaluateCertificate(source.bytes, options.skillName, options.tree.digest, options.context, options.now);
+    best = better(best, { source, evaluation });
+    if (evaluation.verdict === 'VERIFIED') break;
   }
-  const evaluations = options.certificates.map((source) => ({
-    source, evaluation: evaluateCertificate(source.bytes, options.skillName, options.tree.digest, options.context, options.now),
-  }));
-  const verified = evaluations.find((entry) => entry.evaluation.verdict === 'VERIFIED');
-  const chosen = verified ?? evaluations.sort((a, b) =>
-    FAILURE_PRIORITY.indexOf(a.evaluation.verdict) - FAILURE_PRIORITY.indexOf(b.evaluation.verdict))[0]!;
-  const certificate = chosen.evaluation.certificate;
-  return {
-    ...base,
-    verdict: chosen.evaluation.verdict,
-    reason: chosen.evaluation.reason,
-    files: chosen.evaluation.verdict === 'VERIFIED' ? certificate!.files : null,
-    certificateId: certificate?.id ?? null,
-    certificateSource: chosen.source.source,
-    approverKeyId: certificate?.approverKeyId ?? null,
-  };
+  return { ...baseResult(options), ...decision(best) };
+}
+
+/**
+ * Same verdict as `decide`, but candidates are evaluated one at a time as they are produced, so only the best
+ * one is retained and the first VERIFIED candidate ends the scan (later candidates are never read).
+ */
+export async function decideStreaming(options: {
+  skillDir: string;
+  skillName: string;
+  tree: SkillTree;
+  certificates: AsyncIterable<CertificateSource> | Iterable<CertificateSource>;
+  context: TrustContext;
+  now: Date;
+}): Promise<VerificationResult> {
+  let best: Candidate | undefined;
+  for await (const source of options.certificates) {
+    const evaluation = evaluateCertificate(source.bytes, options.skillName, options.tree.digest, options.context, options.now);
+    best = better(best, { source, evaluation });
+    if (evaluation.verdict === 'VERIFIED') break;
+  }
+  return { ...baseResult(options), ...decision(best) };
 }
 
 /** Full check of one Skill directory against an already-verified trust context. */
 export async function verifySkill(options: {
   skillDir: string;
   skillName?: string | undefined;
-  certificates: CertificateSource[] | ((skillName: string, root: string) => Promise<CertificateSource[]>);
+  certificates: CertificateSource[] | ((skillName: string, root: string) => Promise<CertificateSource[]> | AsyncIterable<CertificateSource>);
   context: TrustContext;
   now: Date;
 }): Promise<VerificationResult> {
@@ -175,8 +213,9 @@ export async function verifySkill(options: {
   try {
     skillName = await resolveSkillName(skillDir, options.skillName);
     const tree = await collectSkillTree(skillDir);
-    const certificates = typeof options.certificates === 'function' ? await options.certificates(skillName, tree.root) : options.certificates;
-    return decide({ skillDir, skillName, tree, certificates, context: options.context, now: options.now });
+    const provided = typeof options.certificates === 'function' ? options.certificates(skillName, tree.root) : options.certificates;
+    const certificates = Symbol.asyncIterator in provided ? provided : await provided;
+    return await decideStreaming({ skillDir, skillName, tree, certificates, context: options.context, now: options.now });
   } catch (error) {
     return unverifiable(skillDir, skillName, (error as Error).message, options.now);
   }
