@@ -1,15 +1,25 @@
 # Publishes @mago-foundation/mago-ski to npm when a version tag (v1.2.3) is pushed on main.
 #
-# One-time setup (outside this file):
-# - GitHub → Settings → Environments: create "release" with required reviewers (the release owner).
+# One-time setup (outside this file; the checks below run inside this YAML, so they cannot stop
+# someone who can push a branch with a modified copy of it. These settings are what do):
+# - GitHub → Settings → Environments: create "release" with required reviewers (the release owner)
+#   AND deployment branches and tags limited to "Selected branches and tags" with only the tag
+#   rule v* (no branch rules, not even main). Then no branch run can enter the environment.
 # - npm only allows trusted publishing for a package that already exists. Create it once from a
 #   maintainer's machine with a placeholder version (npm publish --access public --tag bootstrap),
 #   then deprecate the placeholder after the first real release.
 # - npmjs.com → @mago-foundation/mago-ski → Settings → Trusted publishing: add GitHub Actions
 #   publisher mago-foundation/mago-ski, workflow release.yml, environment release. npm then uses
 #   short-lived OIDC credentials and no long-lived token exists anywhere.
-# - NPM_TOKEN (an environment secret) is supported only as a fallback; npm is restricting tokens
-#   that bypass 2FA for publishing, so prefer trusted publishing and leave it unset.
+# - Remove the NPM_TOKEN secret (repository and environment) once the package exists and trusted
+#   publishing works. The publish step still reads it as a first-release fallback; it must be unset.
+# - Protect the v* tags (Settings → Rules → Rulesets) so only the release owner can create them:
+#   a tag run uses the copy of this file at the tagged commit.
+#
+# There is deliberately no manual (workflow_dispatch) trigger: a manual run can select any branch
+# and would execute that branch's copy of this file. To re-run a release (for example after a
+# transient failure), use "Re-run jobs" on the tag's workflow run. Fixing the workflow itself
+# needs a new version tag.
 #
 # The tarball is built and checked once, in a job with no publish rights, and the reviewed
 # environment publishes exactly that file.
@@ -18,20 +28,12 @@ name: release
 on:
   push:
     tags: ['v*.*.*']
-  # Re-run a release for an existing tag with the workflow file from main (for example after a
-  # workflow fix), without moving the tag. Publishing still needs approval of the release environment.
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag on main, for example v0.1.0
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_TAG: ${{ github.ref_name }}
   PACKAGE_NAME: '@mago-foundation/mago-ski'
 
 concurrency:
@@ -189,7 +191,7 @@ jobs:
 
       - name: Publish to npm with provenance
         # npm tries trusted publishing (OIDC) first. NPM_TOKEN is only for the first release, before
-        # trusted publishing can be configured; leave it unset afterwards.
+        # trusted publishing can be configured; it should be unset (deleted) from now on.
         # The ./ matters: npm reads "dir/file.tgz" without it as a GitHub "user/repo" shorthand.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
