@@ -167,29 +167,7 @@ jobs:
           sha256sum --check SHA256SUMS
           [[ "$(sha256sum '${{ needs.build.outputs.tarball }}' | cut -d' ' -f1)" == "${{ needs.build.outputs.sha256 }}" ]]
 
-      - name: Check npm supports trusted publishing
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm_version="$(npm --version)"
-          node -e '
-            const [a, b, c] = process.argv[1].split(".").map(Number);
-            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
-              console.error(`npm ${process.argv[1]} is too old for trusted publishing (needs 11.5.1+)`);
-              process.exit(1);
-            }' "$npm_version"
-
-      - name: Check the package already exists on npm
-        shell: bash
-        run: |
-          if ! npm view "$PACKAGE_NAME" version > /dev/null 2>&1; then
-            echo "::error::$PACKAGE_NAME is not on npm, so trusted publishing cannot be configured for it. Publish a placeholder version from a maintainer's machine first (see the comment at the top of release.yml), configure trusted publishing, then re-run this workflow."
-            exit 1
-          fi
-
       - name: Publish to npm with provenance
-        # Authenticates with short-lived OIDC credentials (trusted publishing); no token is used.
-        # The ./ matters: npm reads "dir/file.tgz" without it as a GitHub "user/repo" shorthand.
         run: npm publish "./release/${{ needs.build.outputs.tarball }}" --provenance --access public
 
   github-release:
