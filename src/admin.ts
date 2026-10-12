@@ -21,8 +21,8 @@ export const DEFAULT_REVOCATIONS_EXPIRY = '30d';
 // dashes, spaces or "BEGIN "). Three dashes are enough to anchor the header; "---- BEGIN SSH2 ..." contains them.
 const PRIVATE_KEY_PATTERNS: RegExp[] = [
   /-{3}\s{0,4}BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY/iu,
-  /PuTTY-User-Key-File-\d+:/u,
-  /AGE-SECRET-KEY-1[0-9A-Z]{20,}/iu,
+  /PuTTY-User-Key-File-\d{1,4}:/u,
+  /AGE-SECRET-KEY-1[0-9A-Z]{20,200}/iu,
 ];
 
 /** True if the bytes contain recognizable private-key material. */

@@ -300,3 +300,14 @@ test('F5: MAGO_SKI_POLICY may start with ~/ ; other relative values are still re
     assert.throws(() => defaultPolicyPath({ MAGO_SKI_POLICY: value }, '/home/u'), /absolute/u, value);
   }
 });
+
+test('F4: a huge run after an age key prefix neither throws nor stalls, and a real-shaped key still matches', () => {
+  const started = performance.now();
+  assert.doesNotThrow(() => containsPrivateKey(Buffer.from(`AGE-SECRET-KEY-1${'A'.repeat(8 * 1024 * 1024)}`)));
+  assert.doesNotThrow(() => containsPrivateKey(Buffer.from(`PuTTY-User-Key-File-${'1'.repeat(8 * 1024 * 1024)}`)));
+  assert.ok(performance.now() - started < 1000);
+  // Bech32 age secret key: "AGE-SECRET-KEY-1" plus 58 characters.
+  assert.equal(containsPrivateKey(Buffer.from(`AGE-SECRET-KEY-1${'QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L'.slice(0, 29).repeat(2)}\n`)), true);
+  assert.equal(containsPrivateKey(Buffer.from('age-secret-key-1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce')), true);
+  assert.equal(containsPrivateKey(Buffer.from('AGE-SECRET-KEY-1SHORT')), false);
+});
