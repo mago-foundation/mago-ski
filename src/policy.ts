@@ -24,6 +24,9 @@ export function defaultPolicyPath(env: NodeJS.ProcessEnv = process.env, home: st
   return configured;
 }
 const MAX_CERTIFICATE_BYTES = 8 * 1024 * 1024;
+/** Per-Skill budget across all certificate candidates (explicit file, policy directories, in-Skill file). */
+export const MAX_CERTIFICATE_CANDIDATES = 64;
+export const MAX_CERTIFICATE_TOTAL_BYTES = 32 * 1024 * 1024;
 
 export type Mode = 'shadow' | 'enforce';
 
@@ -142,21 +145,46 @@ async function readOptional(filePath: string, label: string): Promise<Buffer | u
   }
 }
 
-/** Certificate lookup order: explicit file, policy certificate directories (<name>.cert.json), then the in-Skill certificate. */
-export async function discoverCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): Promise<CertificateSource[]> {
-  const sources: CertificateSource[] = [];
+/**
+ * Certificate lookup order: explicit file, policy certificate directories (<name>.cert.json), then the in-Skill certificate.
+ * Candidates are read lazily, one at a time, so a caller that stops early never reads the rest and none are retained here.
+ * Candidates come from the checkout under review, so a Skill may have at most MAX_CERTIFICATE_CANDIDATES candidate files
+ * totalling MAX_CERTIFICATE_TOTAL_BYTES; going over throws (the Skill is UNVERIFIABLE) instead of reading further.
+ */
+export async function* iterateCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): AsyncGenerator<CertificateSource> {
+  let count = 0;
+  let totalBytes = 0;
+  const seen = new Set<string>();
+  const account = (source: string, bytes: Buffer): CertificateSource => {
+    count += 1;
+    totalBytes += bytes.length;
+    if (count > MAX_CERTIFICATE_CANDIDATES) throw new Error(`more than ${MAX_CERTIFICATE_CANDIDATES} certificate candidates for this Skill; reduce certificate_dirs or remove stray certificates`);
+    if (totalBytes > MAX_CERTIFICATE_TOTAL_BYTES) throw new Error(`certificate candidates for this Skill exceed ${MAX_CERTIFICATE_TOTAL_BYTES} bytes in total`);
+    return { source, bytes };
+  };
   if (explicit) {
-    const bytes = await readRegularFile(path.resolve(explicit), 'Certificate', MAX_CERTIFICATE_BYTES);
-    sources.push({ source: path.resolve(explicit), bytes });
+    const candidate = path.resolve(explicit);
+    seen.add(candidate);
+    yield account(candidate, await readRegularFile(candidate, 'Certificate', MAX_CERTIFICATE_BYTES));
   }
   for (const directory of certificateDirs) {
     const candidate = path.join(directory, `${skillName}.cert.json`);
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     const bytes = await readOptional(candidate, 'Certificate');
-    if (bytes) sources.push({ source: candidate, bytes });
+    if (bytes) yield account(candidate, bytes);
   }
   const inSkill = path.join(skillRoot, CERTIFICATE_FILENAME);
-  const bytes = await readOptional(inSkill, 'Certificate');
-  if (bytes) sources.push({ source: inSkill, bytes });
+  if (!seen.has(inSkill)) {
+    const bytes = await readOptional(inSkill, 'Certificate');
+    if (bytes) yield account(inSkill, bytes);
+  }
+}
+
+/** Collects every candidate (within the same budget). Prefer `iterateCertificates`, which retains nothing. */
+export async function discoverCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): Promise<CertificateSource[]> {
+  const sources: CertificateSource[] = [];
+  for await (const source of iterateCertificates(skillName, skillRoot, certificateDirs, explicit)) sources.push(source);
   return sources;
 }
 
@@ -166,6 +194,24 @@ export async function discoverCertificates(skillName: string, skillRoot: string,
  * directory or a linked SKILL.md is returned as a Skill, and verification then rejects it.
  */
 export const MAX_DISCOVERY_DEPTH = 16;
+/** Work budget for one discovery run over untrusted trees; exceeding either throws DiscoveryBudgetError. */
+export const MAX_DISCOVERED_SKILLS = 1_000;
+export const MAX_DISCOVERY_ENTRIES = 50_000;
+
+export interface DiscoveryLimits {
+  /** Maximum Skills (including directories reported as too deep) found. */
+  maxSkills?: number;
+  /** Maximum directory entries visited across all roots. */
+  maxEntries?: number;
+}
+
+/** Discovery stopped because the tree is larger than the budget. It never returns a partial list: callers must fail closed. */
+export class DiscoveryBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DiscoveryBudgetError';
+  }
+}
 
 export interface SkillDiscovery {
   skillDirs: string[];
@@ -173,13 +219,20 @@ export interface SkillDiscovery {
   tooDeep: string[];
 }
 
-export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DEPTH): Promise<SkillDiscovery> {
+export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DEPTH, limits: DiscoveryLimits = {}): Promise<SkillDiscovery> {
+  const maxSkills = limits.maxSkills ?? MAX_DISCOVERED_SKILLS;
+  const maxEntries = limits.maxEntries ?? MAX_DISCOVERY_ENTRIES;
   const found = new Set<string>();
   const tooDeep = new Set<string>();
+  let entries = 0;
+  const checkSkills = () => {
+    if (found.size + tooDeep.size > maxSkills) throw new DiscoveryBudgetError(`more than ${maxSkills} Skills found under skill_dirs; narrow skill_dirs or split the repository`);
+  };
   async function walk(directory: string, depth: number): Promise<void> {
     try {
       await lstat(path.join(directory, 'SKILL.md'));
       found.add(directory);
+      checkSkills();
       return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
@@ -192,6 +245,8 @@ export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DE
       throw error;
     }
     for await (const child of dir) {
+      entries += 1;
+      if (entries > maxEntries) throw new DiscoveryBudgetError(`more than ${maxEntries} directory entries under skill_dirs; narrow skill_dirs or split the repository`);
       const childPath = path.join(directory, child.name);
       if (child.isSymbolicLink()) {
         try {
@@ -199,12 +254,14 @@ export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DE
         } catch {
           // A dangling link has nothing a host could load.
         }
+        checkSkills();
         continue;
       }
       if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') continue;
       // Hosts such as Pi search without a depth limit, so never skip deeper directories silently.
       if (depth + 1 > maxDepth) {
         tooDeep.add(childPath);
+        checkSkills();
         continue;
       }
       await walk(childPath, depth + 1);
@@ -276,7 +333,7 @@ export async function verifyWithPolicy(policy: Policy, skillDir: string, options
     skillName: options.skillName,
     context,
     now: options.now,
-    certificates: (name, root) => discoverCertificates(name, root, policy.certificateDirs, options.certificate),
+    certificates: (name, root) => iterateCertificates(name, root, policy.certificateDirs, options.certificate),
   });
 }
 

@@ -43,6 +43,8 @@ interface FileRecord {
 
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+// A FIFO swapped in after enumeration must fail the fstat check below, not block open(2).
+const nonBlock = fsConstants.O_NONBLOCK ?? 0;
 
 function fail(message: string): never {
   throw new Error(message);
@@ -82,7 +84,7 @@ export function isExecutable(mode: number | bigint): boolean {
 async function readStable(absolutePath: string, label: string, expected?: BigIntStats): Promise<{ content: Buffer; stat: BigIntStats }> {
   let handle;
   try {
-    handle = await open(absolutePath, fsConstants.O_RDONLY | noFollow);
+    handle = await open(absolutePath, fsConstants.O_RDONLY | noFollow | nonBlock);
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || (expected && !sameFileVersion(expected, before))) fail(`Skill file changed while being read: ${label}`);
     if (before.size > BigInt(MAX_FILE_BYTES)) fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${label}`);
