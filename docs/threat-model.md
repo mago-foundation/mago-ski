@@ -39,6 +39,6 @@ Revocation is not instant everywhere. A host acts on a revocation once it reads 
 ## Assumptions
 
 - The root private key is offline and only its holder can sign trust documents.
-- Approver private keys are kept by the people they name; `approve` refuses a key stored inside the Skill directory.
-- The host policy, trust documents and state file are writable only by the user or administrator, not by the code under review. The Pi host never reads policy from the project directory.
+- Approver private keys are kept by the people they name; `approve` refuses a key stored inside the Skill directory, and refuses a Skill that contains private-key material in a recognizable format (PEM, PKCS#8, OpenSSH and SSH2 private keys, PGP private key blocks, PuTTY `.ppk` files and age secret keys). This is a best-effort check for accidents, not a general secret scanner.
+- The host policy, trust documents and state file are writable only by the user or administrator, not by the code under review. Neither the Pi host nor the CLI reads policy from the project directory (the CLI uses `--policy`, `MAGO_SKI_POLICY` or `~/.mago-ski/policy.json`). The policy may place `decision_log` and `state_file` only inside its own directory.
 - Clocks are roughly correct (5 minutes of skew is tolerated for issue times).

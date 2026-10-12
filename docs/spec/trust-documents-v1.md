@@ -72,10 +72,10 @@ Hand-edited JSON, read by hosts and the CLI. Paths are relative to the policy fi
 | `trust_root`, `revocations` | yes | Signed documents |
 | `certificate_dirs` | no | Extra certificate locations |
 | `skill_dirs` | no | Directories scanned by `verify-all` and the GitHub Action |
-| `state_file` | no | Rollback protection (below). Strongly recommended on hosts |
-| `decision_log` | no | JSON Lines file of decisions |
+| `state_file` | no | Rollback protection (below). Strongly recommended on hosts. Must resolve to a file inside the policy file's directory |
+| `decision_log` | no | JSON Lines file of decisions, one JSON object per line. Must resolve to a file inside the policy file's directory (after following symbolic links); it is opened without following symbolic links and must be a regular file. Records are data, not shell syntax: do not source them |
 
-The policy itself decides who is trusted, so it must live where the code under review cannot change it. The Pi host reads it only from `MAGO_SKI_POLICY` or `~/.mago-ski/policy.json`; the GitHub Action reads it from the pull request's base revision.
+The policy itself decides who is trusted, so it must live where the code under review cannot change it. The Pi host and the CLI read it only from `MAGO_SKI_POLICY` (an absolute path) or `~/.mago-ski/policy.json`, and the CLI also accepts an explicit `--policy FILE`; the GitHub Action reads it from the pull request's base revision.
 
 ## Host state (rollback protection)
 

@@ -1,8 +1,8 @@
-import { appendFile, lstat, opendir, stat } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { lstat, opendir, stat } from 'node:fs/promises';
+import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
-import { readRegularFile, writeFileAtomic } from './fs-safe.ts';
+import { appendToRegularFile, readRegularFile, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
 import { validateKeyId } from './keys.ts';
 import { CERTIFICATE_FILENAME } from './tree-digest.ts';
 import {
@@ -12,7 +12,17 @@ import {
 
 export const POLICY_VERSION = 'mago.policy/v1';
 export const STATE_TYPE = 'mago.host-state/v1';
-export const DEFAULT_POLICY_PATH = path.join('.mago-ski', 'policy.json');
+
+/**
+ * Where hosts and the CLI read policy when none is given: $MAGO_SKI_POLICY (absolute), else ~/.mago-ski/policy.json.
+ * Never a path in the current directory, because the project being checked may be controlled by the code under review.
+ */
+export function defaultPolicyPath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+  const configured = env.MAGO_SKI_POLICY;
+  if (!configured) return path.join(home, '.mago-ski', 'policy.json');
+  if (!path.isAbsolute(configured)) throw new Error(`MAGO_SKI_POLICY must be an absolute path; got "${configured}"`);
+  return configured;
+}
 const MAX_CERTIFICATE_BYTES = 8 * 1024 * 1024;
 
 export type Mode = 'shadow' | 'enforce';
@@ -49,6 +59,9 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
   if (value.mode !== 'shadow' && value.mode !== 'enforce') throw new Error('Policy mode must be "shadow" or "enforce"');
   const base = path.dirname(absolute);
   const resolvePath = (item: unknown, label: string) => path.resolve(base, requireString(item, `Policy ${label}`, 4096));
+  // decision_log and state_file are files this tool writes, so the policy may only place them in its own directory.
+  const writablePath = async (item: unknown, label: string) =>
+    item === undefined || item === null ? null : await resolveInsideDirectory(base, requireString(item, `Policy ${label}`, 4096), `Policy ${label}`);
   const optionalList = (item: unknown, label: string) => item === undefined ? [] : requireArray(item, `Policy ${label}`, 256).map((entry, index) => resolvePath(entry, `${label}[${index}]`));
   return {
     path: absolute,
@@ -58,8 +71,8 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
     revocationsPath: resolvePath(value.revocations, 'revocations'),
     certificateDirs: optionalList(value.certificate_dirs, 'certificate_dirs'),
     skillDirs: optionalList(value.skill_dirs, 'skill_dirs'),
-    statePath: value.state_file === undefined || value.state_file === null ? null : resolvePath(value.state_file, 'state_file'),
-    decisionLogPath: value.decision_log === undefined || value.decision_log === null ? null : resolvePath(value.decision_log, 'decision_log'),
+    statePath: await writablePath(value.state_file, 'state_file'),
+    decisionLogPath: await writablePath(value.decision_log, 'decision_log'),
   };
 }
 
@@ -228,7 +241,10 @@ export function actionFor(mode: Mode, verified: boolean): DecisionRecord['action
 
 export async function appendDecision(logPath: string | null, record: DecisionRecord): Promise<void> {
   if (!logPath) return;
-  await appendFile(logPath, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+  // One JSON object per line. JSON.stringify escapes newlines and control characters; also escape the Unicode
+  // line separators some JSON Lines readers split on. The text is data, not shell syntax: never source a log.
+  const line = JSON.stringify(record).replace(/[\u0085\u2028\u2029]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  await appendToRegularFile(logPath, `${line}\n`, 'Decision log');
 }
 
 export function decisionRecord(result: VerificationResult, mode: Mode, event: string, host = `${hostname()}`): DecisionRecord {

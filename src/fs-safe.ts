@@ -4,6 +4,7 @@ import { lstat, open, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+const nonBlock = fsConstants.O_NONBLOCK ?? 0;
 
 export function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
@@ -86,4 +87,58 @@ export async function writeFileAtomic(filePath: string, bytes: Uint8Array, mode 
     throw error;
   }
   return target;
+}
+
+/** Canonical path of `target`, resolving symlinks on the longest existing prefix. A dangling link on the way is an error. */
+async function realpathAllowingMissing(target: string): Promise<string> {
+  let current = path.resolve(target);
+  const rest: string[] = [];
+  while (true) {
+    try {
+      return path.join(await realpath(current), ...rest.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      // realpath also fails with ENOENT for a dangling symlink; its target could be created later.
+      if (await lstat(current).then(() => true, () => false)) throw new Error(`${current} is a dangling symbolic link`);
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      rest.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Resolves a policy-supplied path against `base` and requires it to name something strictly inside `base`,
+ * after symlinks in its parent directories are resolved. An existing final component must be a regular,
+ * non-symlink file. Returns the canonical path.
+ */
+export async function resolveInsideDirectory(base: string, item: string, label: string): Promise<string> {
+  const canonicalBase = await realpath(path.resolve(base));
+  const requested = path.resolve(base, item);
+  const reject = () => new Error(`${label} must name a file inside the policy file's directory (${canonicalBase}); got "${item}"`);
+  if (!isInside(path.resolve(base), requested) || requested === path.resolve(base)) throw reject();
+  const canonical = path.join(await realpathAllowingMissing(path.dirname(requested)), path.basename(requested));
+  if (canonical === canonicalBase || !isInside(canonicalBase, canonical)) throw reject();
+  try {
+    const entry = await lstat(canonical);
+    if (entry.isSymbolicLink() || !entry.isFile()) throw new Error(`${label} must be a regular, non-symlink file`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  }
+  return canonical;
+}
+
+/**
+ * Appends text to a log file, creating it (mode 600) if needed. Refuses symbolic links and anything that is not
+ * a regular file; O_NONBLOCK keeps a FIFO from hanging the open.
+ */
+export async function appendToRegularFile(filePath: string, text: string, label: string, mode = 0o600): Promise<void> {
+  const handle = await open(filePath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | noFollow | nonBlock, mode);
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(`${label} must be a regular file`);
+    await handle.appendFile(text, 'utf8');
+  } finally {
+    await handle.close();
+  }
 }
