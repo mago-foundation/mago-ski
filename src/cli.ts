@@ -16,51 +16,73 @@ import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
 import { verifyTrustRoot } from './trust-root.ts';
 import { unverifiable, type VerificationResult } from './verify.ts';
 
-const usage = `mago-ski: organization-approved Skill certificates, enforced on the agent host.
+const usage = `mago-ski — organization-approved Skill certificates,
+           enforced on the agent host
 
-Keys and trust (run by the organization's root key holder):
-  mago-ski keygen --private-key FILE --public-key FILE
-  mago-ski root init --root-key FILE --trust-root OUT --revocations OUT [--trust-root-expires 365d] [--revocations-expires 30d]
-  mago-ski root add-approver --root-key FILE --trust-root FILE --public-key FILE --name LABEL --scope PATTERN [--scope ...] --expires 180d [--out FILE] [--trust-root-expires 365d]
-  mago-ski root remove-approver --root-key FILE --trust-root FILE --key-id ID [--out FILE]
-  mago-ski root show --trust-root FILE --root-fingerprint ID
-  mago-ski revoke key --root-key FILE --revocations FILE --key-id ID --reason TEXT [--expires 30d] [--out FILE]
-  mago-ski revoke digest --root-key FILE --revocations FILE --digest sha256:... --reason TEXT [--expires 30d] [--out FILE]
-  mago-ski revoke refresh --root-key FILE --revocations FILE [--expires 30d] [--out FILE]
+USAGE
+  mago-ski <command> [options]
 
-Approving Skills (run by a reviewer with an approver key):
-  mago-ski approve SKILL_DIR --key FILE --expires 90d --reason TEXT [--name NAME] [--previous CERT|DIGEST] [--out FILE]
+KEYS AND TRUST  (root key holder)
+  keygen                 Create an Ed25519 key pair
+  root init              Create the trust root and revocation list
+  root add-approver      Add or replace an approver
+  root remove-approver   Remove an approver
+  root show              Verify and print a trust root
+  revoke key             Revoke an approver key
+  revoke digest          Revoke one approved Skill version
+  revoke refresh         Re-sign the revocation list
 
-Checking Skills (policy: --policy FILE, else $MAGO_SKI_POLICY, else ~/.mago-ski/policy.json; never read from the current directory):
-  mago-ski verify SKILL_DIR [--policy FILE] [--name NAME] [--certificate FILE] [--json]
-  mago-ski verify-all [--policy FILE] [--json]
-  mago-ski digest SKILL_DIR [--explain]
-  mago-ski diff --base DIR --candidate DIR
-  mago-ski inspect CERTIFICATE
+APPROVING SKILLS  (reviewer)
+  approve SKILL_DIR      Issue a certificate for a Skill
 
-Verdicts: VERIFIED, UNAPPROVED_CHANGE, NO_CERTIFICATE, UNTRUSTED_SIGNER, REVOKED, EXPIRED, UNVERIFIABLE.
-Exit codes: 0 success or VERIFIED; 1 any other verdict or a required re-certification; 2 usage or input error.
-Run "mago-ski <command> --help" for a command's options, and "mago-ski --version" for the version.
+CHECKING SKILLS
+  verify SKILL_DIR       Check one Skill, print its verdict
+  verify-all             Check every Skill in the policy
+  digest SKILL_DIR       Print a Skill's tree digest
+  diff                   Compare two versions of a Skill
+  inspect CERTIFICATE    Print a certificate's contents
 
-A certificate records who approved an exact Skill version. It does not certify that the Skill is safe.`;
+POLICY
+  --policy FILE, else $MAGO_SKI_POLICY, else
+  ~/.mago-ski/policy.json (never the current directory)
+
+VERDICTS
+  VERIFIED  UNAPPROVED_CHANGE  NO_CERTIFICATE
+  UNTRUSTED_SIGNER  REVOKED  EXPIRED  UNVERIFIABLE
+
+EXIT CODES
+  0  success, or VERIFIED
+  1  any other verdict, or re-certification required
+  2  usage or input error
+
+Run "mago-ski <command> --help" for a command's options,
+and "mago-ski --version" for the version.
+
+A certificate records who approved an exact Skill
+version. It does not certify that the Skill is safe.`;
 
 const DURATION_NOTE = 'Durations are a number plus d, h or m, for example 90d, 12h or 30m.';
 
 /** Per-command help: `mago-ski <command> --help`. Keys are "command" or "command subcommand". */
+
 const COMMAND_HELP: Record<string, string> = {
   keygen: `Usage: mago-ski keygen --private-key FILE --public-key FILE
 
 Creates an Ed25519 key pair for a root key or an approver key.
 
-  --private-key FILE   where to write the private key (created with mode 600; must not exist yet)
-  --public-key FILE    where to write the public key
+  --private-key 	FILE	where to write the private key (created with mode 600; must not exist yet)
+  --public-key 		FILE	where to write the public key
 
 Keep private keys secret and outside every Skill directory; keygen refuses to write inside one.
 Prints the key id (sha256:...), which identifies the key in trust roots and revocations.`,
+
+  /* Per-command "root" */
   root: `Usage: mago-ski root <init | add-approver | remove-approver | show> [options]
 
 Manages the organization's signed trust root (who may approve which Skills).
 Run "mago-ski root <subcommand> --help" for details.`,
+
+  /* 		Per-command "root" -> "root init" */
   'root init': `Usage: mago-ski root init --root-key FILE --trust-root OUT --revocations OUT [options]
 
 Creates version 1 of the signed trust root (no approvers yet) and an empty signed revocation list.
@@ -73,6 +95,8 @@ Creates version 1 of the signed trust root (no approvers yet) and an empty signe
 
 Prints root_fingerprint: put it in every host policy as "root_fingerprint".
 ${DURATION_NOTE}`,
+
+  /*		Per-command "root" -> "root add-approver" */
   'root add-approver': `Usage: mago-ski root add-approver --root-key FILE --trust-root FILE --public-key FILE --name LABEL --scope PATTERN [--scope ...] --expires DUR [options]
 
 Adds (or replaces) an approver and re-signs the trust root with the next version.
@@ -87,16 +111,24 @@ Adds (or replaces) an approver and re-signs the trust root with the next version
   --out FILE                   write the new trust root here instead
   --trust-root-expires DUR     also set a new trust root lifetime
 ${DURATION_NOTE}`,
+
+  /*		Per-command "root" -> "root remove-approver" */
   'root remove-approver': `Usage: mago-ski root remove-approver --root-key FILE --trust-root FILE --key-id ID [--out FILE] [--trust-root-expires DUR]
 
 Removes an approver and re-signs the trust root. Certificates from that approver stop verifying once hosts read
 the new trust root. If the key may be compromised, also revoke it with "mago-ski revoke key".`,
+
+  /*		Per-command "root" -> "root show" */
   'root show': `Usage: mago-ski root show --trust-root FILE --root-fingerprint ID
 
 Verifies a trust root against the pinned root fingerprint and prints its version, expiry and approvers.`,
+
+  /* Per-command "revoke" */
   revoke: `Usage: mago-ski revoke <key | digest | refresh> [options]
 
 Updates the organization's signed revocation list. Run "mago-ski revoke <subcommand> --help" for details.`,
+
+  /*		Per-command "revoke" -> "revoke key" */
   'revoke key': `Usage: mago-ski revoke key --root-key FILE --revocations FILE --key-id ID --reason TEXT [--expires DUR] [--out FILE]
 
 Revokes an approver key: every certificate it signed stops verifying once hosts read the new list.
@@ -105,14 +137,20 @@ Revokes an approver key: every certificate it signed stops verifying once hosts 
   --reason TEXT     shown in verdicts
   --expires DUR     lifetime of the new list (default 30d)
 ${DURATION_NOTE}`,
+
+  /*		Per-command "revoke" -> "revoke digest" */
   'revoke digest': `Usage: mago-ski revoke digest --root-key FILE --revocations FILE --digest sha256:... --reason TEXT [--expires DUR] [--out FILE]
 
 Revokes one approved Skill version (its tree digest), whoever signed it.
 ${DURATION_NOTE}`,
+
+  /*		Per-command "revoke" -> "revoke refresh" */
   'revoke refresh': `Usage: mago-ski revoke refresh --root-key FILE --revocations FILE [--expires DUR] [--out FILE]
 
 Re-signs the revocation list with the next version and a new expiry, without changing its entries.
 Hosts refuse an expired list, so refresh it before it expires (default lifetime 30d).`,
+
+  /* Per-command "approve" */
   approve: `Usage: mago-ski approve SKILL_DIR --key FILE --expires DUR --reason TEXT [options]
 
 Issues a certificate for the exact current bytes of a Skill, signed with your approver key.
@@ -127,6 +165,8 @@ Issues a certificate for the exact current bytes of a Skill, signed with your ap
 Refuses a Skill that contains a private key. A certificate records who approved which exact version;
 it does not certify that the Skill is safe.
 ${DURATION_NOTE}`,
+
+  /* Per-command "verify" */
   verify: `Usage: mago-ski verify SKILL_DIR [--policy FILE] [--name NAME] [--certificate FILE] [--json]
 
 Checks one Skill against the policy's trust root and revocation list, and prints its verdict.
@@ -138,18 +178,26 @@ Checks one Skill against the policy's trust root and revocation list, and prints
   --json               print the result as JSON
 
 Exit code 0 when VERIFIED, 1 for any other verdict, 2 for usage or input errors.`,
+
+  /*		Per-command "verify" -> "verify-all" */
   'verify-all': `Usage: mago-ski verify-all [--policy FILE] [--json]
 
 Checks every Skill found under the policy's skill_dirs and prints one line per Skill and a summary.
 Exits 1 if any Skill is not VERIFIED, in shadow mode too (shadow mode affects hosts, not this exit code).`,
+
+  /* Per-command "digest" */
   digest: `Usage: mago-ski digest SKILL_DIR [--explain]
 
 Prints the Skill's tree digest (sha256:...). --explain also lists every covered file, its hash and
 executable bit, and the paths excluded from the digest.`,
+
+  /* Per-command "diff" */
   diff: `Usage: mago-ski diff --base DIR --candidate DIR
 
 Compares two versions of a Skill: changed files and Markdown sections, executable-bit changes, and added
 or removed network origins. Exits 1 when the digest changed, since that always needs a new certificate.`,
+
+  /* Per-command "inspect" */
   inspect: `Usage: mago-ski inspect CERTIFICATE
 
 Prints a certificate's Skill, digest, approver, dates and reason. Checks structure only; use
@@ -160,15 +208,18 @@ function readVersion(): string {
   for (const candidate of ['../package.json', '../../package.json']) {
     try {
       const pkg = JSON.parse(readFileSync(fileURLToPath(new URL(candidate, import.meta.url)), 'utf8')) as { name?: string; version?: string };
-      if ((pkg.name === '@mago-foundation/mago-ski' || pkg.name === 'mago-ski') && pkg.version) return pkg.version;
-    } catch {
+
+      if ((pkg.name === '@mago-foundation/mago-ski' || pkg.name === 'mago-ski') && pkg.version)
+        return pkg.version;
+    }
+    catch {
       // try the next location (source tree vs. built dist/)
     }
   }
   return 'unknown';
 }
 
-class UsageError extends Error {}
+class UsageError extends Error { }
 
 interface Parsed {
   positional: string[];
@@ -179,17 +230,25 @@ interface Parsed {
 const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help']);
 
 function parseArgs(args: string[]): Parsed {
-  const parsed: Parsed = { positional: [], flags: new Map(), booleans: new Set() };
+  const parsed: Parsed = {
+    positional: [],
+    flags: new Map(),
+    booleans: new Set()
+  };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (BOOLEAN_FLAGS.has(arg)) {
       parsed.booleans.add(arg);
-    } else if (arg.startsWith('--')) {
+    }
+    else if (arg.startsWith('--')) {
       const value = args[index + 1];
-      if (value === undefined || value.startsWith('--') || value === '') throw new UsageError(`Missing value for ${arg}`);
+
+      if (value === undefined || value.startsWith('--') || value === '')
+        throw new UsageError(`Missing value for ${arg}`);
       parsed.flags.set(arg, [...(parsed.flags.get(arg) ?? []), value]);
       index += 1;
-    } else {
+    }
+    else {
       parsed.positional.push(arg);
     }
   }
@@ -198,11 +257,18 @@ function parseArgs(args: string[]): Parsed {
 
 function allow(parsed: Parsed, allowed: string[], positional: number, repeatable: string[] = []): void {
   for (const [flag, values] of parsed.flags) {
-    if (!allowed.includes(flag)) throw new UsageError(`Unsupported option ${flag}`);
-    if (values.length > 1 && !repeatable.includes(flag)) throw new UsageError(`${flag} may be given only once`);
+    if (!allowed.includes(flag))
+      throw new UsageError(`Unsupported option ${flag}`);
+    if (values.length > 1 && !repeatable.includes(flag))
+      throw new UsageError(`${flag} may be given only once`);
   }
-  for (const flag of parsed.booleans) if (flag !== '--json' && flag !== '--explain' && !allowed.includes(flag)) throw new UsageError(`Unsupported option ${flag}`);
-  if (parsed.positional.length !== positional) throw new UsageError(`Expected ${positional} positional argument(s), got ${parsed.positional.length}`);
+
+  for (const flag of parsed.booleans)
+    if (flag !== '--json' && flag !== '--explain' && !allowed.includes(flag))
+      throw new UsageError(`Unsupported option ${flag}`);
+
+  if (parsed.positional.length !== positional)
+    throw new UsageError(`Expected ${positional} positional argument(s), got ${parsed.positional.length}`);
 }
 
 function one(parsed: Parsed, flag: string): string {
@@ -236,8 +302,10 @@ async function runRoot(sub: string | undefined, parsed: Parsed, now: Date): Prom
       rootKeyPath: one(parsed, '--root-key'), trustRootOut: one(parsed, '--trust-root'), revocationsOut: one(parsed, '--revocations'), now,
       trustRootExpires: optional(parsed, '--trust-root-expires'), revocationsExpires: optional(parsed, '--revocations-expires'),
     });
-    print({ status: 'ROOT_INITIALIZED', root_fingerprint: result.rootKeyId, trust_root: result.trustRoot, revocations: result.revocations,
-      next: 'Store the root private key offline. Put root_fingerprint in each host policy.' });
+    print({
+      status: 'ROOT_INITIALIZED', root_fingerprint: result.rootKeyId, trust_root: result.trustRoot, revocations: result.revocations,
+      next: 'Store the root private key offline. Put root_fingerprint in each host policy.'
+    });
     return 0;
   }
   if (sub === 'add-approver') {
@@ -340,7 +408,9 @@ async function runVerifyAll(parsed: Parsed, now: Date): Promise<number> {
   }
   for (const directory of tooDeep) results.push(tooDeepResult(directory, now));
   for (const result of results) {
-    if (result.verdict !== 'VERIFIED') failures += 1;
+    if (result.verdict !== 'VERIFIED')
+      failures += 1;
+
     await appendDecision(policy.decisionLogPath, decisionRecord(result, policy.mode, 'cli-verify-all'));
     printResult(result, parsed.booleans.has('--json'));
   }
@@ -392,8 +462,10 @@ export async function runCli(argv: string[] = process.argv.slice(2), now: Date =
         ...(optional(parsed, '--previous') ? { previous: one(parsed, '--previous') } : {}),
         ...(optional(parsed, '--out') ? { out: one(parsed, '--out') } : {}),
       });
-      print({ status: 'CERTIFICATE_ISSUED', skill: result.skillName, digest: result.digest, certificate_id: result.certificateId,
-        expires_at: formatTimestamp(result.expiresAt), certificate: result.path });
+      print({
+        status: 'CERTIFICATE_ISSUED', skill: result.skillName, digest: result.digest, certificate_id: result.certificateId,
+        expires_at: formatTimestamp(result.expiresAt), certificate: result.path
+      });
       return 0;
     }
     case 'verify':
