@@ -4,7 +4,7 @@ import { verifyEnvelopeSignature } from './dsse.ts';
 import { readRegularFile } from './fs-safe.ts';
 import { scopeMatches, skillNameFromFrontmatter, validateSkillName } from './names.ts';
 import { verifyRevocations, type Revocations } from './revocations.ts';
-import { CLOCK_SKEW_MS, formatTimestamp } from './time.ts';
+import { CLOCK_SKEW_MS, formatTimestamp, requireValidDate } from './time.ts';
 import { collectSkillTree, MAX_FILE_BYTES, SKILL_FILENAME, type SkillTree, type TreeFile } from './tree-digest.ts';
 import { TrustDocumentError, verifyTrustRoot, type TrustRoot } from './trust-root.ts';
 
@@ -37,6 +37,9 @@ export function loadTrustContext(options: {
   minimum?: MinimumVersions | undefined;
 }): TrustContextResult {
   try {
+    // Inside the try, so a bad clock becomes an UNVERIFIABLE result like any other failure here.
+    requireValidDate(options.now, 'Verification time');
+
     const trustRoot = verifyTrustRoot(options.trustRootBytes, options.rootKeyId, options.now);
     const revocations = verifyRevocations(options.revocationsBytes, trustRoot, options.now);
     if (options.minimum && trustRoot.version < options.minimum.trustRootVersion) {
@@ -60,6 +63,9 @@ export interface CertificateEvaluation {
 
 /** Checks one certificate for one Skill: trust chain, scope, signature, expiry, revocation, then bytes. */
 export function evaluateCertificate(bytes: Uint8Array, skillName: string, digest: string, context: TrustContext, now: Date): CertificateEvaluation {
+  // The issued-in-the-future and expiry checks compare against `now`; an invalid Date would pass them all.
+  requireValidDate(now, 'Verification time');
+
   let certificate: Certificate;
   try {
     certificate = parseCertificate(bytes);
@@ -170,6 +176,8 @@ export function decide(options: {
   context: TrustContext;
   now: Date;
 }): VerificationResult {
+  requireValidDate(options.now, 'Verification time');
+
   let best: Candidate | undefined;
   for (const source of options.certificates) {
     const evaluation = evaluateCertificate(source.bytes, options.skillName, options.tree.digest, options.context, options.now);
@@ -191,6 +199,8 @@ export async function decideStreaming(options: {
   context: TrustContext;
   now: Date;
 }): Promise<VerificationResult> {
+  requireValidDate(options.now, 'Verification time');
+
   let best: Candidate | undefined;
   for await (const source of options.certificates) {
     const evaluation = evaluateCertificate(source.bytes, options.skillName, options.tree.digest, options.context, options.now);
@@ -208,6 +218,9 @@ export async function verifySkill(options: {
   context: TrustContext;
   now: Date;
 }): Promise<VerificationResult> {
+  // Before the try: its catch builds an UNVERIFIABLE result, which needs a valid time for `checkedAt`.
+  requireValidDate(options.now, 'Verification time');
+
   const skillDir = path.resolve(options.skillDir);
   let skillName = options.skillName ?? path.basename(skillDir);
   try {
@@ -222,6 +235,8 @@ export async function verifySkill(options: {
 }
 
 export function unverifiable(skillDir: string, skillName: string, reason: string, now: Date, verdict: Verdict = 'UNVERIFIABLE'): VerificationResult {
+  requireValidDate(now, 'Verification time');
+
   return {
     verdict, reason, skillName, skillDir, digest: null, files: null, certificateId: null,
     certificateSource: null, approverKeyId: null, excluded: [], checkedAt: formatTimestamp(now),

@@ -172,11 +172,16 @@ function atxHeading(line: string): { level: number; title: string } | null {
   const spacing = open[2]!.length;
   const rest = line.slice(open[0].length);
 
-  // Start of the longest suffix matching \s*#*\s*: the closing sequence the title leaves out.
+  // Walk back over the closing sequence the title leaves out: blanks, then '#'s, then blanks again.
   let end = rest.length;
-  while (end > 0 && whitespacePattern.test(rest[end - 1]!)) end -= 1;
-  while (end > 0 && rest[end - 1] === '#') end -= 1;
-  while (end > 0 && whitespacePattern.test(rest[end - 1]!)) end -= 1;
+  while (end > 0 && whitespacePattern.test(rest[end - 1]!))
+    end -= 1;
+
+  while (end > 0 && rest[end - 1] === '#')
+    end -= 1;
+
+  while (end > 0 && whitespacePattern.test(rest[end - 1]!))
+    end -= 1;
 
   // The title needs one character `.` accepts; failing that, the regex borrows one blank from the spacing.
   if (end === 0 && (rest === '' || dotExcludedPattern.test(rest[0]!))) {

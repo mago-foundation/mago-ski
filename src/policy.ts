@@ -222,29 +222,44 @@ async function readOptional(filePath: string, label: string): Promise<Buffer | u
  * Candidates come from the checkout under review, so a Skill may have at most MAX_CERTIFICATE_CANDIDATES candidate files
  * totalling MAX_CERTIFICATE_TOTAL_BYTES; going over throws (the Skill is UNVERIFIABLE) instead of reading further.
  */
-export async function* iterateCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): AsyncGenerator<CertificateSource> {
+export async function* iterateCertificates(
+  skillName:        string, 
+  skillRoot:        string, 
+  certificateDirs:  string[], 
+  explicit?:        string
+): AsyncGenerator<CertificateSource> {
   let count = 0;
   let totalBytes = 0;
   const seen = new Set<string>();
   const account = (source: string, bytes: Buffer): CertificateSource => {
     count += 1;
     totalBytes += bytes.length;
-    if (count > MAX_CERTIFICATE_CANDIDATES) throw new Error(`more than ${MAX_CERTIFICATE_CANDIDATES} certificate candidates for this Skill; reduce certificate_dirs or remove stray certificates`);
-    if (totalBytes > MAX_CERTIFICATE_TOTAL_BYTES) throw new Error(`certificate candidates for this Skill exceed ${MAX_CERTIFICATE_TOTAL_BYTES} bytes in total`);
+    if (count > MAX_CERTIFICATE_CANDIDATES) 
+      throw new Error(`more than ${MAX_CERTIFICATE_CANDIDATES} certificate candidates for this Skill; reduce certificate_dirs or remove stray certificates`);
+    
+    if (totalBytes > MAX_CERTIFICATE_TOTAL_BYTES) 
+      throw new Error(`certificate candidates for this Skill exceed ${MAX_CERTIFICATE_TOTAL_BYTES} bytes in total`);
     return { source, bytes };
   };
+
   if (explicit) {
     const candidate = path.resolve(explicit);
     seen.add(candidate);
     yield account(candidate, await readRegularFile(candidate, 'Certificate', MAX_CERTIFICATE_BYTES));
   }
+
   for (const directory of certificateDirs) {
     const candidate = path.join(directory, `${skillName}.cert.json`);
-    if (seen.has(candidate)) continue;
+    
+    if (seen.has(candidate)) 
+      continue;
     seen.add(candidate);
+    
     const bytes = await readOptional(candidate, 'Certificate');
-    if (bytes) yield account(candidate, bytes);
+    if (bytes) 
+      yield account(candidate, bytes);
   }
+
   const inSkill = path.join(skillRoot, CERTIFICATE_FILENAME);
   if (!seen.has(inSkill)) {
     const bytes = await readOptional(inSkill, 'Certificate');
@@ -253,9 +268,15 @@ export async function* iterateCertificates(skillName: string, skillRoot: string,
 }
 
 /** Collects every candidate (within the same budget). Prefer `iterateCertificates`, which retains nothing. */
-export async function discoverCertificates(skillName: string, skillRoot: string, certificateDirs: string[], explicit?: string): Promise<CertificateSource[]> {
+export async function discoverCertificates(
+  skillName:        string, 
+  skillRoot:        string, 
+  certificateDirs:  string[], 
+  explicit?:        string
+): Promise<CertificateSource[]> {
   const sources: CertificateSource[] = [];
-  for await (const source of iterateCertificates(skillName, skillRoot, certificateDirs, explicit)) sources.push(source);
+  for await (const source of iterateCertificates(skillName, skillRoot, certificateDirs, explicit)) 
+  sources.push(source);
   return sources;
 }
 
@@ -285,50 +306,67 @@ export class DiscoveryBudgetError extends Error {
 }
 
 export interface SkillDiscovery {
-  skillDirs: string[];
-  /** Directories at the depth limit that have subdirectories; Skills below them were not searched. */
-  tooDeep: string[];
+  skillDirs:  string[];
+  /*  * Directories at the depth limit that have subdirectories; 
+      * Skills below them were not searched. */
+  tooDeep:    string[];
 }
 
 export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DEPTH, limits: DiscoveryLimits = {}): Promise<SkillDiscovery> {
-  const maxSkills = limits.maxSkills ?? MAX_DISCOVERED_SKILLS;
-  const maxEntries = limits.maxEntries ?? MAX_DISCOVERY_ENTRIES;
-  const found = new Set<string>();
-  const tooDeep = new Set<string>();
+  const maxSkills     = limits.maxSkills ?? MAX_DISCOVERED_SKILLS;
+  const maxEntries    = limits.maxEntries ?? MAX_DISCOVERY_ENTRIES;
+  const found         = new Set<string>();
+  const tooDeep       = new Set<string>();
   let entries = 0;
-  const checkSkills = () => {
-    if (found.size + tooDeep.size > maxSkills) throw new DiscoveryBudgetError(`more than ${maxSkills} Skills found under skill_dirs; narrow skill_dirs or split the repository`);
+  const checkSkills   = () => {
+    if (found.size + tooDeep.size > maxSkills) 
+      throw new DiscoveryBudgetError(`more than ${maxSkills} Skills found under skill_dirs; narrow skill_dirs or split the repository`);
   };
-  async function walk(directory: string, depth: number): Promise<void> {
+  
+  async function walk(
+    directory: string, 
+    depth: number
+  ): Promise<void> {
     try {
       await lstat(path.join(directory, 'SKILL.md'));
       found.add(directory);
       checkSkills();
       return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+    } 
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') 
+        throw error;
     }
+    
     let dir;
     try {
       dir = await opendir(directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+    } 
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') 
+        return;
       throw error;
     }
+    
     for await (const child of dir) {
       entries += 1;
-      if (entries > maxEntries) throw new DiscoveryBudgetError(`more than ${maxEntries} directory entries under skill_dirs; narrow skill_dirs or split the repository`);
+      if (entries > maxEntries) 
+        throw new DiscoveryBudgetError(`more than ${maxEntries} directory entries under skill_dirs; narrow skill_dirs or split the repository`);
+
       const childPath = path.join(directory, child.name);
       if (child.isSymbolicLink()) {
         try {
-          if ((await stat(childPath)).isDirectory()) found.add(childPath);
+          if ((await stat(childPath)).isDirectory()) 
+            found.add(childPath);
         } catch {
           // A dangling link has nothing a host could load.
         }
         checkSkills();
         continue;
       }
-      if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') continue;
+      
+      if (!child.isDirectory() || child.name === '.git' || child.name === 'node_modules') 
+        continue;
       // Hosts such as Pi search without a depth limit, so never skip deeper directories silently.
       if (depth + 1 > maxDepth) {
         tooDeep.add(childPath);
@@ -338,7 +376,8 @@ export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DE
       await walk(childPath, depth + 1);
     }
   }
-  for (const root of roots) await walk(path.resolve(root), 0);
+  for (const root of roots) 
+    await walk(path.resolve(root), 0);
   return { skillDirs: [...found].sort(), tooDeep: [...tooDeep].sort() };
 }
 
@@ -349,61 +388,85 @@ export function tooDeepResult(directory: string, now: Date): VerificationResult 
 }
 
 export interface DecisionRecord {
-  timestamp: string;
-  host: string;
-  mode: Mode;
-  action: 'allow' | 'block' | 'would-block';
-  event: string;
-  skill: string;
-  skill_dir: string;
-  digest: string | null;
-  certificate_id: string | null;
-  verdict: string;
-  reason: string;
+  timestamp:        string;
+  host:             string;
+  mode:             Mode;
+  action:           'allow' | 'block' | 'would-block';
+  event:            string;
+  skill:            string;
+  skill_dir:        string;
+  digest:           string | null;
+  certificate_id:   string | null;
+  verdict:          string;
+  reason:           string;
 }
 
 export function actionFor(mode: Mode, verified: boolean): DecisionRecord['action'] {
-  if (verified) return 'allow';
+  if (verified) 
+    return 'allow';
+  
   return mode === 'enforce' ? 'block' : 'would-block';
 }
 
-export async function appendDecision(logPath: string | null, record: DecisionRecord): Promise<void> {
-  if (!logPath) return;
+export async function appendDecision(
+  logPath: string | null, 
+  record: DecisionRecord
+): Promise<void> {
+  if (!logPath) 
+    return;
   // One JSON object per line. JSON.stringify escapes newlines and control characters; also escape the Unicode
   // line separators some JSON Lines readers split on, plus C1 controls, DEL and bidi controls. The text is data, not shell syntax: never source a log.
   const line = JSON.stringify(record).replace(/[\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  
   await appendToRegularFile(logPath, `${line}\n`, 'Decision log');
 }
 
-export function decisionRecord(result: VerificationResult, mode: Mode, event: string, host = `${hostname()}`): DecisionRecord {
+/* */
+export function decisionRecord(
+  result: VerificationResult, 
+  mode: Mode, 
+  event: string, 
+  host = `${hostname()}`
+): DecisionRecord {
   return {
-    timestamp: result.checkedAt,
+    timestamp:        result.checkedAt,
     host,
     mode,
-    action: actionFor(mode, result.verdict === 'VERIFIED'),
+    action:           actionFor(mode, result.verdict === 'VERIFIED'),
     event,
-    skill: result.skillName,
-    skill_dir: result.skillDir,
-    digest: result.digest,
-    certificate_id: result.certificateId,
-    verdict: result.verdict,
-    reason: result.reason,
+    skill:            result.skillName,
+    skill_dir:        result.skillDir,
+    digest:           result.digest,
+    certificate_id:   result.certificateId,
+    verdict:          result.verdict,
+    reason:           result.reason,
   };
 }
 
 /** Verifies one Skill under a policy, including trust loading. */
-export async function verifyWithPolicy(policy: Policy, skillDir: string, options: { now: Date; skillName?: string; certificate?: string; context?: TrustContext }): Promise<VerificationResult> {
+export async function verifyWithPolicy(
+  policy: Policy, 
+  skillDir: string, 
+  options: { 
+    now: Date; 
+    skillName?: string; 
+    certificate?: string; 
+    context?: TrustContext 
+  }): Promise<VerificationResult> {
   let context = options.context;
   if (!context) {
     const loaded = await loadPolicyTrust(policy, options.now);
-    if (!loaded.ok) return unverifiable(path.resolve(skillDir), options.skillName ?? path.basename(path.resolve(skillDir)), loaded.reason, options.now, loaded.verdict);
+    if (!loaded.ok) 
+      return unverifiable(path.resolve(skillDir), options.skillName ?? path.basename(path.resolve(skillDir)), loaded.reason, options.now, loaded.verdict);
+    
     context = loaded.context;
   }
+
   return verifySkill({
     skillDir,
-    skillName: options.skillName,
+    skillName:    options.skillName,
     context,
-    now: options.now,
+    now:          options.now,
     certificates: (name, root) => iterateCertificates(name, root, policy.certificateDirs, options.certificate),
   });
 }

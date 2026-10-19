@@ -100,4 +100,4 @@ One JSON object per line:
 ## Key rotation
 
 - **Approver keys:** add the new key (`root add-approver`), re-approve the Skills, then remove the old key (`root remove-approver`). Certificates from a removed approver stop verifying once a host reads the updated trust root; revoke the old key instead if it may be compromised.
-- **Root key:** not implemented in v1. Planned design: the new root's first trust root is also signed by the old root, and hosts that pin the old fingerprint accept the new one only through that cross-signed document. Until then, replacing the root means distributing a new fingerprint to every host.
+- **Root key:** not implemented in v1; replacing the root means distributing a new fingerprint to every host. Proposed design, which also covers a leaked root key: [Root recovery v1](root-recovery-v1.md).
