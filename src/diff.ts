@@ -1,12 +1,24 @@
-import { collectSkillTree, compareTreePaths, type TreeFile } from './tree-digest.ts';
+import { collectSkillTree, compareTreePaths, sha256Hex, type TreeFile } from './tree-digest.ts';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const MAX_ANALYZED_TEXT_BYTES = 2 * 1024 * 1024;
+
+/** Before + after bytes, summed over every file: per-file limits alone allow ~500 MiB of parsing. */
+const MAX_SECTION_DIFF_BYTES = 16 * 1024 * 1024;
 const MAX_REPORTED_FILES = 200;
 const MAX_REPORTED_SECTIONS = 32;
 const MAX_INDEXED_SECTIONS = 4_096;
 const MAX_ORIGINS = 128;
+
+/** Per tree. Each candidate costs a URL parse, and a 256 MiB tree can hold tens of millions. */
+const MAX_URL_CANDIDATES = 100_000;
+
+/** "https://", a 254-char DNS name (trailing dot included), ":65535". The URL parser accepts longer hosts. */
+const MAX_ORIGIN_CHARS = 8 + 254 + 6;
 const MAX_HEADING_LEVEL = 6;
+
+/** One Markdown line can be megabytes long; reported labels must not be. */
+const MAX_LABEL_TITLE_CHARS = 200;
 
 const LABEL_DOCUMENT_BODY = '(document body)';
 const LABEL_EMPTY_HEADING = '(empty heading)';
@@ -14,13 +26,24 @@ const LABEL_FILE_ADDED = '(file added)';
 const LABEL_FILE_REMOVED = '(file removed)';
 const LABEL_WHOLE_FILE = '(whole file)';
 const LABEL_SIZE_LIMIT = '(whole file; size limit)';
+const LABEL_TOTAL_SIZE_LIMIT = '(whole file; total size limit)';
 const LABEL_NON_TEXT = '(whole file; non-text content)';
 const LABEL_EXEC_BIT = '(executable bit)';
 
+// Every pattern below runs on untrusted Skill content: keep each one free of overlapping quantifiers.
 const urlPattern = /https?:\/\/[^\s"'`<>()[\]{}]+/giu;
+const trailingPunctuation = '.,;:!?';
 const fenceOpenPattern = /^ {0,3}(`{3,}|~{3,})/u;
-const atxHeadingPattern = /^ {0,3}(#{1,6})[ \t]+(.+?)\s*#*\s*$/u;
-const linePattern = /[^\r\n]*(?:\r?\n|$)/gu;
+const fenceClosePattern = /^ {0,3}(`{3,}|~{3,})\s*$/u;
+const atxOpenPattern = /^ {0,3}(#{1,6})([ \t]+)/u;
+const whitespacePattern = /\s/u;
+
+/** What `.` refuses besides CR and LF, which never reach a line. */
+const dotExcludedPattern = /[\u2028\u2029]/u;
+
+// Sticky: a failed match must not rescan from every later offset (a lone CR made that quadratic).
+const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/uy;
+const lineEndingPattern = /(?:\r\n|\r|\n)$/u;
 const crlfPattern = /\r\n/gu;
 
 interface MarkdownSection {
@@ -61,18 +84,28 @@ export interface DiffResult {
   files: FileChange[];
 }
 
-function collectOrigins(contents: Map<string, Buffer>): { 
-  origins: string[]; 
-  complete: boolean 
+/** Drops trailing sentence punctuation. A loop, because /[.,;:!?]+$/ backtracks quadratically on a long run. */
+function trimTrailingPunctuation(value: string): string {
+  let end = value.length;
+  while (end > 0 && trailingPunctuation.includes(value[end - 1]!)) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function collectOrigins(contents: Map<string, Buffer>): {
+  origins: string[];
+  complete: boolean
 } {
   const origins = new Set<string>();
   let complete = true;
-  for (const content of contents.values()) {
+  let candidates = 0;
+  scan: for (const content of contents.values()) {
     if (content.length > MAX_ANALYZED_TEXT_BYTES || content.includes(0)) {
       complete = false;
       continue;
     }
-    
+
     let text: string;
     try {
       text = textDecoder.decode(content);
@@ -82,34 +115,78 @@ function collectOrigins(contents: Map<string, Buffer>): {
     }
 
     for (const match of text.matchAll(urlPattern)) {
+      candidates += 1;
+      if (candidates > MAX_URL_CANDIDATES) {
+        complete = false;
+        break scan;
+      }
+
+      let origin: string;
       try {
-        const parsed = new URL(match[0].replace(/[.,;:!?]+$/u, ''));
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') 
+        const parsed = new URL(trimTrailingPunctuation(match[0]));
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
           continue;
-        
-        const origin = parsed.origin.toLowerCase();
-        if (origins.has(origin)) 
-          continue;
-        if (origins.size >= MAX_ORIGINS) {
-          complete = false;
-          continue;
-        }
-        
-        origins.add(origin);
+        origin = parsed.origin.toLowerCase();
       } catch {
         // URL-like text that does not parse is not capability evidence.
+        continue;
       }
+
+      // No DNS name resolves past this length, and one such origin could be megabytes of report.
+      if (origin.length > MAX_ORIGIN_CHARS) {
+        complete = false;
+        continue;
+      }
+
+      if (origins.has(origin))
+        continue;
+      // A full set cannot change any more, so scanning on would only burn CPU.
+      if (origins.size >= MAX_ORIGINS) {
+        complete = false;
+        break scan;
+      }
+
+      origins.add(origin);
     }
   }
-  return { 
-    origins: [...origins].sort(), 
-    complete 
+  return {
+    origins: [...origins].sort(),
+    complete
   };
 }
 
 /* ********************************************  */
 /*               Markdown Parsing                */
 /* ********************************************  */
+
+/**
+ * Linear-time equivalent of /^ {0,3}(#{1,6})[ \t]+(.+?)\s*#*\s*$/u. That regex lets its lazy title
+ * overlap the optional closing sequence, and backtracks cubically on a long run of blanks.
+ */
+function atxHeading(line: string): { level: number; title: string } | null {
+  const open = atxOpenPattern.exec(line);
+  if (!open)
+    return null;
+
+  const level = open[1]!.length;
+  const spacing = open[2]!.length;
+  const rest = line.slice(open[0].length);
+
+  // Start of the longest suffix matching \s*#*\s*: the closing sequence the title leaves out.
+  let end = rest.length;
+  while (end > 0 && whitespacePattern.test(rest[end - 1]!)) end -= 1;
+  while (end > 0 && rest[end - 1] === '#') end -= 1;
+  while (end > 0 && whitespacePattern.test(rest[end - 1]!)) end -= 1;
+
+  // The title needs one character `.` accepts; failing that, the regex borrows one blank from the spacing.
+  if (end === 0 && (rest === '' || dotExcludedPattern.test(rest[0]!))) {
+    return spacing >= 2 ? { level, title: '' } : null;
+  }
+  const title = rest.slice(0, Math.max(1, end));
+
+  return dotExcludedPattern.test(title) ? null : { level, title: title.trim() };
+}
+
 function markdownSections(input: Uint8Array | string): MarkdownSection[] | null {
   const sections: MarkdownSection[] = [];
   let text: string;
@@ -118,9 +195,10 @@ function markdownSections(input: Uint8Array | string): MarkdownSection[] | null 
   let sectionStart = 0;
   let activeFence: { char: string; minLength: number } | null = null;
 
-  if (typeof input === 'string') {
+  if (typeof input === 'string')
     text = input;
-  } else {
+  
+  else {
     try {
       text = textDecoder.decode(input);
     } catch {
@@ -133,19 +211,16 @@ function markdownSections(input: Uint8Array | string): MarkdownSection[] | null 
   while (linePattern.lastIndex < text.length) {
     const lineStart = linePattern.lastIndex;
     const match = linePattern.exec(text);
-    if (!match || match[0].length === 0) {
+    
+    if (!match || match[0].length === 0)
       break;
-    }
 
-    const line = match[0].replace(/\r?\n$/u, '');
+    const line = match[0].replace(lineEndingPattern, '');
 
     // 1. Track fenced code blocks (``` or ~~~) so '#' comments inside code are never mistaken for headings.
     if (activeFence !== null) {
-      const trimmed = line.replace(/^ {0,3}/u, '');
-      if (
-        trimmed.startsWith(activeFence.char.repeat(activeFence.minLength)) &&
-        new RegExp(`^${activeFence.char}+\\s*$`, 'u').test(trimmed)
-      ) {
+      const close = fenceClosePattern.exec(line);
+      if (close && close[1]![0] === activeFence.char && close[1]!.length >= activeFence.minLength) {
         activeFence = null;
       }
       continue;
@@ -162,8 +237,8 @@ function markdownSections(input: Uint8Array | string): MarkdownSection[] | null 
     }
 
     // 2. Outside code blocks, check for ATX headings (# through ######).
-    const headingMatch = atxHeadingPattern.exec(line);
-    if (!headingMatch) {
+    const heading = atxHeading(line);
+    if (!heading) {
       continue;
     }
 
@@ -173,10 +248,14 @@ function markdownSections(input: Uint8Array | string): MarkdownSection[] | null 
         title: currentTitle,
         content: text.slice(sectionStart, lineStart),
       });
+      // indexSectionsByKey keeps only MAX_INDEXED_SECTIONS; one more is enough for it to report truncation.
+      if (sections.length > MAX_INDEXED_SECTIONS) {
+        return sections;
+      }
     }
 
-    currentLevel = headingMatch[1]!.length;
-    currentTitle = headingMatch[2]!.trim();
+    currentLevel = heading.level;
+    currentTitle = heading.title;
     sectionStart = lineStart;
   }
 
@@ -198,9 +277,22 @@ function clampHeadingLevel(level: number): number {
   return Math.min(MAX_HEADING_LEVEL, Math.floor(level));
 }
 
+function truncateTitle(title: string): string {
+  if (title.length <= MAX_LABEL_TITLE_CHARS) {
+    return title;
+  }
+  let end = MAX_LABEL_TITLE_CHARS;
+  const last = title.charCodeAt(end - 1);
+  // Never split a surrogate pair.
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return `${title.slice(0, end)}...`;
+}
+
 function formatSectionLabel(section: MarkdownSection, occurrence: number): string {
   const safeLevel = clampHeadingLevel(section.level);
-  const safeTitle = section.title.trim() || LABEL_EMPTY_HEADING;
+  const safeTitle = truncateTitle(section.title.trim()) || LABEL_EMPTY_HEADING;
   const baseLabel =
     safeLevel === 0
       ? LABEL_DOCUMENT_BODY
@@ -226,9 +318,8 @@ function indexSectionsByKey(
   }
 
   for (const section of sections) {
-    if (!section || typeof section !== 'object') {
+    if (!section || typeof section !== 'object')
       continue;
-    }
 
     if (indexed.size >= MAX_INDEXED_SECTIONS) {
       truncated = true;
@@ -240,8 +331,9 @@ function indexSectionsByKey(
     const rawContent = typeof section.content === 'string' ? section.content : '';
     const safeTitle = rawTitle.trim().normalize('NFC');
 
-    // Length-prefixed key prevents delimiter collision even if the title contains NUL or special characters.
-    const baseKey = `${safeLevel}:${safeTitle.length}:${safeTitle}`;
+    // A fixed-size key: V8 hashes strings over 16,383 chars by length alone, so raw long titles would all
+    // land in one Map bucket. The hex digest also has no delimiter for a crafted title to collide with.
+    const baseKey = `${safeLevel}:${sha256Hex(Buffer.from(safeTitle, 'utf8'))}`;
     const occurrence = (counts.get(baseKey) ?? 0) + 1;
     counts.set(baseKey, occurrence);
 
@@ -257,8 +349,9 @@ function indexSectionsByKey(
 
 function changedSections(
   filePath: string,
-  before?: Uint8Array,
-  after?: Uint8Array,
+  before: Uint8Array | undefined,
+  after: Uint8Array | undefined,
+  budget: { remainingBytes: number },
 ): { sections: string[]; truncated: boolean } {
   if (!before || !after)
     return { sections: [before ? LABEL_FILE_REMOVED : LABEL_FILE_ADDED], truncated: false };
@@ -271,6 +364,11 @@ function changedSections(
 
   if (before.byteLength > MAX_ANALYZED_TEXT_BYTES || after.byteLength > MAX_ANALYZED_TEXT_BYTES)
     return { sections: [LABEL_SIZE_LIMIT], truncated: true };
+
+  const cost = before.byteLength + after.byteLength;
+  if (cost > budget.remainingBytes)
+    return { sections: [LABEL_TOTAL_SIZE_LIMIT], truncated: true };
+  budget.remainingBytes -= cost;
 
   const beforeParsed = markdownSections(before);
   const afterParsed = markdownSections(after);
@@ -334,6 +432,7 @@ function fileChanges(
   const afterByPath = new Map<string, TreeFile>();
   const pathSet = new Set<string>();
   const files: FileChange[] = [];
+  const sectionBudget = { remainingBytes: MAX_SECTION_DIFF_BYTES };
   let truncated = false;
 
   for (const file of beforeFiles) {
@@ -371,7 +470,7 @@ function fileChanges(
     const sectionDiff =
       change === 'mode-changed'
         ? { sections: [LABEL_EXEC_BIT], truncated: false }
-        : changedSections(filePath, beforeContents.get(filePath), afterContents.get(filePath));
+        : changedSections(filePath, beforeContents.get(filePath), afterContents.get(filePath), sectionBudget);
 
     if (sectionDiff.truncated) {
       truncated = true;
@@ -392,22 +491,26 @@ function fileChanges(
   return { files, truncated };
 }
 
-/**
+/*
  * Compares two Skill directories. Any digest difference requires a new certificate,
  * whatever the capability evidence says: unchanged origins never waive a content change.
  */
 export async function diffSkillTrees(baseRoot: string, candidateRoot: string): Promise<DiffResult> {
-  const base = await collectSkillTree(baseRoot, { includeContents: true });
-  const candidate = await collectSkillTree(candidateRoot, { includeContents: true });
-  const changed = base.digest !== candidate.digest;
-  const diff = changed
+  const base                = await collectSkillTree(baseRoot, { includeContents: true });
+  const candidate           = await collectSkillTree(candidateRoot, { includeContents: true });
+  const changed             = base.digest !== candidate.digest;
+  const diff                = changed
     ? fileChanges(base.files, candidate.files, base.contents!, candidate.contents!)
     : { files: [], truncated: false };
-  const baseOrigins = collectOrigins(base.contents!);
-  const candidateOrigins = collectOrigins(candidate.contents!);
-  const added = candidateOrigins.origins.filter((origin) => !baseOrigins.origins.includes(origin));
-  const removed = baseOrigins.origins.filter((origin) => !candidateOrigins.origins.includes(origin));
-  const capabilityChanged = added.length > 0 || removed.length > 0;
+  const baseOrigins         = collectOrigins(base.contents!);
+  // Equal digests mean equal contents: a second scan could only repeat the first.
+  const candidateOrigins    = changed ? collectOrigins(candidate.contents!) : baseOrigins;
+  const baseOriginSet       = new Set(baseOrigins.origins);
+  const candidateOriginSet  = new Set(candidateOrigins.origins);
+  const added               = candidateOrigins.origins.filter((origin) => !baseOriginSet.has(origin));
+  const removed             = baseOrigins.origins.filter((origin) => !candidateOriginSet.has(origin));
+  const capabilityChanged   = added.length > 0 || removed.length > 0;
+  
   return {
     result: !changed ? 'UNCHANGED' : capabilityChanged ? 'CAPABILITY_CHANGED' : 'CONTENT_CHANGED',
     recertification_required: changed,
