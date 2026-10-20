@@ -3,7 +3,7 @@ import { canonicalBytes, exactKeys, parseCanonicalJsonBytes, requireArray, requi
 import { envelopeBytes, parseEnvelope, signEnvelope, verifyEnvelopeSignature } from './dsse.ts';
 import { validateKeyId } from './keys.ts';
 import { validateDigest } from './names.ts';
-import { formatTimestamp, parseTimestamp } from './time.ts';
+import { formatTimestamp, parseTimestamp, requireValidDate } from './time.ts';
 import { TrustDocumentError, type TrustRoot } from './trust-root.ts';
 
 export const REVOCATIONS_PAYLOAD_TYPE = 'application/vnd.mago-ski.revocations+json';
@@ -89,6 +89,9 @@ export function parseRevocationsPayload(bytes: Uint8Array): Revocations {
 }
 
 export function verifyRevocations(bytes: Uint8Array, trustRoot: TrustRoot, now: Date): Revocations {
+  // The freshness check below compares against `now`; an invalid Date would let an expired list through.
+  requireValidDate(now, 'Verification time');
+
   let revocations: Revocations;
   try {
     revocations = readRevocationsForUpdate(bytes, trustRoot.root.keyId, trustRoot.root.publicKey);

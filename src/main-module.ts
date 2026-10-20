@@ -8,8 +8,11 @@ import { fileURLToPath } from 'node:url';
  */
 export function isMainModule(moduleUrl: string): boolean {
   const entry = process.argv[1];
-  if (!entry) return false;
   const self = fileURLToPath(moduleUrl);
+  
+  if (!entry) 
+    return false;
+  
   try {
     return realpathSync(entry) === realpathSync(self);
   } catch {

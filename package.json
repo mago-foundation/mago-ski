@@ -1,69 +1,43 @@
 {
   "name": "@mago-foundation/mago-ski",
   "version": "0.1.0",
-  "author": "The Mago Foundation",
   "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
+  "license": "Apache-2.0",
+  "author": "The Mago Foundation",
+  "homepage": "https://magofoundation.dev",
   "repository": {
     "type": "git",
     "url": "https://github.com/mago-foundation/mago-ski.git"
   },
-  "homepage": "https://magofoundation.dev",
   "bugs": {
     "url": "https://github.com/mago-foundation/mago-ski/issues"
   },
-  "keywords": [
-    "pi-package",
-    "agent-skills",
-    "skills",
-    "pki",
-    "supply-chain",
-    "signing"
-  ],
-  "license": "Apache-2.0",
   "type": "module",
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "os": [
-    "linux",
-    "darwin"
-  ],
-  "bin": {
-    "mago-ski": "dist/src/cli.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
     }
   },
-  "pi": {
-    "extensions": [
-      "./dist/hosts/pi/index.js"
-    ]
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
-    "check": "npm run typecheck && npm test",
-    "prepublishOnly": "npm run check && npm run build"
+  "bin": {
+    "mago-ski": "dist/src/cli.js"
   },
   "files": [
-    "dist",
-    "action.yml",
-    "README.md",
-    "LICENSE",
-    "NOTICE",
-    "docs/spec",
     "docs/hosts/",
-    "docs/threat-model.md"
+    "action.yml",
+    "dist",
+    "docs/spec",
+    "docs/threat-model.md",
+    "LICENSE",
+    "README.md",
+    "NOTICE"
   ],
-  "devDependencies": {
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@types/node": "22.20.4",
-    "typescript": "5.8.3"
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check && npm run build",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.0.4"
@@ -72,5 +46,34 @@
     "@earendil-works/pi-coding-agent": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@types/node": "22.20.4",
+    "typescript": "5.8.3"
+  },
+  "keywords": [
+    "agent-skills",
+    "pi-package",
+    "pki",
+    "signing",
+    "skills",
+    "supply-chain"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "imports": {
+    "#package.json": "./package.json"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/hosts/pi/index.js"
+    ]
   }
 }
