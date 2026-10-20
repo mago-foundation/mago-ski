@@ -27,7 +27,10 @@
     "action.yml",
     "dist",
     "docs/spec",
-    "docs/threat-model.md"
+    "docs/threat-model.md",
+    "LICENSE",
+    "README.md",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
