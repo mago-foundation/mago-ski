@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>mago-ski</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="logo">mago <span>/ ski</span></div>
+    <div class="tagline">내 Skill의 변화를 한눈에.</div>
+    <div class="chip">GUI PoC · 로컬 전용</div>
+    <div class="spacer"></div>
+    <div class="status" id="status"><span class="dot"></span><span>시작하는 중</span></div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="skills" aria-selected="true">내 Skills <span class="count" id="count">0</span></button>
+    <button class="tab" role="tab" data-tab="activity" aria-selected="false">활동 기록</button>
+    <button class="tab" role="tab" data-tab="settings" aria-selected="false">전역 설정</button>
+  </nav>
+
+  <main>
+    <section id="tab-skills">
+      <section class="headline">
+        <div>
+          <h1 id="headline">Skill을 찾고 있어요.</h1>
+          <p id="subline">평소처럼 사용하세요. 모듈은 자동으로 연결되고, 바뀐 부분은 여기서 확인할 수 있어요.</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn" id="check-now">↻ 다시 확인</button>
+      </section>
+      <div id="banners"></div>
+      <section class="rack-wrap" aria-label="Skill 체인">
+        <div class="rack-head">
+          SKILL CHAIN / AUTO RACKED
+          <div class="spacer"></div>
+          <div class="legend">
+            <span><i class="live"></i>동작 중</span>
+            <span><i class="concept"></i>후속 단계 구상 · 동작하지 않음</span>
+          </div>
+        </div>
+        <div class="chain" id="chain"></div>
+      </section>
+      <section class="detail" id="detail"></section>
+    </section>
+
+    <section id="tab-activity" class="page" hidden></section>
+    <section id="tab-settings" class="page" hidden></section>
+  </main>
+
+  <footer class="foot">
+    <span>모든 처리는 이 컴퓨터에서만 일어나요. 창을 닫으면 관찰도 멈춰요.</span>
+    <span id="foot-right">GUI PoC · 엔진 0.1</span>
+  </footer>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -4,6 +4,12 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- `approve --expect-digest DIGEST` (and `expectDigest` in `approveSkill`): refuses to sign when the Skill's bytes are no longer the reviewed version, checked against the same bytes that would be signed. Review tools can pin an approval to exactly what the approver saw.
+- `loadPolicyTrust(policy, now, { recordVersions: false })`: reads the host state file and applies its rollback minimums without writing it, for observers that must not move a host's rollback memory.
+- GUI PoC (`gui/`, not published): an Electron desktop companion that discovers installed Pi and Agent Skills, remembers each version, shows what changed (file, section, line, executable bit and HTTP(S) origin evidence from the engine diff) and projects the host policy's PKI verdicts read-only. See [gui/README.md](gui/README.md).
+
 ### Security
 
 Fixes for the ten findings of the Codex Security review of 0.1.0.

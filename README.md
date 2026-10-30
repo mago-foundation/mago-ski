@@ -99,6 +99,7 @@ mago-ski 0.1 supports **Linux and macOS** (Node.js 22.18 or newer). **Windows is
 | **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
 | **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect`, plus key, root, revoke and approve commands. Run `mago-ski --help` | |
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
+| **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Read-only toward policy and host state; it never approves | [gui/README.md](gui/README.md) |
 
 ## Verdicts
 
@@ -127,6 +128,8 @@ npm test                 # runs the TypeScript sources directly
 npm run build            # dist/ for packaging
 node scripts/vectors.ts --write   # regenerate test vectors after a format change
 ```
+
+The desktop GUI is a separate package in [`gui/`](gui/README.md) with its own `npm ci`, `npm test` and `npm start`.
 
 The `src/experimental/sigstore.ts` adapter (Cosign keyless verification) is kept from an earlier preview and is not used by the verifier.
 

@@ -1,0 +1,30 @@
+{
+  "name": "@mago-foundation/mago-ski-gui",
+  "version": "0.0.1-poc",
+  "private": true,
+  "description": "mago-ski desktop companion (PoC): see how installed Skills change, next to their PKI approval status",
+  "license": "Apache-2.0",
+  "author": "The Mago Foundation",
+  "type": "module",
+  "main": "dist/gui/src/main/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.renderer.json && node scripts/copy-static.ts",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "demo": "node scripts/demo.ts",
+    "smoke": "npm run build && node scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "electron": "45.1.0",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
+}
