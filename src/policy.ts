@@ -172,8 +172,12 @@ async function readState(statePath: string): Promise<Record<string, RootState>> 
   return roots;
 }
 
-/** Loads trust documents for a policy, enforcing rollback protection through the state file. */
-export async function loadPolicyTrust(policy: Policy, now: Date): Promise<TrustContextResult> {
+/**
+ * Loads trust documents for a policy, enforcing rollback protection through the state file.
+ * With `recordVersions: false` the state file is still read (the same rollback minimums apply) but never written:
+ * for observers such as the GUI, which must not move a host's rollback memory.
+ */
+export async function loadPolicyTrust(policy: Policy, now: Date, options: { recordVersions?: boolean } = {}): Promise<TrustContextResult> {
   let trustRootBytes: Buffer;
   let revocationsBytes: Buffer;
   let roots: Record<string, RootState> = {};
@@ -189,7 +193,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date): Promise<TrustC
   const minimum: MinimumVersions | undefined = seen ? { trustRootVersion: seen.trust_root_version, revocationsVersion: seen.revocations_version } : undefined;
   const result = loadTrustContext({ trustRootBytes, revocationsBytes, rootKeyId: policy.rootKeyId, now, minimum });
   
-  if (result.ok && policy.statePath) {
+  if (result.ok && policy.statePath && options.recordVersions !== false) {
     const next = { trust_root_version: result.context.trustRoot.version, revocations_version: result.context.revocations.version };
     if (!seen || next.trust_root_version > seen.trust_root_version || next.revocations_version > seen.revocations_version) {
       roots[policy.rootKeyId] = {

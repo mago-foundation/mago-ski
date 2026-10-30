@@ -296,14 +296,24 @@ export async function approveSkill(options: {
   name?: string;
   previous?: string;
   out?: string;
+  /** The digest the approver reviewed; issuance is refused if the bytes on disk differ. */
+  expectDigest?: string;
 }): Promise<{ path: string; skillName: string; digest: string; certificateId: string; expiresAt: Date }> {
   const skillDir = path.resolve(options.skillDir);
+  const expected = options.expectDigest === undefined ? null : validateDigest(options.expectDigest, 'expected digest');
 
   // Verify the key path is outside the Skill directory before reading the private key.
   await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
   const approver  = await loadPrivateKey(options.approverKeyPath);
   const skillName = await resolveSkillName(skillDir, options.name);
   const tree      = await collectSkillTree(skillDir, { includeContents: true });
+
+  // Checked against the same bytes that are signed, so a change after review can never be certified.
+  if (expected !== null && tree.digest !== expected) {
+    throw new Error(
+      `Refusing to approve: the Skill changed since it was reviewed (expected ${expected}, found ${tree.digest}). Review the current version and approve again.`,
+    );
+  }
 
   for (const [filePath, content] of tree.contents!) {
     if (containsPrivateKey(content)) {

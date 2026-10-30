@@ -184,6 +184,7 @@ Issues a certificate for the exact current bytes of a Skill, signed with your ap
   --name NAME          Skill name (default: "name" in SKILL.md, else the directory name)
   --previous CERT|DIG  the previously approved certificate or digest, for the update history
   --out FILE           where to write the certificate (default: SKILL_DIR/.mago-ski-cert.json)
+  --expect-digest DIG  the digest you reviewed (sha256:...); refuses to sign if the Skill changed since
 
 Refuses a Skill that contains a private key. A certificate records who approved which exact version;
 it does not certify that the Skill is safe.
@@ -632,7 +633,7 @@ export async function runCli(
     case 'revoke':
       return await runRevoke(maybeSub, parsed, now);
     case 'approve': {
-      allow(parsed, ['--key', '--expires', '--reason', '--name', '--previous', '--out'], 1);
+      allow(parsed, ['--key', '--expires', '--reason', '--name', '--previous', '--out', '--expect-digest'], 1);
       const result = await approveSkill({
         skillDir: parsed.positional[0]!, 
         approverKeyPath: one(parsed, '--key'), 
@@ -642,6 +643,7 @@ export async function runCli(
         ...(optional(parsed, '--name') ? { name: one(parsed, '--name') } : {}),
         ...(optional(parsed, '--previous') ? { previous: one(parsed, '--previous') } : {}),
         ...(optional(parsed, '--out') ? { out: one(parsed, '--out') } : {}),
+        ...(optional(parsed, '--expect-digest') ? { expectDigest: one(parsed, '--expect-digest') } : {}),
       });
 
       print({
