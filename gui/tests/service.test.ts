@@ -328,19 +328,39 @@ test('cleanup cannot delete copies a running check is storing', async (t) => {
   assert.equal(change.contentRetained, true, change.contentNote ?? '');
 });
 
-test('a damaged retained copy is rewritten on the next check', async (t) => {
+test('a damaged retained copy is noticed when read, then rewritten by the next check', async (t) => {
   const e = await setup(t);
   const skill = await writeSkill(e.agents, 'docs-helper');
   const service = await startService(t, e);
-  const { readdir } = await import('node:fs/promises');
-  const shard = (await readdir(path.join(e.dataDir, 'blobs')))[0]!;
-  const blob = (await readdir(path.join(e.dataDir, 'blobs', shard)))[0]!;
-  await writeFile(path.join(e.dataDir, 'blobs', shard, blob), 'damaged');
-  await service.check();
   await appendFile(path.join(skill, 'SKILL.md'), 'later change\n');
   await service.check();
-  const change = (await service.detail(byName(service.view(), 'docs-helper').id))!.change!;
-  assert.equal(change.contentRetained, true, change.contentNote ?? '');
+  const id = byName(service.view(), 'docs-helper').id;
+  // Damage the retained copy of the current SKILL.md.
+  const { createHash } = await import('node:crypto');
+  const { readFile } = await import('node:fs/promises');
+  const sha = createHash('sha256').update(await readFile(path.join(skill, 'SKILL.md'))).digest('hex');
+  await writeFile(path.join(e.dataDir, 'blobs', sha.slice(0, 2), sha), 'damaged');
+
+  const damaged = (await service.detail(id))!.change!;
+  assert.equal(damaged.contentRetained, false);
+  assert.match(damaged.contentNote!, /missing or damaged/);
+
+  await service.check();
+  const repaired = (await service.detail(id))!.change!;
+  assert.equal(repaired.contentRetained, true, repaired.contentNote ?? '');
+});
+
+test('an interrupted first run is a normal first run, not lost history', async (t) => {
+  const e = await setup(t);
+  await writeSkill(e.agents, 'docs-helper');
+  const first = await startService(t, e);
+  await first.stop();
+  // What disk holds if the app quit during its first check: the pre-check save, plus copies written since.
+  const { emptyState } = await import('../src/service/store.ts');
+  await writeFile(path.join(e.dataDir, 'state.json'), JSON.stringify(emptyState()));
+  const second = await startService(t, e);
+  assert.equal(second.view().service.historyReset, null);
+  assert.equal(byName(second.view(), 'docs-helper').state, 'unchanged');
 });
 
 test('removing a folder during a running check leaves no ghost Skills', async (t) => {

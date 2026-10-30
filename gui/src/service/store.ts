@@ -119,7 +119,7 @@ export class Store {
       await writeNewFile(target, bytes, 0o600);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      // An existing copy is trusted only if it still matches its hash; a damaged one is replaced.
+      // An existing copy is trusted only if it still matches its hash; a damaged one (deleted by getBlob) is replaced.
       if (!(await this.getBlob(sha256))) await writeFileAtomic(target, bytes, 0o600);
     }
   }
@@ -132,14 +132,17 @@ export class Store {
     }
   }
 
-  /** Returns retained bytes, or null when missing or corrupted. */
+  /** Returns retained bytes, or null when missing or damaged. A damaged copy is deleted, so the next check can rewrite it. */
   async getBlob(sha256: string): Promise<Buffer | null> {
+    let bytes: Buffer;
     try {
-      const bytes = await readFile(this.blobPath(sha256));
-      return sha256Hex(bytes) === sha256 ? bytes : null;
+      bytes = await readFile(this.blobPath(sha256));
     } catch {
       return null;
     }
+    if (sha256Hex(bytes) === sha256) return bytes;
+    await unlink(this.blobPath(sha256)).catch(() => {});
+    return null;
   }
 
   /** Deletes retained copies no remembered or observed version refers to. */

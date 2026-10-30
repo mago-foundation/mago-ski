@@ -262,10 +262,6 @@ export function evaluateCertificate(
 }
 
 /**
- * Resolves the Skill name. SKILL.md comes from an untrusted checkout, so it is read only if it is a regular,
- * non-symlink file no larger than the tree collector's per-file limit; anything else throws (UNVERIFIABLE).
- */
-/**
  * The Skill name from SKILL.md's bytes: an explicit name, else frontmatter "name", else the directory name.
  * Pure, so a caller that hashes and signs those bytes can derive the name from the very same buffer.
  */
@@ -291,6 +287,10 @@ export function skillNameFromSkillFile(skillDir: string, skillFile: Uint8Array |
   return validateSkillName(path.basename(path.resolve(skillDir)), 'Skill directory name');
 }
 
+/**
+ * Resolves the Skill name. SKILL.md comes from an untrusted checkout, so it is read only if it is a regular,
+ * non-symlink file no larger than the tree collector's per-file limit; anything else throws (UNVERIFIABLE).
+ */
 export async function resolveSkillName(skillDir: string, explicit?: string): Promise<string> {
   if (explicit) {
     return validateSkillName(explicit);

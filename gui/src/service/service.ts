@@ -147,6 +147,8 @@ export class ObservationService extends EventEmitter {
     await this.store.init();
     const { state, lost } = await this.store.load();
     this.state = state;
+    // Saved before the first check writes any copy, so an interrupted first run never looks like lost history.
+    if (!lost) await this.store.save(state);
     if (lost) {
       // Baselines recorded from here on are new first sightings, not continuity with the lost history.
       const at = this.now().toISOString();
@@ -284,12 +286,16 @@ export class ObservationService extends EventEmitter {
     return this.s.instances.find((instance) => instance.realPath === realPath);
   }
 
-  /** True when nothing more can be retained: copying is off, or every copy recorded as kept is present. */
+  /**
+   * True when nothing more can be retained: copying is off, or every retainable file has a copy. A cheap existence
+   * check: copies are hash-checked when read, and a damaged one is deleted then, so this check rewrites it next time.
+   */
   private async coverageIntact(version: Observation): Promise<boolean> {
     if (!this.s.prefs.retainContent) return true;
-    if (!version.coverage.complete) return false;
-    // Hash-checked, so a damaged copy is noticed here and rewritten from the bytes just read.
-    for (const file of version.files) if (!(await this.store.getBlob(file.sha256))) return false;
+    for (const file of version.files) {
+      if (file.size > MAX_RETAINED_FILE_BYTES) continue;
+      if (!(await this.store.hasBlob(file.sha256))) return false;
+    }
     return true;
   }
 
@@ -591,7 +597,7 @@ export class ObservationService extends EventEmitter {
     const previousVersions = [];
     for (const b of [...instance.previousBaselines].reverse()) {
       let retained = b.coverage.complete;
-      for (const file of b.files) if (retained && !(await this.store.hasBlob(file.sha256))) retained = false;
+      for (const file of b.files) if (retained && !(await this.store.getBlob(file.sha256))) retained = false;
       previousVersions.push({ digest: b.digest, recordedAt: b.recordedAt, supersededAt: b.supersededAt ?? null, retained });
     }
     return {
@@ -672,7 +678,7 @@ export class ObservationService extends EventEmitter {
     await this.serial(async () => {
       const resolved = path.resolve(rootPath);
       if (this.s.roots.some((root) => path.resolve(root.path) === resolved)) return;
-      this.s.roots.push({ id: `user-${randomUUID()}`, path: resolved, label: displayName(path.basename(resolved)) || resolved, origin: 'user' });
+      this.s.roots.push({ id: `user-${randomUUID()}`, path: resolved, label: path.basename(resolved) ? displayName(path.basename(resolved)) : resolved, origin: 'user' });
       await this.store.save(this.s);
     });
     await this.check();

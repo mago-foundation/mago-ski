@@ -384,6 +384,11 @@ function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
         + (change.analysisComplete ? '' : ' 일부 파일은 분석하지 못했어요.') + (change.truncated ? ' 변경 목록이 길어 일부만 보여요.' : '')));
   } else if (!d && (i.state === 'changed' || i.state === 'reviewed')) {
     pane.append(h('p', { class: 'sec-sub', style: 'text-align:left' }, detailError ?? '변경 내용을 불러오는 중…'));
+    if (detailError) {
+      const retry = h('button', { class: 'btn' }, '다시 시도');
+      retry.addEventListener('click', () => { detailKey = ''; detailError = null; void loadDetail(); });
+      pane.append(retry);
+    }
   }
 
   pane.append(h('div', { class: 'digest-bind' }, target
@@ -484,8 +489,8 @@ async function loadDetail(): Promise<void> {
   try {
     loaded = await api.getDetail(i.id);
   } catch (error) {
+    // The key stays set: the same versions are not retried on their own, only by the user or after a new change.
     if (detailKey !== key) return;
-    detailKey = '';  // retried on the next update
     detailError = `변경 내용을 불러오지 못했어요: ${error instanceof Error ? error.message : String(error)}`;
     if (device === 'monitor' && tab === 'skills' && view) renderMonitorDetail(view);
     return;
@@ -557,7 +562,7 @@ function renderActivity(v: ServiceView): void {
     h('p', { class: 'hint' }, '이 컴퓨터에서 관찰한 사건이에요. 기록과 확인은 조직 승인이 아니에요.'),
     v.history.length === 0 ? h('p', {}, '아직 기록이 없어요.') :
       h('table', { class: 'tbl' }, h('tr', {}, h('th', {}, '시각'), h('th', {}, 'Skill'), h('th', {}, '사건'), h('th', {}, '버전'), h('th', {}, '내용')),
-        ...v.history.map((e) => h('tr', {}, h('td', {}, time(e.at)), h('td', {}, e.name), h('td', {}, HISTORY_LABEL[e.kind]),
+        ...v.history.map((e) => h('tr', {}, h('td', {}, time(e.at)), h('td', {}, e.name || '전체'), h('td', {}, HISTORY_LABEL[e.kind]),
           h('td', { class: 'mono' }, short(e.digest)), h('td', {}, e.detail ?? '')))));
 }
 
