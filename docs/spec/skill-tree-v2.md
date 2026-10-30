@@ -1,6 +1,6 @@
 # Skill tree digest: `mago.skill-tree/v2`
 
-Status: draft, implemented by mago-ski 0.1. Test vectors: [`tests/vectors/trees.json`](../../tests/vectors/trees.json).
+Status: draft, implemented by mago-ski 0.1 and later. Test vectors: [`tests/vectors/trees.json`](../../tests/vectors/trees.json).
 
 The tree digest identifies the exact contents of a Skill directory. A certificate approves one tree digest.
 
@@ -55,5 +55,5 @@ Because the digest is computed from the record list, anyone holding a certificat
 
 ## Known limitations
 
-- On Windows the executable bit is always `false`, so a Skill approved on Linux or macOS with an executable script will not verify on Windows. mago-ski 0.1 does not support Windows for this reason.
+- On Windows the executable bit is always `false`, so a Skill approved on Linux or macOS with an executable script will not verify on Windows. mago-ski does not support Windows yet for this reason.
 - Some file systems report every file as executable (for example WSL's DrvFs mounts of Windows drives). Digest Skills on a native Linux or macOS file system.

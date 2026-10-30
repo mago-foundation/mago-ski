@@ -26,7 +26,7 @@ Host (Pi, CI)       pins the root fingerprint and checks that a certificate chai
 
 ## Quickstart
 
-Requires Node.js 22 or newer, on Linux or macOS. No runtime dependencies.
+Requires Node.js 22.23.4, 24.22.1 or 26.12.1 or newer in its line (the October 2026 security releases), on Linux or macOS. No runtime dependencies.
 
 ```bash
 npm install -g @mago-foundation/mago-ski   # installs the mago-ski command
@@ -91,7 +91,7 @@ Only name a policy you trust: run against a checkout you do not control, point `
 
 ## Platforms
 
-mago-ski 0.2 supports **Linux and macOS** (Node.js 22.18 or newer). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
+mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 or newer in its line (the October 2026 security releases)). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
 
 ## Where it runs
 

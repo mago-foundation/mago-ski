@@ -1,6 +1,6 @@
 # Skill certificate v1
 
-Status: draft, implemented by mago-ski 0.1. This page's URL is the certificate's `predicateType`. Test vectors: [`tests/vectors/certificates/`](../../tests/vectors/certificates/).
+Status: draft, implemented by mago-ski 0.1 and later. This page's URL is the certificate's `predicateType`. Test vectors: [`tests/vectors/certificates/`](../../tests/vectors/certificates/).
 
 A Skill certificate records that an approver approved one exact version of one Skill until a stated time. It does **not** state that the Skill is safe.
 

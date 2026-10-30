@@ -27,7 +27,7 @@ The design comes from [the GUI product plan](../docs/mago-ski-gui-product-plan.m
 
 ## Run it
 
-Requires Node.js 22.18 or newer.
+Requires Node.js 22.23.4, 24.22.1 or 26.12.1 or newer in its line (the October 2026 security releases). The app itself runs on the Node.js bundled with Electron 45.1.0 (24.22.1).
 
 ```bash
 cd gui

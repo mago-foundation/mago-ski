@@ -28,19 +28,27 @@ Fixes for the ten findings of the Codex Security review of 0.1.0.
 - Pi: a relative `MAGO_SKI_POLICY`, or a policy inside the project, is refused instead of being resolved against the working directory.
 - Skill discovery stops, and fails closed, above 1,000 Skills or 50,000 directory entries.
 
+### Upgrading from 0.1.0
+
+Verdicts, exit codes and every signed format (tree digest, certificate, trust root, revocation list, policy schema) are unchanged; existing certificates verify as before. Check these before upgrading:
+
+- **Node.js:** requires 22.23.4, 24.22.1 or 26.12.1 or newer in its line (`engines`), the October 2026 Node.js security releases. The GitHub Action now runs on Node.js 22.23.4.
+- **Policy location:** the CLI no longer reads `.mago-ski/policy.json` from the current directory. `verify` and `verify-all` use `--policy FILE`, else `MAGO_SKI_POLICY` (an absolute path, or starting with `~/`), else `~/.mago-ski/policy.json`. The exported `DEFAULT_POLICY_PATH` is replaced by `defaultPolicyPath()`.
+- **Policy contents:** a policy whose `decision_log` or `state_file` points outside the policy file's directory, or at a file the policy reads, no longer loads. In Pi enforce mode that blocks every Skill, so move those files next to the policy first.
+- **Pi:** a relative or in-project `MAGO_SKI_POLICY` is refused (every Skill is blocked, with a message). A verified Skill whose path below the working or home directory has characters outside `[A-Za-z0-9._/~@+-]` is not advertised; rename or move it.
+- **Reason text:** `UNAPPROVED_CHANGE` reasons now read `Skill changed since approval: …` and name the changed files in quotes. Scripts that match the old `Skill bytes changed since approval` text need updating.
+- **Limits:** discovery stops, failing closed, at 1,000 Skills or 50,000 directory entries; at most 64 certificate candidates (32 MiB) are read per Skill; the GitHub Action summary lists at most 200 Skills (failures first) and emits at most 50 annotations.
+- **Support:** only 0.2.x receives security fixes ([SECURITY.md](SECURITY.md)).
+
 ### Changed
 
-- `UNAPPROVED_CHANGE` reasons name what changed since approval (content, executable bit, added or removed files), for example `Skill changed since approval: executable bit changed on "run.sh" (now executable) (…)`. A mode-only change no longer reads "Skill bytes changed", a file whose content changed and that became executable reports both, and added executables are marked.
+- `UNAPPROVED_CHANGE` reasons name what changed since approval: content, executable bit, added or removed files, for example `Skill changed since approval: executable bit changed on "run.sh" (now executable) (…)`. A mode-only change no longer reads "Skill bytes changed"; a file whose content changed and that became executable reports both; added executables are marked. File names are quoted, with DEL, C1 controls and bidirectional or invisible characters escaped as `\uXXXX`, so a name cannot imitate the reason's wording or reach a terminal or annotation unescaped.
 - `approve` takes the Skill name from the same `SKILL.md` bytes it hashes and signs, instead of reading the file a second time.
-- File names in `UNAPPROVED_CHANGE` reasons are quoted, with C1 controls and bidirectional or invisible characters escaped as `\uXXXX`, so a Skill's file name cannot imitate the reason's wording or reach a terminal or annotation unescaped.
-- A missing Skill directory is reported as `Skill directory not found: PATH` (and a file as `Skill path is not a directory`) by `digest`, `verify`, `diff` and `approve`, instead of a raw `ENOENT` error.
-- `mago-ski diff A B` explains that the directories go in `--base` and `--candidate`.
-- README Quickstart: creates the example Skill before approving it.
-- The CLI no longer reads policy from the current directory. `verify` and `verify-all` use `--policy FILE`, else `MAGO_SKI_POLICY` (an absolute path, or starting with `~/`), else `~/.mago-ski/policy.json`. The exported `DEFAULT_POLICY_PATH` is replaced by `defaultPolicyPath()`.
-- A policy whose `decision_log` or `state_file` points outside its own directory, or at a file the policy reads, no longer loads.
-- Pi refuses a relative or in-project policy path, and does not advertise or expand a Skill whose path (below the working or home directory) has characters outside `[A-Za-z0-9._/~@+-]`.
-- Limits: discovery stops at 1,000 Skills or 50,000 directory entries; at most 64 certificate candidates (32 MiB) are read per Skill; the GitHub Action summary lists at most 200 Skills (failures first) and emits at most 50 annotations.
-- Manual release dispatch is removed; re-run a failed release with "Re-run jobs" on the tag's workflow run.
+- Clearer errors: a missing Skill directory reads `Skill directory not found: PATH` (a file: `Skill path is not a directory`) in `digest`, `verify`, `diff` and `approve`; a missing `--policy` file reads `Policy file not found: PATH`; `mago-ski diff A B` explains that the directories go in `--base` and `--candidate`. Each replaced a raw `ENOENT` or a generic argument error.
+- `mago-ski --help` is a grouped command index; `mago-ski <command> --help` gives each command's options.
+- Releases are re-run with "Re-run jobs" on the tag's workflow run (manual dispatch is removed, see Security).
+- Docs: the README Quickstart creates the example Skill before approving it; added [SECURITY.md](SECURITY.md), the [root recovery proposal](docs/spec/root-recovery-v1.md) (not implemented), and the GUI ontology, product plan and preview under `docs/`.
+- CI: a `gui` job type-checks, tests and builds the GUI on Linux and macOS; tests run on Node.js 22.23.4 and the latest 24.
 
 ## [0.1.0] - 2026-10-09
 

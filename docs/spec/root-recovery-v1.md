@@ -1,6 +1,6 @@
 # Root recovery v1
 
-Status: **proposal, not implemented.** Nothing in mago-ski 0.1 reads the fields or documents described here. Once implemented, this page becomes normative and the changes listed under [Changes to other documents](#changes-to-other-documents) are applied.
+Status: **proposal, not implemented.** No released version of mago-ski reads the fields or documents described here. Once implemented, this page becomes normative and the changes listed under [Changes to other documents](#changes-to-other-documents) are applied.
 
 In v1, every host trusts one pinned root key and nothing above it. If the root private key leaks, whoever holds the copy can sign trust roots and revocation lists that every host accepts, and the only remedy is to edit the policy on every host by hand ([threat model](../threat-model.md)).
 

@@ -10,10 +10,10 @@ Thanks for helping. mago-ski is security tooling: it decides whether an agent ho
 
 | Who | Node.js | Why |
 |---|---|---|
-| Users of the published package | **22.0 or newer** (`engines` in `package.json`) | The package ships compiled JavaScript in `dist/` |
-| Contributors | **22.18 or newer** | Tests, scripts and the GitHub Action run the TypeScript sources directly with Node's built-in type stripping, which is on by default from 22.18 |
+| Users of the published package | **22.23.4, 24.22.1 or 26.12.1 or newer in that line** (`engines` in `package.json`) | Earlier versions miss the October 2026 Node.js security releases |
+| Contributors | **The same** | Tests, scripts and the GitHub Action run the TypeScript sources directly with Node's built-in type stripping, on by default from 22.18; the floor above is the security one |
 
-Supported platforms are **Linux and macOS**. Windows is not supported in 0.1 (it has no POSIX executable bit; see the [digest spec](docs/spec/skill-tree-v2.md)), and npm refuses to install the package there.
+Supported platforms are **Linux and macOS**. Windows is not supported yet (it has no POSIX executable bit; see the [digest spec](docs/spec/skill-tree-v2.md)), and npm refuses to install the package there.
 
 ## Getting started
 
@@ -69,7 +69,7 @@ examples/demo.sh   runnable demos
 - Fill in the pull request template ([docs/pull_request_template.md](docs/pull_request_template.md)). Write "N/A" for sections that do not apply instead of deleting them.
 - Keep pull requests small enough to review in one sitting. Split large changes.
 - Bring your branch up to date with `dev` (`git merge origin/dev`) before asking for review.
-- CI runs on Linux and macOS with Node 22.18 and 24; it must be green.
+- CI runs on Linux and macOS with Node 22.23.4 and the latest 24; it must be green.
 
 ### Commit messages
 

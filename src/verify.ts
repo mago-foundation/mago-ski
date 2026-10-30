@@ -350,11 +350,11 @@ function buildDecision(chosen: Candidate | undefined): Decision {
 const MAX_NAMED_PATHS = 3;
 
 /**
- * Paths come from the Skill (untrusted): quoted, so a name cannot imitate the reason's own wording, and with C1 controls
+ * Paths come from the Skill (untrusted): quoted, so a name cannot imitate the reason's own wording, and with DEL, C1 controls
  * and bidi or invisible characters escaped, which tree paths may contain and terminals and annotations would apply.
  */
 function quotePath(file: string): string {
-  return JSON.stringify(file).replace(/[\u0080-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/gu,
+  return JSON.stringify(file).replace(/[\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/gu,
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 

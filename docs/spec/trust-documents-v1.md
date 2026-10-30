@@ -1,6 +1,6 @@
 # Trust documents v1
 
-Status: draft, implemented by mago-ski 0.1. Test vectors: [`tests/vectors/`](../../tests/vectors/).
+Status: draft, implemented by mago-ski 0.1 and later. Test vectors: [`tests/vectors/`](../../tests/vectors/).
 
 An organization's trust is anchored in one **root key**, kept offline. Hosts pin the root key's fingerprint (its key id). The root signs two documents: the trust root (who may approve what) and the revocation list (what is no longer trusted). Both are DSSE envelopes signed by the root key, in the same envelope format as [certificates](skill-certificate-v1.md), with canonical JSON payloads.
 

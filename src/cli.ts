@@ -518,8 +518,13 @@ async function loadCliPolicy(
     return await loadPolicy(policyPath);
   } 
   catch (error) {
-    if (!explicit && (error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    const missing = error as NodeJS.ErrnoException;
+    if (!explicit && missing?.code === 'ENOENT') {
       throw new UsageError(`No policy at ${policyPath}. Pass --policy FILE, or set MAGO_SKI_POLICY to an absolute path`);
+    }
+    // Only when the policy file itself is missing; a missing trust root or other input keeps its own error.
+    if (missing?.code === 'ENOENT' && missing.path === path.resolve(policyPath)) {
+      throw new UsageError(`Policy file not found: ${path.resolve(policyPath)}`);
     }
     throw error;
   }

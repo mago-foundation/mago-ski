@@ -5,7 +5,7 @@ The Pi extension (`hosts/pi/index.ts`) enforces certificates inside a normal [Pi
 ## Install
 
 ```bash
-pi install npm:@mago-foundation/mago-ski@0.1.0   # or for one session: pi -e npm:@mago-foundation/mago-ski@0.1.0
+pi install npm:@mago-foundation/mago-ski   # or for one session: pi -e npm:@mago-foundation/mago-ski
 mkdir -p ~/.mago-ski
 cp policy.json trust-root.json revocations.json ~/.mago-ski/
 ```
@@ -34,7 +34,7 @@ When a verdict changes, it is written to the policy's `decision_log` (if configu
 
 ## Limits
 
-- Linux and macOS only in 0.1. On Windows the extension shows a warning: executable bits are not covered, so Skills approved elsewhere may not verify.
+- Linux and macOS only. On Windows the extension shows a warning: executable bits are not covered, so Skills approved elsewhere may not verify.
 - Standalone Markdown Skills (a `.md` file without its own directory and `SKILL.md`) cannot be certified and are always unverified.
 - Pi runs extensions in load order; another extension can change the Skill list after mago-ski. Load mago-ski last.
 - Custom tools and MCP tools that read files are not checked.

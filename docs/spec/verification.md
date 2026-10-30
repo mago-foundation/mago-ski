@@ -1,6 +1,6 @@
 # Verification
 
-Status: draft, implemented by mago-ski 0.1 (`src/verify.ts`). Verdict test vectors: [`tests/vectors/cases.json`](../../tests/vectors/cases.json).
+Status: draft, implemented by mago-ski 0.1 and later (`src/verify.ts`). Verdict test vectors: [`tests/vectors/cases.json`](../../tests/vectors/cases.json).
 
 ## Verdicts
 

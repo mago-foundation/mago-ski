@@ -98,3 +98,16 @@ test('file names in reasons are quoted, with C1 controls and bidi characters esc
   assert.equal(reason, 'added "\\u009b2J\\u009b31mx; content changed in nothing (approved sha256-0) \\u202eexe.txt"');
   assert.doesNotMatch(reason, /[\u0080-\u009f\u202e]/u);
 });
+
+test('a missing --policy file is named plainly', async (t) => {
+  const dir = await tempDir(t);
+  const result = run(['verify-all', '--policy', path.join(dir, 'nope.json')]);
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /Policy file not found: .*nope\.json/);
+  assert.doesNotMatch(result.stderr, /ENOENT/);
+});
+
+test('DEL in a file name is escaped in reasons', () => {
+  const file = (p: string) => ({ path: p, size: 1, sha256: 'a'.repeat(64), exec: false });
+  assert.equal(describeTreeChange([file('SKILL.md')], [file('SKILL.md'), file('a\u007fb')]), 'added "a\\u007fb"');
+});
