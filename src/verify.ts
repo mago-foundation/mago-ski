@@ -349,6 +349,15 @@ function buildDecision(chosen: Candidate | undefined): Decision {
 
 const MAX_NAMED_PATHS = 3;
 
+/**
+ * Paths come from the Skill (untrusted): quoted, so a name cannot imitate the reason's own wording, and with C1 controls
+ * and bidi or invisible characters escaped, which tree paths may contain and terminals and annotations would apply.
+ */
+function quotePath(file: string): string {
+  return JSON.stringify(file).replace(/[\u0080-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/gu,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 function namePaths(paths: string[]): string {
   const shown = paths.slice(0, MAX_NAMED_PATHS).join(', ');
   return paths.length > MAX_NAMED_PATHS ? `${shown} and ${paths.length - MAX_NAMED_PATHS} more` : shown;
@@ -364,14 +373,14 @@ export function describeTreeChange(approved: readonly TreeFile[], found: readonl
     const old = before.get(file.path);
     before.delete(file.path);
     if (!old) {
-      added.push(file.exec ? `${file.path} (executable)` : file.path);
+      added.push(file.exec ? `${quotePath(file.path)} (executable)` : quotePath(file.path));
       continue;
     }
-    if (old.sha256 !== file.sha256 || old.size !== file.size) content.push(file.path);
+    if (old.sha256 !== file.sha256 || old.size !== file.size) content.push(quotePath(file.path));
     // Reported even when the content changed too: a file becoming executable matters on its own.
-    if (old.exec !== file.exec) mode.push(`${file.path} (${file.exec ? 'now executable' : 'no longer executable'})`);
+    if (old.exec !== file.exec) mode.push(`${quotePath(file.path)} (${file.exec ? 'now executable' : 'no longer executable'})`);
   }
-  const removed = [...before.keys()];
+  const removed = [...before.keys()].map(quotePath);
   const parts = [
     content.length ? `content changed in ${namePaths(content)}` : '',
     mode.length ? `executable bit changed on ${namePaths(mode)}` : '',

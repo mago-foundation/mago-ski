@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, opendir, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileAtomic, writeNewFile } from '../../../src/fs-safe.ts';
+import { digestFileList, MAX_RELATIVE_PATH_BYTES } from '../../../src/tree-digest.ts';
 import type { Baseline, CheckEvent, HistoryEvent, HistoryReset, Observation, Prefs } from './types.ts';
 
 export const STATE_SCHEMA = 'mago.gui-state/poc-1';
@@ -53,6 +54,34 @@ export function emptyState(): PersistedState {
   return { schema: STATE_SCHEMA, onboardedAt: null, roots: [], instances: [], history: [], checks: [], prefs: { ...DEFAULT_PREFS }, historyReset: null };
 }
 
+/** The certificate parser's rules for a covered path, plus no control characters. */
+export function isSafeRelativePath(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= MAX_RELATIVE_PATH_BYTES &&
+    !value.startsWith('/') && !value.includes('\\') && !/[\u0000-\u001f\u007f]/u.test(value) &&
+    value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
+/**
+ * A recorded version is usable only if every path is a safe relative path and its file list hashes to its digest.
+ * state.json is the GUI's own file, but its paths are later written under a temp directory, so they are not trusted.
+ */
+export function versionIsIntact(version: { digest?: unknown; files?: unknown } | null | undefined): boolean {
+  if (version === null || version === undefined) return true;
+  const files = version.files;
+  if (!Array.isArray(files)) return false;
+  for (const f of files as Array<Record<string, unknown>>) {
+    if (!isSafeRelativePath(f?.path) || typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(f.sha256) ||
+      typeof f.size !== 'number' || !Number.isSafeInteger(f.size) || f.size < 0 || typeof f.exec !== 'boolean') return false;
+  }
+  try {
+    return digestFileList(files as FileRecordLike[]) === version.digest;
+  } catch {
+    return false;
+  }
+}
+
+type FileRecordLike = { path: string; size: number; sha256: string; exec: boolean };
+
 function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -93,6 +122,11 @@ export class Store {
       value.history ??= [];
       value.checks ??= [];
       value.historyReset ??= null;
+      for (const instance of value.instances) {
+        for (const version of [instance.baseline, instance.current, ...(instance.previousBaselines ?? [])]) {
+          if (!versionIsIntact(version)) throw new Error('a recorded version failed its integrity check');
+        }
+      }
       return { state: value, lost: null };
     } catch (error) {
       const backup = `${this.statePath}.unreadable-${Date.now()}`;

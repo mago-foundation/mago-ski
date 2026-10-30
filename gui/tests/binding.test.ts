@@ -19,7 +19,7 @@ function detail(current: string, baseline: string, withChange = true): InstanceD
     baselineDigest: baseline, currentDigest: current, contentRetained: true, contentNote: null, files: [],
     addedOrigins: [], removedOrigins: [], analysisComplete: true, evidenceNote: '', truncated: false,
   } : null;
-  return { instance: instance(current, baseline), change, approveCommand: null, history: [], previousVersions: [] };
+  return { instance: instance(current, baseline), change, approveCommand: null, approveScope: null, history: [], previousVersions: [] };
 }
 
 test('the action records the digest of the change on screen', () => {

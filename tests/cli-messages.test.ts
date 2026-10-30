@@ -54,7 +54,7 @@ test('UNAPPROVED_CHANGE names what changed, including an executable bit with no 
   await chmod(path.join(skill, 'run.sh'), 0o755);
   const modeOnly = await verifyWithPolicy(policy, skill, { now: T0 });
   assert.equal(modeOnly.verdict, 'UNAPPROVED_CHANGE');
-  assert.match(modeOnly.reason, /^Skill changed since approval: executable bit changed on run\.sh \(now executable\) \(approved sha256:/);
+  assert.match(modeOnly.reason, /^Skill changed since approval: executable bit changed on "run\.sh" \(now executable\) \(approved sha256:/);
   assert.doesNotMatch(modeOnly.reason, /content/);
 
   await chmod(path.join(skill, 'run.sh'), 0o644);
@@ -62,7 +62,7 @@ test('UNAPPROVED_CHANGE names what changed, including an executable bit with no 
   await writeFile(path.join(skill, 'new.sh'), 'curl x\n');
   await rm(path.join(skill, 'old.md'));
   const mixed = await verifyWithPolicy(policy, skill, { now: T0 });
-  assert.match(mixed.reason, /content changed in SKILL\.md; added new\.sh; removed old\.md/);
+  assert.match(mixed.reason, /content changed in "SKILL\.md"; added "new\.sh"; removed "old\.md"/);
   assert.match(mixed.reason, /a new certificate is required$/);
 });
 
@@ -70,7 +70,7 @@ test('describeTreeChange shortens long path lists', () => {
   const file = (p: string, sha = 'a'.repeat(64), exec = false) => ({ path: p, size: 1, sha256: sha, exec });
   const before = ['a', 'b', 'c', 'd', 'e'].map((p) => file(p));
   const after = ['a', 'b', 'c', 'd', 'e'].map((p) => file(p, 'b'.repeat(64)));
-  assert.equal(describeTreeChange(before, after), 'content changed in a, b, c and 2 more');
+  assert.equal(describeTreeChange(before, after), 'content changed in "a", "b", "c" and 2 more');
   assert.equal(describeTreeChange(before, before), 'files changed');
 });
 
@@ -80,7 +80,7 @@ test('a file whose content changed and that became executable reports both, and 
     [file('SKILL.md', 'a', false), file('run.sh', 'a', false)],
     [file('SKILL.md', 'a', false), file('run.sh', 'b', true), file('new.sh', 'c', true)],
   );
-  assert.equal(reason, 'content changed in run.sh; executable bit changed on run.sh (now executable); added new.sh (executable)');
+  assert.equal(reason, 'content changed in "run.sh"; executable bit changed on "run.sh" (now executable); added "new.sh" (executable)');
 });
 
 test('skillNameFromSkillFile reads the name from the given bytes only', () => {
@@ -89,4 +89,12 @@ test('skillNameFromSkillFile reads the name from the given bytes only', () => {
   assert.equal(skillNameFromSkillFile('/nonexistent/docs-helper', undefined), 'docs-helper');
   assert.equal(skillNameFromSkillFile('/nonexistent/docs-helper', bytes, 'docs-explicit'), 'docs-explicit');
   assert.throws(() => skillNameFromSkillFile('/x/y', new Uint8Array([0xff, 0xfe])), /not valid UTF-8/);
+});
+
+test('file names in reasons are quoted, with C1 controls and bidi characters escaped', () => {
+  const file = (p: string) => ({ path: p, size: 1, sha256: 'a'.repeat(64), exec: false });
+  const spoof = '\u009b2J\u009b31mx; content changed in nothing (approved sha256-0) \u202eexe.txt';
+  const reason = describeTreeChange([file('SKILL.md')], [file('SKILL.md'), file(spoof)]);
+  assert.equal(reason, 'added "\\u009b2J\\u009b31mx; content changed in nothing (approved sha256-0) \\u202eexe.txt"');
+  assert.doesNotMatch(reason, /[\u0080-\u009f\u202e]/u);
 });

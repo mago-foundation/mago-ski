@@ -1,7 +1,9 @@
 // Read-only view of the Pi host: where it keeps Skills, whether the mago-ski extension is listed,
 // which policy it reads and what it decided. Nothing here writes host files.
-import { open, readFile, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { readRegularFile } from '../../../src/fs-safe.ts';
 import { defaultPolicyPath, loadPolicy, loadPolicyTrust, type Policy } from '../../../src/policy.ts';
 import type { TrustContext } from '../../../src/verify.ts';
 import type { DiscoveryRoot } from './store.ts';
@@ -38,9 +40,9 @@ async function exists(target: string): Promise<boolean> {
 /** Best effort: true or false when Pi's settings could be read, null otherwise. */
 async function extensionListed(agentDir: string): Promise<boolean | null> {
   try {
-    const settingsPath = path.join(agentDir, 'settings.json');
-    if ((await stat(settingsPath)).size > MAX_SETTINGS_BYTES) return null;
-    const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as { packages?: unknown };
+    // A regular file only: a FIFO or device here would block the read forever.
+    const bytes = await readRegularFile(path.join(agentDir, 'settings.json'), 'Pi settings', MAX_SETTINGS_BYTES);
+    const settings = JSON.parse(bytes.toString('utf8')) as { packages?: unknown };
     if (!Array.isArray(settings.packages)) return false;
     return settings.packages.some((entry) => {
       const source = typeof entry === 'string' ? entry : (entry as { source?: unknown })?.source;
@@ -56,8 +58,11 @@ async function recentDecisions(logPath: string | null): Promise<HostDecisionView
   if (!logPath) return [];
   let handle;
   try {
-    handle = await open(logPath, 'r');
-    const { size } = await handle.stat();
+    // Non-blocking and without following links, then checked: a FIFO would otherwise block the read forever.
+    handle = await open(logPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    const info = await handle.stat();
+    if (!info.isFile()) return [];
+    const { size } = info;
     const length = Math.min(size, DECISION_TAIL_BYTES);
     const buffer = Buffer.alloc(length);
     await handle.read(buffer, 0, length, size - length);

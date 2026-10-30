@@ -420,7 +420,11 @@ function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
     copy.addEventListener('click', () => { void api.copyText(d.approveCommand!); copy.textContent = '복사됨'; });
     pane.append(h('div', { class: 'approve' },
       h('h3', {}, '조직 승인 · 승인자 전용'),
-      h('p', {}, '이 명령은 지금 보이는 정확한 버전에만 서명해요. 그 사이 파일이 바뀌면 mago-ski가 서명을 거부해요. 승인자 키는 이 앱에 전달되지 않아요.'),
+      h('p', {}, '이 명령은 지금 보이는 정확한 버전에만 서명해요. 그 사이 파일이 바뀌면 mago-ski가 서명을 거부해요. 승인자 키는 이 앱에 전달되지 않아요. --reason에는 실제로 검토한 내용을 적으세요.'),
+      d.approveScope === 'full-diff' ? null : h('div', { class: 'result err' }, d.approveScope === 'no-diff'
+        ? '이 화면은 이 버전의 파일 내용을 보여주지 않았어요. 서명하기 전에 Skill의 모든 파일을 직접 검토하세요.'
+        : '이 화면은 바뀐 파일 일부를 텍스트로 보여주지 못했어요. 서명하기 전에 그 파일들을 직접 검토하세요.'),
+      h('p', {}, '변경 비교는 이 앱이 기록한 버전 기준이며, 마지막으로 승인된 버전과의 비교가 아니에요.'),
       h('div', { class: 'cmd' }, h('code', {}, d.approveCommand), copy)));
   }
 

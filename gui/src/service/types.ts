@@ -200,6 +200,11 @@ export interface InstanceDetail {
   change:          ChangeView | null;
   /** Copyable `mago-ski approve` command pinned to the current digest; only when an org policy is loaded. */
   approveCommand:  string | null;
+  /**
+   * How much of this version the screen showed: every changed file as text, only part of it, or no diff at all
+   * (a new or unchanged Skill). The approve command never claims a review the screen could not have shown.
+   */
+  approveScope:    'full-diff' | 'partial-diff' | 'no-diff' | null;
   history:         HistoryEvent[];
   /** Earlier baselines kept for the retention period, newest first. */
   previousVersions: Array<{ digest: string; recordedAt: string; supersededAt: string | null; retained: boolean }>;

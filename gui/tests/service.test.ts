@@ -432,3 +432,86 @@ test('a Skill name taken from its directory is stripped of control and markup ch
   assert.equal(displayName('a<b>‮\u0007c&'), 'abc');
   assert.equal(displayName('​'), '(unnamed)');
 });
+
+// ---------------------------------------------------------------- security review fixes
+
+test('a tampered state.json with an escaping path is rejected as damaged history and writes nothing outside', async (t) => {
+  const e = await setup(t);
+  const skill = await writeSkill(e.agents, 'docs-helper');
+  const first = await startService(t, e);
+  await appendFile(path.join(skill, 'SKILL.md'), 'changed\n');
+  await first.check();
+  await first.stop();
+
+  const { readFile, access } = await import('node:fs/promises');
+  const escaped = path.join(e.home, 'ESCAPED.txt');
+  const state = JSON.parse(await readFile(path.join(e.dataDir, 'state.json'), 'utf8'));
+  const base = state.instances[0].baseline;
+  base.files.push({ path: `../../../../../../../../../../..${escaped}`, size: 1, sha256: base.files[0].sha256, exec: false });
+  base.coverage.complete = true;
+  await writeFile(path.join(e.dataDir, 'state.json'), JSON.stringify(state));
+
+  const second = await startService(t, e);
+  assert.match(second.view().service.historyReset?.reason ?? '', /integrity check/);
+  const instance = byName(second.view(), 'docs-helper');
+  await second.detail(instance.id);
+  await assert.rejects(access(escaped), { code: 'ENOENT' });
+});
+
+test('a recorded digest that does not match its file list is rejected', async (t) => {
+  const { versionIsIntact } = await import('../src/service/store.ts');
+  const file = { path: 'SKILL.md', size: 1, sha256: 'a'.repeat(64), exec: false };
+  assert.equal(versionIsIntact({ digest: `sha256:${'0'.repeat(64)}`, files: [file] }), false);
+  const { digestFileList } = await import('../../src/tree-digest.ts');
+  assert.equal(versionIsIntact({ digest: digestFileList([file]), files: [file] }), true);
+  for (const bad of ['../x', '/abs', 'a//b', 'a/./b', 'a\\b', 'a\u0007b']) {
+    const f = { ...file, path: bad };
+    assert.equal(versionIsIntact({ digest: 'sha256:x', files: [f] }), false, bad);
+  }
+});
+
+test('file watching uses a bounded set of non-recursive watches', async (t) => {
+  const e = await setup(t);
+  const skill = await writeSkill(e.agents, 'deep-skill');
+  // Many empty directories do not get a watch each; only directories holding covered files do.
+  for (let i = 0; i < 300; i += 1) await mkdir(path.join(skill, 'empty', String(i)), { recursive: true });
+  await writeFile(path.join(skill, 'scripts.md'), 'x\n');
+  const service = await startService(t, e, { watch: true });
+  assert.ok(service.watchedDirectories <= 5, `watching ${service.watchedDirectories} directories`);
+});
+
+test('a FIFO in place of Pi settings or the decision log does not hang the check', async (t) => {
+  const org = await setupOrg(t);
+  const e = await setup(t, { MAGO_SKI_POLICY: org.policyPath });
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('mkfifo', [path.join(e.home, '.pi', 'agent', 'settings.json')]);
+  execFileSync('mkfifo', [org.logPath]);
+  await writeSkill(e.agents, 'docs-helper');
+  const service = await Promise.race([
+    startService(t, e),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('check hung on a FIFO')), 10_000)),
+  ]);
+  assert.equal(service.view().host.extensionListed, null);
+  assert.deepEqual(service.view().host.recentDecisions, []);
+});
+
+test('the approve command uses a placeholder reason and says how much the screen showed', async (t) => {
+  const org = await setupOrg(t);
+  const e = await setup(t, { MAGO_SKI_POLICY: org.policyPath });
+  const skill = await writeSkill(e.agents, 'docs-helper', { 'blob.bin': '\u0000\u0001binary' });
+  const service = await startService(t, e);
+  const id = byName(service.view(), 'docs-helper').id;
+
+  let d = (await service.detail(id))!;
+  assert.equal(d.approveScope, 'no-diff');
+  assert.match(d.approveCommand!, /--reason 'DESCRIBE WHAT YOU REVIEWED'/);
+
+  await appendFile(path.join(skill, 'SKILL.md'), 'more\n');
+  await service.check();
+  assert.equal((await service.detail(id))!.approveScope, 'full-diff');
+
+  await writeFile(path.join(skill, 'blob.bin'), '\u0000\u0002changed');
+  await service.check();
+  d = (await service.detail(id))!;
+  assert.equal(d.approveScope, 'partial-diff');
+});

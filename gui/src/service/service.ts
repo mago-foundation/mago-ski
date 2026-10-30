@@ -3,15 +3,16 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { watch, type FSWatcher } from 'node:fs';
-import { chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { diffSkillTrees } from '../../../src/diff.ts';
+import { isInside, writeNewFile } from '../../../src/fs-safe.ts';
 import { DiscoveryBudgetError, findSkillDirs, verifyWithPolicy } from '../../../src/policy.ts';
 import { collectSkillTree, type SkillTree } from '../../../src/tree-digest.ts';
 import { resolveSkillName, unverifiable, VERDICTS, type VerificationResult } from '../../../src/verify.ts';
 import { defaultRoots, readHost, type HostSnapshot } from './host.ts';
-import { Store, type DiscoveryRoot, type PersistedState, type SkillInstance } from './store.ts';
+import { isSafeRelativePath, Store, type DiscoveryRoot, type PersistedState, type SkillInstance } from './store.ts';
 import { diffLines } from './textdiff.ts';
 import type {
   ActionResult, Baseline, ChangeView, CheckEvent, DiscoveryRootView, FileChangeView, FileRecord, HistoryEvent,
@@ -27,6 +28,7 @@ void verdictsMatch;
 export const MAX_RETAINED_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_DIFF_BYTES = 512 * 1024;
 const MAX_HISTORY = 500;
+const MAX_WATCHED_DIRS = 2_000;
 const MAX_CHECKS = 48;
 const DAY_MS = 86_400_000;
 
@@ -229,7 +231,6 @@ export class ObservationService extends EventEmitter {
       this.host = await readHost(this.env, this.home, now);
       const scans = await Promise.all(roots.map((root) => this.scanRoot(root)));
       this.roots = scans.map((scan) => scan.view);
-      this.syncWatchers();
 
       const seen = new Set<string>();
       let outcome: CheckEvent['outcome'] = 'same';
@@ -266,6 +267,7 @@ export class ObservationService extends EventEmitter {
       if (scans.some((scan) => !scan.ok)) raise('error');
 
       await this.verifyAll(now);
+      this.syncWatchers();
       state.checks = [...state.checks, { at, outcome, skills: seen.size }].slice(-MAX_CHECKS);
       state.onboardedAt ??= at;
       this.prune(now);
@@ -419,22 +421,44 @@ export class ObservationService extends EventEmitter {
 
   // ---------------------------------------------------------------- watching
 
+  /**
+   * Non-recursive watches on a bounded set of directories: the roots, each Skill directory and its ancestors up to
+   * the root, and the directories holding covered files. Recursive watching would take one inotify watch per
+   * directory of an untrusted tree. Anything beyond the cap is still covered by the periodic check.
+   */
   private syncWatchers(): void {
     if (!this.watchFiles || this.stopped) return;
-    const wanted = new Set(this.roots.filter((root) => root.exists).map((root) => root.path));
-    for (const [rootPath, watcher] of this.watchers) {
-      if (!wanted.has(rootPath)) { watcher.close(); this.watchers.delete(rootPath); }
-    }
-    for (const rootPath of wanted) {
-      if (this.watchers.has(rootPath)) continue;
-      try {
-        const watcher = watch(rootPath, { recursive: true, persistent: false }, () => this.schedule());
-        watcher.on('error', () => { watcher.close(); this.watchers.delete(rootPath); this.schedule(); });
-        this.watchers.set(rootPath, watcher);
-      } catch {
-        // Without a watcher the periodic check still covers this root.
+    const wanted = new Set<string>();
+    const add = (dir: string) => { if (wanted.size < MAX_WATCHED_DIRS) wanted.add(dir); };
+    for (const root of this.roots) if (root.exists) add(root.path);
+    for (const instance of this.s.instances) {
+      if (instance.presence !== 'present') continue;
+      const root = this.roots.find((r) => r.id === instance.rootId);
+      for (let dir = path.dirname(instance.path); root && isInside(root.path, dir) && dir !== root.path; dir = path.dirname(dir)) add(dir);
+      add(instance.path);
+      for (const file of instance.current?.files ?? []) {
+        const sub = path.dirname(file.path);
+        if (sub !== '.') add(path.join(instance.path, sub));
       }
     }
+    for (const [dir, watcher] of this.watchers) {
+      if (!wanted.has(dir)) { watcher.close(); this.watchers.delete(dir); }
+    }
+    for (const dir of wanted) {
+      if (this.watchers.has(dir)) continue;
+      try {
+        const watcher = watch(dir, { persistent: false }, () => this.schedule());
+        watcher.on('error', () => { watcher.close(); this.watchers.delete(dir); this.schedule(); });
+        this.watchers.set(dir, watcher);
+      } catch {
+        // Without a watcher the periodic check still covers this directory.
+      }
+    }
+  }
+
+  /** For tests and diagnostics. */
+  get watchedDirectories(): number {
+    return this.watchers.size;
   }
 
   // ---------------------------------------------------------------- views
@@ -493,9 +517,11 @@ export class ObservationService extends EventEmitter {
         const bytes = await this.store.getBlob(file.sha256);
         if (!bytes) { await rm(dir, { recursive: true, force: true }); return null; }
         written.set(file.path, bytes);
+        // Recorded paths are checked again here: nothing may be written outside this directory.
         const target = path.join(dir, file.path);
+        if (!isSafeRelativePath(file.path) || !isInside(dir, target) || target === dir) throw new Error(`unsafe recorded path ${JSON.stringify(file.path)}`);
         await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, bytes, { mode: 0o600 });
+        await writeNewFile(target, bytes, 0o600);
         await chmod(target, file.exec ? 0o700 : 0o600);
       }
       return { dir, bytes: written };
@@ -591,9 +617,14 @@ export class ObservationService extends EventEmitter {
     const approveCommand = policy?.kind === 'loaded' && instance.current
       ? [
           'mago-ski approve', shellQuote(instance.path), '--key', 'YOUR-APPROVER-KEY.pem', '--expires', '90d',
-          '--reason', shellQuote('Reviewed in mago-ski GUI'), '--expect-digest', instance.current.digest,
+          '--reason', shellQuote('DESCRIBE WHAT YOU REVIEWED'), '--expect-digest', instance.current.digest,
         ].join(' ')
       : null;
+    const approveScope = !approveCommand ? null
+      : !change ? 'no-diff'
+      // About what was shown, not the origin scan (which skips binary files the change may not even touch).
+      : change.contentRetained && !change.truncated && change.files.every((f) => f.lines !== null || f.change === 'mode-changed') ? 'full-diff'
+      : 'partial-diff';
     const previousVersions = [];
     for (const b of [...instance.previousBaselines].reverse()) {
       let retained = b.coverage.complete;
@@ -601,7 +632,7 @@ export class ObservationService extends EventEmitter {
       previousVersions.push({ digest: b.digest, recordedAt: b.recordedAt, supersededAt: b.supersededAt ?? null, retained });
     }
     return {
-      instance: view, change, approveCommand, previousVersions,
+      instance: view, change, approveCommand, approveScope, previousVersions,
       history: this.s.history.filter((e) => e.instanceId === instanceId).slice(-50).reverse(),
     };
   }
