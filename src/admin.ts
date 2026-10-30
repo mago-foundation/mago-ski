@@ -7,7 +7,7 @@ import { loadPrivateKey, loadPublicKey, validateKeyId } from './keys.ts';
 import { validateDigest, validateScope } from './names.ts';
 import { readRevocationsForUpdate, signRevocations, type Revocations } from './revocations.ts';
 import { addDuration, truncateToSecond } from './time.ts';
-import { CERTIFICATE_FILENAME, collectSkillTree } from './tree-digest.ts';
+import { CERTIFICATE_FILENAME, collectSkillTree, requireSkillRoot } from './tree-digest.ts';
 import { MAX_APPROVERS, MAX_SCOPES, readTrustRootForUpdate, signTrustRoot, type TrustRoot } from './trust-root.ts';
 import { resolveSkillName } from './verify.ts';
 
@@ -302,6 +302,7 @@ export async function approveSkill(options: {
   const skillDir = path.resolve(options.skillDir);
   const expected = options.expectDigest === undefined ? null : validateDigest(options.expectDigest, 'expected digest');
 
+  await requireSkillRoot(skillDir);
   // Verify the key path is outside the Skill directory before reading the private key.
   await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
   const approver  = await loadPrivateKey(options.approverKeyPath);

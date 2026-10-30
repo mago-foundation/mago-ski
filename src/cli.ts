@@ -674,6 +674,8 @@ export async function runCli(
     }
     
     case 'diff': {
+      if (parsed.positional.length > 0)
+        throw new UsageError(`diff takes the two directories as options: mago-ski diff --base ${parsed.positional[0]} --candidate ${parsed.positional[1] ?? 'DIR'}`);
       allow(parsed, ['--base', '--candidate'], 0);
       
       const result = await diffSkillTrees(one(parsed, '--base'), one(parsed, '--candidate'));

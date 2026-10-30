@@ -337,6 +337,46 @@ function buildDecision(chosen: Candidate | undefined): Decision {
   };
 }
 
+const MAX_NAMED_PATHS = 3;
+
+function namePaths(paths: string[]): string {
+  const shown = paths.slice(0, MAX_NAMED_PATHS).join(', ');
+  return paths.length > MAX_NAMED_PATHS ? `${shown} and ${paths.length - MAX_NAMED_PATHS} more` : shown;
+}
+
+/** Says what differs between the approved file list and the tree on disk, e.g. an executable bit with no byte changed. */
+export function describeTreeChange(approved: readonly TreeFile[], found: readonly TreeFile[]): string {
+  const before = new Map(approved.map((file) => [file.path, file]));
+  const content: string[] = [];
+  const mode: string[] = [];
+  const added: string[] = [];
+  for (const file of found) {
+    const old = before.get(file.path);
+    before.delete(file.path);
+    if (!old) added.push(file.path);
+    else if (old.sha256 !== file.sha256 || old.size !== file.size) content.push(file.path);
+    else if (old.exec !== file.exec) mode.push(file.path);
+  }
+  const removed = [...before.keys()];
+  const parts = [
+    content.length ? `content changed in ${namePaths(content)}` : '',
+    mode.length ? `executable bit changed on ${namePaths(mode)}` : '',
+    added.length ? `added ${namePaths(added)}` : '',
+    removed.length ? `removed ${namePaths(removed)}` : '',
+  ].filter(Boolean);
+  return parts.length ? parts.join('; ') : 'files changed';
+}
+
+/** Replaces the generic UNAPPROVED_CHANGE reason with one naming the changed files, when the certificate lists them. */
+function explainChange(decision: Decision, best: Candidate | undefined, tree: SkillTree): Decision {
+  const certificate = best?.evaluation.certificate;
+  if (decision.verdict !== 'UNAPPROVED_CHANGE' || !certificate) return decision;
+  return {
+    ...decision,
+    reason: `Skill changed since approval: ${describeTreeChange(certificate.files, tree.files)} (approved ${certificate.digest}, found ${tree.digest}); a new certificate is required`,
+  };
+}
+
 function buildBaseResult(options: { tree: SkillTree; skillName: string; now: Date }) {
   return {
     skillName: options.skillName,
@@ -372,7 +412,7 @@ export function decide(options: {
     }
   }
 
-  return { ...buildBaseResult(options), ...buildDecision(best) };
+  return { ...buildBaseResult(options), ...explainChange(buildDecision(best), best, options.tree) };
 }
 
 /**
@@ -404,7 +444,7 @@ export async function decideStreaming(options: {
     }
   }
 
-  return { ...buildBaseResult(options), ...buildDecision(best) };
+  return { ...buildBaseResult(options), ...explainChange(buildDecision(best), best, options.tree) };
 }
 
 /** Full check of one Skill directory against an already-verified trust context. */

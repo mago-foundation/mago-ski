@@ -184,14 +184,29 @@ function isIgnored(relativePath: string, isDirectory: boolean, rules: IgnoreRule
   return false;
 }
 
+/** Checks that a Skill root exists and is a real directory, with messages that name the path. */
+export async function requireSkillRoot(root: string): Promise<BigIntStats> {
+  let rootStat: BigIntStats;
+  try {
+    rootStat = await lstat(root, { bigint: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') 
+      fail(`Skill directory not found: ${root}`);
+    throw error;
+  }
+  if (rootStat.isSymbolicLink()) 
+    fail('Skill root must be a real directory, not a symbolic link');
+  if (!rootStat.isDirectory()) 
+    fail(`Skill path is not a directory: ${root}`);
+  return rootStat;
+}
+
 async function enumerate(root: string): Promise<{ root: string; records: FileRecord[]; excluded: string[] }> {
-  const rootStat = await lstat(root, { bigint: true });
+  const rootStat = await requireSkillRoot(root);
   const canonicalRoot = await realpath(root);
   let rules: IgnoreRule[] = [];
   const ignorePath = path.join(canonicalRoot, IGNORE_FILENAME);
-  
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) 
-    fail('Skill root must be a real directory, not a symbolic link');
 
   try {
     const entry = await lstat(ignorePath, { bigint: true });

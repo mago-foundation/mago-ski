@@ -26,6 +26,10 @@ Fixes for the ten findings of the Codex Security review of 0.1.0.
 
 ### Changed
 
+- `UNAPPROVED_CHANGE` reasons name what changed since approval (content, executable bit, added or removed files), for example `Skill changed since approval: executable bit changed on run.sh (…)`. A mode-only change no longer reads "Skill bytes changed".
+- A missing Skill directory is reported as `Skill directory not found: PATH` (and a file as `Skill path is not a directory`) by `digest`, `verify`, `diff` and `approve`, instead of a raw `ENOENT` error.
+- `mago-ski diff A B` explains that the directories go in `--base` and `--candidate`.
+- README Quickstart: creates the example Skill before approving it.
 - The CLI no longer reads policy from the current directory. `verify` and `verify-all` use `--policy FILE`, else `MAGO_SKI_POLICY` (an absolute path, or starting with `~/`), else `~/.mago-ski/policy.json`. The exported `DEFAULT_POLICY_PATH` is replaced by `defaultPolicyPath()`.
 - A policy whose `decision_log` or `state_file` points outside its own directory, or at a file the policy reads, no longer loads.
 - Pi refuses a relative or in-project policy path, and does not advertise or expand a Skill whose path (below the working or home directory) has characters outside `[A-Za-z0-9._/~@+-]`.
