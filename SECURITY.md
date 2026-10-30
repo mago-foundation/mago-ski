@@ -6,7 +6,8 @@ mago-ski decides whether an agent host may load a Skill, so we treat security re
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No |
 
 Before 1.0, only the latest 0.x release line receives security fixes. Upgrade to the latest patch release before reporting.
 

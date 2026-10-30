@@ -4,6 +4,10 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
+Adds `approve --expect-digest` and the desktop GUI proof of concept (in the repository, not in the npm package), and includes the fixes from the Codex Security review of 0.1.0.
+
 ### Added
 
 - `approve --expect-digest DIGEST` (and `expectDigest` in `approveSkill`): refuses to sign when the Skill's bytes are no longer the reviewed version, checked against the same bytes that would be signed. Review tools can pin an approval to exactly what the approver saw.
@@ -57,5 +61,6 @@ First release, published to npm as `@mago-foundation/mago-ski`.
 - Specifications, threat model, test vectors for other implementations, and demos.
 - Linux and macOS support. Windows is not supported in 0.1.
 
-[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mago-foundation/mago-ski/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mago-foundation/mago-ski/releases/tag/v0.1.0

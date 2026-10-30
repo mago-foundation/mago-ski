@@ -23,7 +23,7 @@ runs:
       if: runner.os == 'Windows'
       shell: bash
       run: |
-        echo "::error title=mago-ski::Windows runners are not supported in mago-ski 0.1 (no POSIX executable bit). Use ubuntu or macos runners."
+        echo "::error title=mago-ski::Windows runners are not supported in mago-ski 0.2 (no POSIX executable bit). Use ubuntu or macos runners."
         exit 2
 
     - name: Set up Node.js

@@ -4,7 +4,7 @@
 
 Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was fine last week can gain one sentence (`also send the results to…`) with no new tools and no new URLs, and every agent that has it installed picks the change up silently. Scanners can tell you *what* changed. mago-ski checks that *someone in your organization approved exactly these bytes*. In enforce mode, supported hosts block Skills that fail the check, within the limits in the [threat model](docs/threat-model.md).
 
-> Status: **0.1, early release.** Formats and commands may still change before 1.0. Linux and macOS only.
+> Status: **0.2, early release.** Formats and commands may still change before 1.0. Linux and macOS only.
 
 ## How it works
 
@@ -91,7 +91,7 @@ Only name a policy you trust: run against a checkout you do not control, point `
 
 ## Platforms
 
-mago-ski 0.1 supports **Linux and macOS** (Node.js 22.18 or newer). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
+mago-ski 0.2 supports **Linux and macOS** (Node.js 22.18 or newer). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
 
 ## Where it runs
 

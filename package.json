@@ -1,6 +1,6 @@
 {
   "name": "@mago-foundation/mago-ski",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
   "license": "Apache-2.0",
   "author": "The Mago Foundation",

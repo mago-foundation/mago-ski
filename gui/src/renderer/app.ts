@@ -134,7 +134,7 @@ function renderHeader(v: ServiceView): void {
       `이전 기록이 사라져서 (${s.historyReset.reason}) ${time(s.historyReset.at)}부터 새로 기록했어요. 그 사이의 변경은 비교할 수 없어서 모든 Skill을 '새로 발견'으로 표시해요.`
         + (s.historyReset.backup ? ` 읽지 못한 파일: ${s.historyReset.backup}` : ''), dismiss));
   }
-  if (!s.platformSupported) banners.push(h('div', { class: 'banner error' }, `${s.platform}에서는 실행 비트가 digest에 반영되지 않아 다른 OS에서 만든 승인과 맞지 않을 수 있어요. mago-ski 엔진 0.1은 Linux와 macOS만 지원해요.`));
+  if (!s.platformSupported) banners.push(h('div', { class: 'banner error' }, `${s.platform}에서는 실행 비트가 digest에 반영되지 않아 다른 OS에서 만든 승인과 맞지 않을 수 있어요. mago-ski 엔진 0.2는 Linux와 macOS만 지원해요.`));
   if (v.host.policy.kind === 'error') banners.push(h('div', { class: 'banner error' }, `정책 파일을 읽지 못했어요 (${v.host.policy.path}): ${v.host.policy.reason}. Pi는 이 경우 모든 Skill을 차단해요.`));
   if (v.host.policy.kind === 'loaded' && !v.host.policy.trustOk) banners.push(h('div', { class: 'banner error' }, `신뢰 문서를 검증하지 못했어요: ${v.host.policy.trustNote ?? ''}`));
   for (const root of v.roots) {
@@ -233,7 +233,7 @@ function gateDevice(v: ServiceView): HTMLElement {
   const mode = policy.kind === 'loaded' ? policy.mode : null;
   const chip = mode === 'enforce' ? 'Enforce · 미승인 Skill 차단 (Pi)' : mode === 'shadow' ? 'Shadow · 막지 않고 기록' : '관찰 모드 · 실행을 막지 않음';
   return deviceShell('gate', 300, false,
-    devHead('SKI / APPROVAL GATE', '엔진 0.1', true),
+    devHead('SKI / APPROVAL GATE', '엔진 0.2', true),
     h('div', { class: 'dev-body' },
       h('div', { class: 'section', style: 'flex:1' },
         h('div', { class: 'sec-label' }, 'ORG APPROVAL (PKI)'),
