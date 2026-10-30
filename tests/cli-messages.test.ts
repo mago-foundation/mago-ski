@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { verifyWithPolicy, loadPolicy } from '../src/policy.ts';
-import { describeTreeChange } from '../src/verify.ts';
+import { describeTreeChange, skillNameFromSkillFile } from '../src/verify.ts';
 import { approve, setupOrg, T0, tempDir, writeSkill } from './helpers.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
@@ -54,7 +54,7 @@ test('UNAPPROVED_CHANGE names what changed, including an executable bit with no 
   await chmod(path.join(skill, 'run.sh'), 0o755);
   const modeOnly = await verifyWithPolicy(policy, skill, { now: T0 });
   assert.equal(modeOnly.verdict, 'UNAPPROVED_CHANGE');
-  assert.match(modeOnly.reason, /^Skill changed since approval: executable bit changed on run\.sh \(approved sha256:/);
+  assert.match(modeOnly.reason, /^Skill changed since approval: executable bit changed on run\.sh \(now executable\) \(approved sha256:/);
   assert.doesNotMatch(modeOnly.reason, /content/);
 
   await chmod(path.join(skill, 'run.sh'), 0o644);
@@ -72,4 +72,21 @@ test('describeTreeChange shortens long path lists', () => {
   const after = ['a', 'b', 'c', 'd', 'e'].map((p) => file(p, 'b'.repeat(64)));
   assert.equal(describeTreeChange(before, after), 'content changed in a, b, c and 2 more');
   assert.equal(describeTreeChange(before, before), 'files changed');
+});
+
+test('a file whose content changed and that became executable reports both, and new executables are marked', () => {
+  const file = (p: string, sha: string, exec: boolean) => ({ path: p, size: 1, sha256: sha.repeat(64), exec });
+  const reason = describeTreeChange(
+    [file('SKILL.md', 'a', false), file('run.sh', 'a', false)],
+    [file('SKILL.md', 'a', false), file('run.sh', 'b', true), file('new.sh', 'c', true)],
+  );
+  assert.equal(reason, 'content changed in run.sh; executable bit changed on run.sh (now executable); added new.sh (executable)');
+});
+
+test('skillNameFromSkillFile reads the name from the given bytes only', () => {
+  const bytes = new TextEncoder().encode('---\nname: docs-other\ndescription: d\n---\n# x\n');
+  assert.equal(skillNameFromSkillFile('/nonexistent/docs-helper', bytes), 'docs-other');
+  assert.equal(skillNameFromSkillFile('/nonexistent/docs-helper', undefined), 'docs-helper');
+  assert.equal(skillNameFromSkillFile('/nonexistent/docs-helper', bytes, 'docs-explicit'), 'docs-explicit');
+  assert.throws(() => skillNameFromSkillFile('/x/y', new Uint8Array([0xff, 0xfe])), /not valid UTF-8/);
 });

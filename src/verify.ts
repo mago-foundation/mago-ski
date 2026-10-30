@@ -265,25 +265,19 @@ export function evaluateCertificate(
  * Resolves the Skill name. SKILL.md comes from an untrusted checkout, so it is read only if it is a regular,
  * non-symlink file no larger than the tree collector's per-file limit; anything else throws (UNVERIFIABLE).
  */
-export async function resolveSkillName(skillDir: string, explicit?: string): Promise<string> {
+/**
+ * The Skill name from SKILL.md's bytes: an explicit name, else frontmatter "name", else the directory name.
+ * Pure, so a caller that hashes and signs those bytes can derive the name from the very same buffer.
+ */
+export function skillNameFromSkillFile(skillDir: string, skillFile: Uint8Array | undefined, explicit?: string): string {
   if (explicit) {
     return validateSkillName(explicit);
   }
 
-  let rawBytes: Buffer | undefined;
   let text: string | undefined;
-
-  try {
-    rawBytes = await readRegularFile(path.join(skillDir, SKILL_FILENAME), SKILL_FILENAME, MAX_FILE_BYTES);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      throw error;
-    }
-  }
-
-  if (rawBytes !== undefined) {
+  if (skillFile !== undefined) {
     try {
-      text = utf8Decoder.decode(rawBytes);
+      text = utf8Decoder.decode(skillFile);
     } catch {
       throw new Error(`${SKILL_FILENAME} is not valid UTF-8`);
     }
@@ -295,6 +289,22 @@ export async function resolveSkillName(skillDir: string, explicit?: string): Pro
   }
 
   return validateSkillName(path.basename(path.resolve(skillDir)), 'Skill directory name');
+}
+
+export async function resolveSkillName(skillDir: string, explicit?: string): Promise<string> {
+  if (explicit) {
+    return validateSkillName(explicit);
+  }
+
+  let rawBytes: Buffer | undefined;
+  try {
+    rawBytes = await readRegularFile(path.join(skillDir, SKILL_FILENAME), SKILL_FILENAME, MAX_FILE_BYTES);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  return skillNameFromSkillFile(skillDir, rawBytes);
 }
 
 /** Keeps the best candidate seen so far: VERIFIED beats any failure, then VERDICT_RANK; the first of equals wins. */
@@ -353,9 +363,13 @@ export function describeTreeChange(approved: readonly TreeFile[], found: readonl
   for (const file of found) {
     const old = before.get(file.path);
     before.delete(file.path);
-    if (!old) added.push(file.path);
-    else if (old.sha256 !== file.sha256 || old.size !== file.size) content.push(file.path);
-    else if (old.exec !== file.exec) mode.push(file.path);
+    if (!old) {
+      added.push(file.exec ? `${file.path} (executable)` : file.path);
+      continue;
+    }
+    if (old.sha256 !== file.sha256 || old.size !== file.size) content.push(file.path);
+    // Reported even when the content changed too: a file becoming executable matters on its own.
+    if (old.exec !== file.exec) mode.push(`${file.path} (${file.exec ? 'now executable' : 'no longer executable'})`);
   }
   const removed = [...before.keys()];
   const parts = [

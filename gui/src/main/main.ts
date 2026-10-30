@@ -36,8 +36,10 @@ function handle(channel: string, fn: (...args: unknown[]) => unknown): void {
 function notify(changed: InstanceView[]): void {
   const mode = service?.view().prefs.notify;
   if (!mode || mode === 'off' || !Notification.isSupported()) return;
+  // Some Linux notification daemons interpret markup in the body; Skill names are untrusted.
+  const plain = (text: string) => text.replace(/[<>&]/gu, '');
   const show = (title: string, body: string) => {
-    const n = new Notification({ title, body, silent: true });
+    const n = new Notification({ title: plain(title), body: plain(body), silent: true });
     n.on('click', () => { window?.show(); window?.focus(); });
     n.show();
   };
@@ -68,6 +70,7 @@ function registerIpc(svc: ObservationService): void {
     await svc.setPrefs(prefs as Partial<Prefs>);
     return svc.view();
   });
+  handle('history:dismiss-reset', async () => { await svc.dismissHistoryReset(); return svc.view(); });
   handle('clipboard:write', (text) => {
     if (typeof text !== 'string' || text.length > 4096) throw new Error('invalid text');
     clipboard.writeText(text);

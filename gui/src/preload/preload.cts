@@ -14,6 +14,7 @@ const api: RendererApi = {
   removeRoot:      (id: string) => ipcRenderer.invoke('roots:remove', id),
   setPrefs:        (prefs: Partial<Prefs>) => ipcRenderer.invoke('prefs:set', prefs),
   copyText:        (text: string) => ipcRenderer.invoke('clipboard:write', text),
+  dismissHistoryReset: () => ipcRenderer.invoke('history:dismiss-reset'),
   onUpdate: (listener: (view: ServiceView) => void) => {
     const wrapped = (_event: IpcRendererEvent, view: ServiceView) => listener(view);
     ipcRenderer.on('view:update', wrapped);

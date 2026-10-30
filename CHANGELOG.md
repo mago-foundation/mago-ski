@@ -26,7 +26,8 @@ Fixes for the ten findings of the Codex Security review of 0.1.0.
 
 ### Changed
 
-- `UNAPPROVED_CHANGE` reasons name what changed since approval (content, executable bit, added or removed files), for example `Skill changed since approval: executable bit changed on run.sh (…)`. A mode-only change no longer reads "Skill bytes changed".
+- `UNAPPROVED_CHANGE` reasons name what changed since approval (content, executable bit, added or removed files), for example `Skill changed since approval: executable bit changed on run.sh (now executable) (…)`. A mode-only change no longer reads "Skill bytes changed", a file whose content changed and that became executable reports both, and added executables are marked.
+- `approve` takes the Skill name from the same `SKILL.md` bytes it hashes and signs, instead of reading the file a second time.
 - A missing Skill directory is reported as `Skill directory not found: PATH` (and a file as `Skill path is not a directory`) by `digest`, `verify`, `diff` and `approve`, instead of a raw `ENOENT` error.
 - `mago-ski diff A B` explains that the directories go in `--base` and `--candidate`.
 - README Quickstart: creates the example Skill before approving it.

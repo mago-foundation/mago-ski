@@ -27,6 +27,8 @@ export interface Baseline {
   reason:     'first-seen' | 'remembered';
   files:      FileRecord[];
   coverage:   SnapshotCoverage;
+  /** When another version replaced it as the baseline; retention counts from here. */
+  supersededAt?: string;
 }
 
 /** What the last complete check saw on disk. */
@@ -77,6 +79,8 @@ export interface InstanceView {
   baselineAt:      string | null;
   changedFiles:    number;
   pki:             PkiResultView | null;
+  /** False when the PKI result is about other bytes than `currentDigest` (the Skill changed between the two reads). */
+  pkiCurrent:      boolean;
 }
 
 /** One LED on the inspection meter: one completed check of every Skill. */
@@ -88,7 +92,7 @@ export interface CheckEvent {
 
 export interface HistoryEvent {
   at:         string;
-  kind:       'first-seen' | 'new-skill' | 'changed' | 'reviewed' | 'remembered' | 'missing' | 'returned' | 'unreadable';
+  kind:       'first-seen' | 'new-skill' | 'changed' | 'reviewed' | 'remembered' | 'missing' | 'returned' | 'unreadable' | 'history-reset';
   instanceId: string;
   name:       string;
   digest:     string | null;
@@ -140,6 +144,8 @@ export interface ServiceView {
     platformSupported: boolean;
     platform:          string;
     dataDir:           string;
+    /** Set when earlier history was lost; baselines recorded since are not continuous with it. */
+    historyReset:      HistoryReset | null;
   };
   roots:     DiscoveryRootView[];
   instances: InstanceView[];
@@ -147,6 +153,13 @@ export interface ServiceView {
   history:   HistoryEvent[];
   host:      HostView;
   prefs:     Prefs;
+}
+
+export interface HistoryReset {
+  at:     string;
+  reason: string;
+  /** Where the unreadable history file was moved, if there was one. */
+  backup: string | null;
 }
 
 export interface DiffLine {
@@ -172,6 +185,8 @@ export interface ChangeView {
   currentDigest:   string;
   /** False when the remembered or current content was not retained: only file metadata can be compared. */
   contentRetained: boolean;
+  /** Why content could not be compared, when `contentRetained` is false. */
+  contentNote:     string | null;
   files:           FileChangeView[];
   addedOrigins:    string[];
   removedOrigins:  string[];
@@ -186,6 +201,8 @@ export interface InstanceDetail {
   /** Copyable `mago-ski approve` command pinned to the current digest; only when an org policy is loaded. */
   approveCommand:  string | null;
   history:         HistoryEvent[];
+  /** Earlier baselines kept for the retention period, newest first. */
+  previousVersions: Array<{ digest: string; recordedAt: string; supersededAt: string | null; retained: boolean }>;
 }
 
 export type ActionResult =
@@ -203,5 +220,6 @@ export interface RendererApi {
   removeRoot(rootId: string):                         Promise<ServiceView>;
   setPrefs(prefs: Partial<Prefs>):                    Promise<ServiceView>;
   copyText(text: string):                             Promise<void>;
+  dismissHistoryReset():                              Promise<ServiceView>;
   onUpdate(listener: (view: ServiceView) => void):    () => void;
 }

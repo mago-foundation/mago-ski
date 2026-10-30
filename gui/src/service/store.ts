@@ -1,10 +1,10 @@
 // Local history store: state.json plus content-addressed file copies, all in the GUI's own data directory.
 // Nothing here is written into a Skill directory, so retained copies never change a digest.
 import { createHash } from 'node:crypto';
-import { mkdir, opendir, readFile, rename, rm, unlink } from 'node:fs/promises';
+import { mkdir, opendir, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileAtomic, writeNewFile } from '../../../src/fs-safe.ts';
-import type { Baseline, CheckEvent, HistoryEvent, Observation, Prefs } from './types.ts';
+import type { Baseline, CheckEvent, HistoryEvent, HistoryReset, Observation, Prefs } from './types.ts';
 
 export const STATE_SCHEMA = 'mago.gui-state/poc-1';
 const MAX_STATE_BYTES = 64 * 1024 * 1024;
@@ -44,12 +44,13 @@ export interface PersistedState {
   history:     HistoryEvent[];
   checks:      CheckEvent[];
   prefs:       Prefs;
+  historyReset: HistoryReset | null;
 }
 
 export const DEFAULT_PREFS: Prefs = { notify: 'grouped', retainContent: true, retentionDays: 30 };
 
 export function emptyState(): PersistedState {
-  return { schema: STATE_SCHEMA, onboardedAt: null, roots: [], instances: [], history: [], checks: [], prefs: { ...DEFAULT_PREFS } };
+  return { schema: STATE_SCHEMA, onboardedAt: null, roots: [], instances: [], history: [], checks: [], prefs: { ...DEFAULT_PREFS }, historyReset: null };
 }
 
 function sha256Hex(bytes: Uint8Array): string {
@@ -71,14 +72,18 @@ export class Store {
     await mkdir(this.blobDir, { recursive: true, mode: 0o700 });
   }
 
-  /** Loads saved state. An unreadable or foreign file is kept aside, never silently overwritten. */
-  async load(): Promise<PersistedState> {
+  /**
+   * Loads saved state. An unreadable or foreign file is kept aside, never silently overwritten, and a missing file
+   * next to retained copies means history was lost: both come back as `lost`, so the caller can say so.
+   */
+  async load(): Promise<{ state: PersistedState; lost: { reason: string; backup: string | null } | null }> {
     let text: string;
     try {
       text = await readFile(this.statePath, 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState();
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const shards = await readdir(this.blobDir).catch(() => [] as string[]);
+      return { state: emptyState(), lost: shards.length > 0 ? { reason: 'the history file is missing', backup: null } : null };
     }
     try {
       if (text.length > MAX_STATE_BYTES) throw new Error('state file too large');
@@ -87,10 +92,12 @@ export class Store {
       value.prefs = { ...DEFAULT_PREFS, ...value.prefs };
       value.history ??= [];
       value.checks ??= [];
-      return value;
-    } catch {
-      await rename(this.statePath, `${this.statePath}.unreadable-${Date.now()}`);
-      return emptyState();
+      value.historyReset ??= null;
+      return { state: value, lost: null };
+    } catch (error) {
+      const backup = `${this.statePath}.unreadable-${Date.now()}`;
+      await rename(this.statePath, backup);
+      return { state: emptyState(), lost: { reason: `the history file could not be read (${(error as Error).message})`, backup } };
     }
   }
 
@@ -112,6 +119,16 @@ export class Store {
       await writeNewFile(target, bytes, 0o600);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // An existing copy is trusted only if it still matches its hash; a damaged one is replaced.
+      if (!(await this.getBlob(sha256))) await writeFileAtomic(target, bytes, 0o600);
+    }
+  }
+
+  async hasBlob(sha256: string): Promise<boolean> {
+    try {
+      return (await stat(this.blobPath(sha256))).isFile();
+    } catch {
+      return false;
     }
   }
 

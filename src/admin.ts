@@ -7,9 +7,9 @@ import { loadPrivateKey, loadPublicKey, validateKeyId } from './keys.ts';
 import { validateDigest, validateScope } from './names.ts';
 import { readRevocationsForUpdate, signRevocations, type Revocations } from './revocations.ts';
 import { addDuration, truncateToSecond } from './time.ts';
-import { CERTIFICATE_FILENAME, collectSkillTree, requireSkillRoot } from './tree-digest.ts';
+import { CERTIFICATE_FILENAME, collectSkillTree, requireSkillRoot, SKILL_FILENAME } from './tree-digest.ts';
 import { MAX_APPROVERS, MAX_SCOPES, readTrustRootForUpdate, signTrustRoot, type TrustRoot } from './trust-root.ts';
-import { resolveSkillName } from './verify.ts';
+import { skillNameFromSkillFile } from './verify.ts';
 
 export const DEFAULT_TRUST_ROOT_EXPIRY  = '365d';
 export const DEFAULT_REVOCATIONS_EXPIRY = '30d';
@@ -306,8 +306,9 @@ export async function approveSkill(options: {
   // Verify the key path is outside the Skill directory before reading the private key.
   await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
   const approver  = await loadPrivateKey(options.approverKeyPath);
-  const skillName = await resolveSkillName(skillDir, options.name);
   const tree      = await collectSkillTree(skillDir, { includeContents: true });
+  // Taken from the same SKILL.md bytes that are hashed and signed, so the name cannot differ from the reviewed version.
+  const skillName = skillNameFromSkillFile(skillDir, tree.contents!.get(SKILL_FILENAME), options.name);
 
   // Checked against the same bytes that are signed, so a change after review can never be certified.
   if (expected !== null && tree.digest !== expected) {

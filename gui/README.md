@@ -11,7 +11,9 @@ The design comes from [the GUI product plan](../docs/mago-ski-gui-product-plan.m
 - **Finds your Skills without setup.** It watches Pi's user Skill folder (`$PI_CODING_AGENT_DIR/skills`, default `~/.pi/agent/skills`) and `~/.agents/skills`, plus any folder you add. A folder with a `SKILL.md` is a Skill.
 - **Remembers each version.** On first sight it records the Skill's tree digest (the engine's `mago.skill-tree/v2`, the same digest certificates sign) and keeps a copy of the files in its own data folder, never in the Skill folder.
 - **Shows what changed.** When a Skill's digest changes, it shows the changed files, Markdown sections, executable bits and added or removed HTTP(S) origins (from the engine's `diffSkillTrees`), with a line diff of the text.
-- **Lets you record what you did.** "변경 확인 완료" (change reviewed) either marks the change as reviewed or makes the new version your comparison baseline. Both are bound to the digest on screen: if the files change while you read, the action is refused.
+- **Lets you record what you did.** "변경 확인 완료" (change reviewed) either marks the change as reviewed or makes the new version your comparison baseline. Both record the digest whose change is on screen. If the Skill changes again, the old diff is taken down and the buttons stay disabled until the new diff is shown; if the files change between your click and the service's re-read, the action is refused.
+- **Keeps earlier versions for a while.** Replaced baselines stay listed under "이전 버전" for the retention period set with the VERSION MEMORY knob (counted from when they were replaced), with their copies.
+- **Says when its own history was lost.** If its history file is missing or unreadable, it says so, keeps the unreadable file aside, and shows every Skill as new rather than as unchanged, because changes made in between cannot be compared.
 - **Shows organization approval as it is.** If Pi has a mago-ski policy (`$MAGO_SKI_POLICY` or `~/.mago-ski/policy.json`), each Skill shows the engine's verdict (`VERIFIED`, `UNAPPROVED_CHANGE`, `NO_CERTIFICATE`, …), the policy mode and the host's recent decisions. For approvers, it shows a `mago-ski approve … --expect-digest` command pinned to the version on screen.
 
 ## What it does not do
@@ -43,7 +45,7 @@ node scripts/demo.ts change /tmp/mago-demo           # in another terminal: the 
 
 On Linux as root, add `--no-sandbox` after `electron .`.
 
-Data lives in Electron's user data folder (`~/.config/mago-ski` on Linux, `~/Library/Application Support/mago-ski` on macOS), or in `MAGO_SKI_GUI_DATA`: `state.json` and `blobs/` (file copies by SHA-256). Files over 4 MiB are not copied; such versions are compared by name, size and executable bit only, and the screen says so. Turn copying off with "비교용 원문 보관" (keep original text for comparison).
+Data lives in Electron's user data folder (`~/.config/mago-ski` on Linux, `~/Library/Application Support/mago-ski` on macOS), or in `MAGO_SKI_GUI_DATA`: `state.json` and `blobs/` (file copies by SHA-256). Files over 4 MiB are not copied; such versions are compared by name, size and executable bit only, and the screen says so. Turn copying off with "비교용 원문 보관" (keep original text for comparison); that also deletes the copies already kept.
 
 ## Develop
 

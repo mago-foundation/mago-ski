@@ -69,6 +69,14 @@ function decodeText(bytes: Buffer): string | null {
   }
 }
 
+/** A directory name shown when SKILL.md gives no valid name: control and markup characters removed, length capped. */
+export function displayName(name: string): string {
+  const clean = name.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069<>&]/gu, '').slice(0, 100);
+  return clean || '(unnamed)';
+}
+
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u;
+
 export function observationState(instance: SkillInstance): ObservationState {
   if (instance.presence === 'missing') return 'missing';
   if (instance.presence === 'unreadable' || !instance.current || !instance.baseline) return 'unreadable';
@@ -105,8 +113,9 @@ export class ObservationService extends EventEmitter {
   private lastError: string | null = null;
   private lastCheckAt: string | null = null;
 
-  private running:   Promise<void> | null = null;
-  private again      = false;
+  /** Every check, user action, detail read and cleanup runs here one at a time, so none sees another half-done. */
+  private queue:     Promise<unknown> = Promise.resolve();
+  private pendingCheck: Promise<void> | null = null;
   private timer:     NodeJS.Timeout | null = null;
   private interval:  NodeJS.Timeout | null = null;
   private watchers   = new Map<string, FSWatcher>();
@@ -128,9 +137,22 @@ export class ObservationService extends EventEmitter {
     return this.state;
   }
 
+  private serial<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(task, task);
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
   async start(): Promise<void> {
     await this.store.init();
-    this.state = await this.store.load();
+    const { state, lost } = await this.store.load();
+    this.state = state;
+    if (lost) {
+      // Baselines recorded from here on are new first sightings, not continuity with the lost history.
+      const at = this.now().toISOString();
+      state.historyReset = { at, reason: lost.reason, backup: lost.backup };
+      this.record({ at, kind: 'history-reset', instanceId: '', name: '', digest: null, detail: lost.reason });
+    }
     // Default roots are re-derived each start, so a changed PI_CODING_AGENT_DIR is picked up.
     const userRoots = this.s.roots.filter((r) => r.origin === 'user');
     this.s.roots = [...defaultRoots(this.env, this.home), ...userRoots];
@@ -144,28 +166,20 @@ export class ObservationService extends EventEmitter {
     if (this.interval) clearInterval(this.interval);
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
-    await this.running?.catch(() => {});
+    await this.queue;
   }
 
   // ---------------------------------------------------------------- checking
 
-  /** Runs one full check; concurrent calls coalesce into at most one follow-up run. */
+  /** Queues one full check; requests made before it starts share it, so a burst of events runs at most one more. */
   check(): Promise<void> {
-    if (this.running) {
-      this.again = true;
-      return this.running;
-    }
-    this.running = (async () => {
-      try {
-        do {
-          this.again = false;
-          await this.runCheck();
-        } while (this.again && !this.stopped);
-      } finally {
-        this.running = null;
-      }
-    })();
-    return this.running;
+    if (this.pendingCheck) return this.pendingCheck;
+    const run = this.serial(async () => {
+      this.pendingCheck = null;
+      if (!this.stopped) await this.runCheck();
+    });
+    this.pendingCheck = run;
+    return run;
   }
 
   private schedule(): void {
@@ -202,13 +216,16 @@ export class ObservationService extends EventEmitter {
     const state = this.s;
     const now = this.now();
     const at = now.toISOString();
-    const onboarding = state.onboardedAt === null;
+    // After lost history, Skills are shown as new (to be looked at again), never as quietly unchanged.
+    const onboarding = state.onboardedAt === null && state.historyReset === null;
+    // A fixed list for this run: indices below must keep pointing at the roots that were scanned.
+    const roots = [...state.roots];
     this.status = 'checking';
     this.emitUpdate();
 
     try {
       this.host = await readHost(this.env, this.home, now);
-      const scans = await Promise.all(state.roots.map((root) => this.scanRoot(root)));
+      const scans = await Promise.all(roots.map((root) => this.scanRoot(root)));
       this.roots = scans.map((scan) => scan.view);
       this.syncWatchers();
 
@@ -221,7 +238,7 @@ export class ObservationService extends EventEmitter {
       const changedNow: SkillInstance[] = [];
 
       for (const [index, scan] of scans.entries()) {
-        const root = state.roots[index]!;
+        const root = roots[index]!;
         for (const dir of scan.dirs) {
           let realPath: string;
           try {
@@ -248,7 +265,7 @@ export class ObservationService extends EventEmitter {
 
       await this.verifyAll(now);
       state.checks = [...state.checks, { at, outcome, skills: seen.size }].slice(-MAX_CHECKS);
-      if (onboarding) state.onboardedAt = at;
+      state.onboardedAt ??= at;
       this.prune(now);
       await this.store.save(state);
       await this.collectGarbage();
@@ -265,6 +282,15 @@ export class ObservationService extends EventEmitter {
 
   private byRealPath(realPath: string): SkillInstance | undefined {
     return this.s.instances.find((instance) => instance.realPath === realPath);
+  }
+
+  /** True when nothing more can be retained: copying is off, or every copy recorded as kept is present. */
+  private async coverageIntact(version: Observation): Promise<boolean> {
+    if (!this.s.prefs.retainContent) return true;
+    if (!version.coverage.complete) return false;
+    // Hash-checked, so a damaged copy is noticed here and rewritten from the bytes just read.
+    for (const file of version.files) if (!(await this.store.getBlob(file.sha256))) return false;
+    return true;
   }
 
   private async retain(tree: SkillTree & { contents?: Map<string, Buffer> }): Promise<SnapshotCoverage> {
@@ -297,7 +323,7 @@ export class ObservationService extends EventEmitter {
     let tree: SkillTree & { contents?: Map<string, Buffer> };
     try {
       tree = await collectSkillTree(dir, { includeContents: state.prefs.retainContent });
-      instance.name = await resolveSkillName(dir).catch(() => path.basename(dir));
+      instance.name = await resolveSkillName(dir).catch(() => displayName(path.basename(dir)));
     } catch (error) {
       const wasReadable = instance.presence !== 'unreadable';
       instance.presence = 'unreadable';
@@ -310,8 +336,11 @@ export class ObservationService extends EventEmitter {
     const returning = instance.presence === 'missing';
     const previousDigest = instance.current?.digest ?? null;
     const changed = previousDigest !== null && previousDigest !== tree.digest;
-    // Content is retained once per new version; an unchanged tree keeps its earlier coverage.
-    const coverage = !changed && instance.current ? instance.current.coverage : await this.retain(tree);
+    // Content is retained once per version; an unchanged tree keeps its coverage while its copies are intact.
+    const coverage = !changed && instance.current && await this.coverageIntact(instance.current)
+      ? instance.current.coverage
+      : await this.retain(tree);
+    if (instance.baseline?.digest === tree.digest) instance.baseline.coverage = coverage;
 
     instance.path = dir;
     instance.rootId = root.id;
@@ -367,13 +396,14 @@ export class ObservationService extends EventEmitter {
   private prune(now: Date): void {
     const cutoff = now.getTime() - this.s.prefs.retentionDays * DAY_MS;
     for (const instance of this.s.instances) {
-      instance.previousBaselines = instance.previousBaselines.filter((b) => Date.parse(b.recordedAt) >= cutoff);
+      instance.previousBaselines = instance.previousBaselines.filter((b) => Date.parse(b.supersededAt ?? b.recordedAt) >= cutoff);
     }
   }
 
   private async collectGarbage(): Promise<void> {
     const referenced = new Set<string>();
-    for (const instance of this.s.instances) {
+    // With copying off, every retained copy is deleted.
+    if (this.s.prefs.retainContent) for (const instance of this.s.instances) {
       for (const version of [instance.baseline, instance.current, ...instance.previousBaselines]) {
         for (const file of version?.files ?? []) referenced.add(file.sha256);
       }
@@ -412,6 +442,10 @@ export class ObservationService extends EventEmitter {
       baselineAt: instance.baseline?.recordedAt ?? null,
       changedFiles: instance.current && instance.baseline ? countChangedFiles(instance.baseline.files, instance.current.files) : 0,
       pki: this.pki.get(instance.id) ?? null,
+      pkiCurrent: (() => {
+        const pki = this.pki.get(instance.id);
+        return !pki || pki.digest === null || pki.digest === (instance.current?.digest ?? null);
+      })(),
     };
   }
 
@@ -424,7 +458,7 @@ export class ObservationService extends EventEmitter {
       service: {
         status: this.status, lastCheckAt: this.lastCheckAt, lastError: this.lastError,
         platformSupported: process.platform === 'linux' || process.platform === 'darwin',
-        platform: process.platform, dataDir: this.store.dataDir,
+        platform: process.platform, dataDir: this.store.dataDir, historyReset: state.historyReset,
       },
       roots: this.roots,
       instances,
@@ -444,18 +478,21 @@ export class ObservationService extends EventEmitter {
 
   // ---------------------------------------------------------------- detail and diff
 
-  private async materialize(files: FileRecord[]): Promise<string | null> {
+  /** Writes retained copies into a private temp directory; returns it with the (hash-checked) bytes it wrote. */
+  private async materialize(files: FileRecord[]): Promise<{ dir: string; bytes: Map<string, Buffer> } | null> {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'mago-ski-gui-'));
+    const written = new Map<string, Buffer>();
     try {
       for (const file of files) {
         const bytes = await this.store.getBlob(file.sha256);
         if (!bytes) { await rm(dir, { recursive: true, force: true }); return null; }
+        written.set(file.path, bytes);
         const target = path.join(dir, file.path);
         await mkdir(path.dirname(target), { recursive: true });
         await writeFile(target, bytes, { mode: 0o600 });
         await chmod(target, file.exec ? 0o700 : 0o600);
       }
-      return dir;
+      return { dir, bytes: written };
     } catch (error) {
       await rm(dir, { recursive: true, force: true });
       throw error;
@@ -482,7 +519,7 @@ export class ObservationService extends EventEmitter {
   private async changeView(base: Baseline, current: Observation): Promise<ChangeView> {
     const evidenceNote = 'Partial evidence: only HTTP(S) origins in text files are detected. No detected change does not make changed content safe or approved.';
     const metadataOnly = (note: string): ChangeView => ({
-      baselineDigest: base.digest, currentDigest: current.digest, contentRetained: false,
+      baselineDigest: base.digest, currentDigest: current.digest, contentRetained: false, contentNote: note,
       files: this.metadataChanges(base.files, current.files, note),
       addedOrigins: [], removedOrigins: [], analysisComplete: false, evidenceNote, truncated: false,
     });
@@ -490,11 +527,11 @@ export class ObservationService extends EventEmitter {
       return metadataOnly('Content of this version was not retained, so only file names, sizes and executable bits are compared.');
     }
 
-    const baseDir = await this.materialize(base.files);
-    const currentDir = baseDir ? await this.materialize(current.files) : null;
+    const baseCopy = await this.materialize(base.files);
+    const currentCopy = baseCopy ? await this.materialize(current.files) : null;
     try {
-      if (!baseDir || !currentDir) return metadataOnly('A retained copy is missing or damaged, so only file metadata is compared.');
-      const diff = await diffSkillTrees(baseDir, currentDir);
+      if (!baseCopy || !currentCopy) return metadataOnly('A retained copy is missing or damaged, so only file metadata is compared.');
+      const diff = await diffSkillTrees(baseCopy.dir, currentCopy.dir);
       // The engine re-hashes both copies: they must be exactly the versions on record.
       if (diff.base_digest !== base.digest || diff.candidate_digest !== current.digest) {
         return metadataOnly('A retained copy does not match its recorded digest, so only file metadata is compared.');
@@ -505,8 +542,8 @@ export class ObservationService extends EventEmitter {
       for (const change of diff.files) {
         const oldFile = before.get(change.path);
         const newFile = after.get(change.path);
-        const oldText = oldFile ? decodeText((await this.store.getBlob(oldFile.sha256))!) : '';
-        const newText = newFile ? decodeText((await this.store.getBlob(newFile.sha256))!) : '';
+        const oldText = oldFile ? decodeText(baseCopy.bytes.get(change.path)!) : '';
+        const newText = newFile ? decodeText(currentCopy.bytes.get(change.path)!) : '';
         let lines = null;
         let note: string | null = null;
         if (change.change === 'mode-changed') note = `Executable bit ${change.exec_after ? 'added' : 'removed'}; content unchanged.`;
@@ -514,6 +551,8 @@ export class ObservationService extends EventEmitter {
         else {
           lines = diffLines(oldText, newText);
           if (!lines) note = 'Too large or too different to show line by line.';
+          else if (!lines.some((l) => l.kind === 'add' || l.kind === 'del')) note = 'Only line endings or the final newline changed; the bytes differ.';
+          else if (lines.some((l) => l.kind === 'add' && INVISIBLE.test(l.text))) note = 'Added lines contain invisible or bidirectional control characters, shown as ⟨U+…⟩.';
         }
         files.push({
           path: change.path, change: change.change, execBefore: change.exec_before, execAfter: change.exec_after,
@@ -521,17 +560,21 @@ export class ObservationService extends EventEmitter {
         });
       }
       return {
-        baselineDigest: base.digest, currentDigest: current.digest, contentRetained: true, files,
+        baselineDigest: base.digest, currentDigest: current.digest, contentRetained: true, contentNote: null, files,
         addedOrigins: diff.capability_evidence.added_network_origins, removedOrigins: diff.capability_evidence.removed_network_origins,
         analysisComplete: diff.capability_evidence.analysis_complete, evidenceNote: diff.capability_evidence.note, truncated: diff.diff_truncated,
       };
     } finally {
-      if (baseDir) await rm(baseDir, { recursive: true, force: true });
-      if (currentDir) await rm(currentDir, { recursive: true, force: true });
+      if (baseCopy) await rm(baseCopy.dir, { recursive: true, force: true });
+      if (currentCopy) await rm(currentCopy.dir, { recursive: true, force: true });
     }
   }
 
-  async detail(instanceId: string): Promise<InstanceDetail | null> {
+  detail(instanceId: string): Promise<InstanceDetail | null> {
+    return this.serial(() => this.buildDetail(instanceId));
+  }
+
+  private async buildDetail(instanceId: string): Promise<InstanceDetail | null> {
     const instance = this.s.instances.find((i) => i.id === instanceId);
     if (!instance) return null;
     const view = this.instanceView(instance);
@@ -545,7 +588,16 @@ export class ObservationService extends EventEmitter {
           '--reason', shellQuote('Reviewed in mago-ski GUI'), '--expect-digest', instance.current.digest,
         ].join(' ')
       : null;
-    return { instance: view, change, approveCommand, history: this.s.history.filter((e) => e.instanceId === instanceId).slice(-50).reverse() };
+    const previousVersions = [];
+    for (const b of [...instance.previousBaselines].reverse()) {
+      let retained = b.coverage.complete;
+      for (const file of b.files) if (retained && !(await this.store.hasBlob(file.sha256))) retained = false;
+      previousVersions.push({ digest: b.digest, recordedAt: b.recordedAt, supersededAt: b.supersededAt ?? null, retained });
+    }
+    return {
+      instance: view, change, approveCommand, previousVersions,
+      history: this.s.history.filter((e) => e.instanceId === instanceId).slice(-50).reverse(),
+    };
   }
 
   // ---------------------------------------------------------------- user actions
@@ -575,7 +627,11 @@ export class ObservationService extends EventEmitter {
   }
 
   /** Records that the user looked at this exact version. It is not an approval. */
-  async markReviewed(instanceId: string, digest: string): Promise<ActionResult> {
+  markReviewed(instanceId: string, digest: string): Promise<ActionResult> {
+    return this.serial(() => this.doMarkReviewed(instanceId, digest));
+  }
+
+  private async doMarkReviewed(instanceId: string, digest: string): Promise<ActionResult> {
     const target = await this.confirmTarget(instanceId, digest, false);
     if ('ok' in target) return target;
     const { instance } = target;
@@ -588,13 +644,17 @@ export class ObservationService extends EventEmitter {
   }
 
   /** Makes this exact version the comparison baseline. The previous baseline stays in history. */
-  async rememberVersion(instanceId: string, digest: string): Promise<ActionResult> {
+  rememberVersion(instanceId: string, digest: string): Promise<ActionResult> {
+    return this.serial(() => this.doRememberVersion(instanceId, digest));
+  }
+
+  private async doRememberVersion(instanceId: string, digest: string): Promise<ActionResult> {
     const target = await this.confirmTarget(instanceId, digest, this.s.prefs.retainContent);
     if ('ok' in target) return target;
     const { instance, tree } = target;
     const at = this.now().toISOString();
     const coverage = await this.retain(tree);
-    if (instance.baseline && instance.baseline.digest !== digest) instance.previousBaselines.push(instance.baseline);
+    if (instance.baseline && instance.baseline.digest !== digest) instance.previousBaselines.push({ ...instance.baseline, supersededAt: at });
     instance.baseline = { digest, recordedAt: at, reason: 'remembered', files: toFileRecords(tree), coverage };
     if (instance.current?.digest === digest) instance.current.coverage = coverage;
     instance.reviewedDigest = null;
@@ -609,32 +669,58 @@ export class ObservationService extends EventEmitter {
   // ---------------------------------------------------------------- settings
 
   async addRoot(rootPath: string): Promise<void> {
-    const resolved = path.resolve(rootPath);
-    if (this.s.roots.some((root) => path.resolve(root.path) === resolved)) return;
-    this.s.roots.push({ id: `user-${randomUUID()}`, path: resolved, label: path.basename(resolved) || resolved, origin: 'user' });
-    await this.store.save(this.s);
+    await this.serial(async () => {
+      const resolved = path.resolve(rootPath);
+      if (this.s.roots.some((root) => path.resolve(root.path) === resolved)) return;
+      this.s.roots.push({ id: `user-${randomUUID()}`, path: resolved, label: displayName(path.basename(resolved)) || resolved, origin: 'user' });
+      await this.store.save(this.s);
+    });
     await this.check();
   }
 
   /** Stops observing a location the user added. Default locations stay; their history is kept. */
   async removeRoot(rootId: string): Promise<void> {
-    const root = this.s.roots.find((r) => r.id === rootId);
-    if (!root || root.origin !== 'user') return;
-    this.s.roots = this.s.roots.filter((r) => r.id !== rootId);
-    this.s.instances = this.s.instances.filter((instance) => instance.rootId !== rootId);
-    await this.store.save(this.s);
+    await this.serial(async () => {
+      const root = this.s.roots.find((r) => r.id === rootId);
+      if (!root || root.origin !== 'user') return;
+      this.s.roots = this.s.roots.filter((r) => r.id !== rootId);
+      this.s.instances = this.s.instances.filter((instance) => instance.rootId !== rootId);
+      await this.store.save(this.s);
+    });
     await this.check();
   }
 
-  async setPrefs(prefs: Partial<Prefs>): Promise<void> {
-    const next = { ...this.s.prefs };
-    if (prefs.notify === 'off' || prefs.notify === 'grouped' || prefs.notify === 'immediate') next.notify = prefs.notify;
-    if (typeof prefs.retainContent === 'boolean') next.retainContent = prefs.retainContent;
-    if (typeof prefs.retentionDays === 'number' && Number.isInteger(prefs.retentionDays) && prefs.retentionDays >= 1 && prefs.retentionDays <= 365) {
-      next.retentionDays = prefs.retentionDays;
-    }
-    this.s.prefs = next;
-    await this.store.save(this.s);
-    this.emitUpdate();
+  setPrefs(prefs: Partial<Prefs>): Promise<void> {
+    return this.serial(async () => {
+      const next = { ...this.s.prefs };
+      if (prefs.notify === 'off' || prefs.notify === 'grouped' || prefs.notify === 'immediate') next.notify = prefs.notify;
+      if (typeof prefs.retainContent === 'boolean') next.retainContent = prefs.retainContent;
+      if (typeof prefs.retentionDays === 'number' && Number.isInteger(prefs.retentionDays) && prefs.retentionDays >= 1 && prefs.retentionDays <= 365) {
+        next.retentionDays = prefs.retentionDays;
+      }
+      const stopRetaining = this.s.prefs.retainContent && !next.retainContent;
+      this.s.prefs = next;
+      if (stopRetaining) {
+        // Turning copies off deletes the ones already kept; versions then compare by file metadata only.
+        for (const instance of this.s.instances) {
+          for (const version of [instance.baseline, instance.current, ...instance.previousBaselines]) {
+            if (version) version.coverage = { stored: 0, total: version.files.length, complete: version.files.length === 0 };
+          }
+        }
+      }
+      this.prune(this.now());
+      await this.store.save(this.s);
+      await this.collectGarbage();
+      this.emitUpdate();
+    });
+  }
+
+  /** The user has seen that earlier history was lost. The history event stays. */
+  dismissHistoryReset(): Promise<void> {
+    return this.serial(async () => {
+      this.s.historyReset = null;
+      await this.store.save(this.s);
+      this.emitUpdate();
+    });
   }
 }

@@ -4,6 +4,7 @@ import type {
   ActionResult, ChangeView, DiffLine, FileChangeView, HistoryEvent, InstanceDetail, InstanceView,
   ObservationState, PkiResultView, Prefs, RendererApi, ServiceView,
 } from '../service/types.ts';
+import { actionDigest, detailMatches } from './binding.ts';
 
 declare global {
   interface Window { magoSki: RendererApi }
@@ -44,7 +45,13 @@ const STATE_LABEL: Record<ObservationState, string> = {
 const HISTORY_LABEL: Record<HistoryEvent['kind'], string> = {
   'first-seen': '처음 상태 기록', 'new-skill': '새 Skill 발견', changed: '내용 변경', reviewed: '변경 확인',
   remembered: '새 비교 기준 기록', missing: '사라짐', returned: '다시 발견', unreadable: '읽기 실패',
+  'history-reset': '이전 기록 초기화',
 };
+
+/** Invisible and bidirectional control characters are shown as code points, never applied to the text. */
+function visible(text: string): string {
+  return text.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
+}
 const NOTIFY_STEPS: Array<[Prefs['notify'], string, number]> = [['off', '끔', -120], ['grouped', '모아서', 0], ['immediate', '즉시', 120]];
 const RETENTION_STEPS: Array<[number, number]> = [[7, -100], [30, -20], [90, 60], [365, 130]];
 
@@ -72,7 +79,8 @@ function statusLine(i: InstanceView): string {
   }
 }
 
-function pkiBadge(pki: PkiResultView | null, view: ServiceView): HTMLElement {
+function pkiBadge(pki: PkiResultView | null, view: ServiceView, current = true): HTMLElement {
+  if (pki && !current) return h('span', { class: 'pki', title: pki.reason }, `${pki.verdict} · 이전 버전 기준`);
   if (!pki) return h('span', { class: 'pki' }, view.host.policy.kind === 'none' ? 'PKI 미설정' : 'PKI —');
   if (pki.verdict === 'VERIFIED') return h('span', { class: 'pki verified', title: '조직 승인 검증 통과' }, 'ORG VERIFIED');
   return h('span', { class: 'pki problem', title: pki.reason }, pki.verdict);
@@ -90,6 +98,7 @@ let detailKey = '';
 let selectedFile = 0;
 let rememberOnReview = true;
 let actionResult: { ok: boolean; text: string } | null = null;
+let detailError: string | null = null;
 let busy = false;
 
 function selected(): InstanceView | undefined {
@@ -104,7 +113,7 @@ function renderHeader(v: ServiceView): void {
     s.status === 'error'    ? ['var(--problem)', `확인 실패 · ${s.lastError ?? ''}`] :
     s.status === 'checking' ? ['var(--accent)', '확인 중…'] :
     s.status === 'starting' ? ['var(--recorded)', '시작하는 중'] :
-                              ['var(--verified)', `관찰 중 · ${v.host.name} · 마지막 확인 ${time(s.lastCheckAt)}`];
+                              ['var(--new)', `관찰 중 · ${v.host.name} · 마지막 확인 ${time(s.lastCheckAt)}`];
   $('status').replaceChildren(h('span', { class: 'dot', style: `background:${color}` }), h('span', {}, text));
   $('count').textContent = String(v.instances.filter((i) => i.state !== 'missing').length);
 
@@ -118,6 +127,13 @@ function renderHeader(v: ServiceView): void {
     '확인할 변화가 없어요.';
 
   const banners: HTMLElement[] = [];
+  if (s.historyReset) {
+    const dismiss = h('button', { class: 'btn', style: 'margin-left:12px' }, '확인함');
+    dismiss.addEventListener('click', () => void api.dismissHistoryReset().then(apply));
+    banners.push(h('div', { class: 'banner error' },
+      `이전 기록이 사라져서 (${s.historyReset.reason}) ${time(s.historyReset.at)}부터 새로 기록했어요. 그 사이의 변경은 비교할 수 없어서 모든 Skill을 '새로 발견'으로 표시해요.`
+        + (s.historyReset.backup ? ` 읽지 못한 파일: ${s.historyReset.backup}` : ''), dismiss));
+  }
   if (!s.platformSupported) banners.push(h('div', { class: 'banner error' }, `${s.platform}에서는 실행 비트가 digest에 반영되지 않아 다른 OS에서 만든 승인과 맞지 않을 수 있어요. mago-ski 엔진 0.1은 Linux와 macOS만 지원해요.`));
   if (v.host.policy.kind === 'error') banners.push(h('div', { class: 'banner error' }, `정책 파일을 읽지 못했어요 (${v.host.policy.path}): ${v.host.policy.reason}. Pi는 이 경우 모든 Skill을 차단해요.`));
   if (v.host.policy.kind === 'loaded' && !v.host.policy.trustOk) banners.push(h('div', { class: 'banner error' }, `신뢰 문서를 검증하지 못했어요: ${v.host.policy.trustNote ?? ''}`));
@@ -212,6 +228,7 @@ function gateDevice(v: ServiceView): HTMLElement {
     policy.kind === 'none'  ? ['NOT CONFIGURED', '', '조직 승인 검증 미설정'] :
     policy.kind === 'error' ? ['POLICY ERROR', 'problem', '정책 파일을 읽지 못함'] :
     !policy.trustOk         ? ['TRUST ERROR', 'problem', '신뢰 문서 검증 실패'] :
+    results.length === 0    ? ['NO SKILLS', '', '검증할 Skill이 없어요'] :
     [`VERIFIED ${verified}/${results.length}`, verified === results.length ? 'verified' : 'warn', '조직이 승인한 정확한 버전'];
   const mode = policy.kind === 'loaded' ? policy.mode : null;
   const chip = mode === 'enforce' ? 'Enforce · 미승인 Skill 차단 (Pi)' : mode === 'shadow' ? 'Shadow · 막지 않고 기록' : '관찰 모드 · 실행을 막지 않음';
@@ -286,33 +303,38 @@ function diffTable(file: FileChangeView, change: ChangeView): HTMLElement {
   }
   const kind = (l: DiffLine) => (l.kind === 'same' ? '' : ` ${l.kind}`);
   const num = (l: DiffLine) => (l.kind === 'add' ? `${l.new} +` : l.kind === 'del' ? `${l.old} −` : l.kind === 'gap' ? '⋯' : String(l.new));
-  for (const line of file.lines) box.append(h('div', { class: `dl${kind(line)}` }, h('span', { class: 'n' }, num(line)), h('span', { class: 't' }, line.text)));
+  for (const line of file.lines) box.append(h('div', { class: `dl${kind(line)}` }, h('span', { class: 'n' }, num(line)), h('span', { class: 't' }, visible(line.text))));
+  if (file.note) box.append(h('div', { class: 'dl gap' }, h('span', { class: 'n' }), h('span', { class: 't' }, file.note)));
   return box;
 }
 
-async function runAction(kind: 'reviewed' | 'remember', instance: InstanceView): Promise<void> {
-  if (busy || !instance.currentDigest) return;
+/** Records `digest`, the version whose change is on screen (from actionDigest), never the latest view's digest. */
+async function runAction(kind: 'reviewed' | 'remember', instance: InstanceView, digest: string): Promise<void> {
+  if (busy) return;
   busy = true;
   let result: ActionResult;
   try {
     result = kind === 'remember'
-      ? await api.rememberVersion(instance.id, instance.currentDigest)
-      : await api.markReviewed(instance.id, instance.currentDigest);
+      ? await api.rememberVersion(instance.id, digest)
+      : await api.markReviewed(instance.id, digest);
   } finally {
     busy = false;
   }
   actionResult = result.ok
-    ? { ok: true, text: kind === 'remember' ? `${short(instance.currentDigest)}을 새 비교 기준으로 기록했어요. 조직 승인은 아니에요.` : '이 버전을 확인한 것으로 기록했어요. 조직 승인은 아니에요.' }
+    ? { ok: true, text: kind === 'remember' ? `${short(digest)}을 새 비교 기준으로 기록했어요. 조직 승인은 아니에요.` : '이 버전을 확인한 것으로 기록했어요. 조직 승인은 아니에요.' }
     : { ok: false, text: result.message };
   detailKey = '';
   apply(await api.getView());
 }
 
 function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
-  const d = detail && detail.instance.id === i.id ? detail : null;
+  // A detail for other versions than the view reports is never shown: it would describe bytes that are gone.
+  const d = detailMatches(i, detail) ? detail : null;
+  const target = actionDigest(i, detail);
   pane.replaceChildren(
-    h('h2', {}, i.name, h('span', { class: `state ${i.state}` }, STATE_LABEL[i.state]), pkiBadge(i.pki, v)),
+    h('h2', {}, i.name, h('span', { class: `state ${i.state}` }, STATE_LABEL[i.state]), pkiBadge(i.pki, v, i.pkiCurrent)),
     h('div', { class: 'path' }, `${i.path} · ${i.rootLabel}`));
+  if (!i.pkiCurrent) pane.append(h('div', { class: 'result err' }, 'PKI 판정은 직전에 읽은 다른 버전 기준이에요. 다음 확인에서 다시 검증해요.'));
 
   const summary: Record<ObservationState, string> = {
     new: '새로 발견해서 현재 상태를 비교 기준으로 기록했어요. 안전 검증 결과가 아니라 비교를 위한 출발점이에요.',
@@ -334,7 +356,12 @@ function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
       change.removedOrigins.length ? h('span', { class: 'fact' }, `사라진 origin ${change.removedOrigins.length}개`) : null,
       execChanges ? h('span', { class: 'fact evidence' }, `실행 파일 ${execChanges}개 추가`) : null,
       h('span', { class: 'fact' }, `기록 ${short(change.baselineDigest)} → 현재 ${short(change.currentDigest)}`)));
-    if (!change.contentRetained) pane.append(h('div', { class: 'result err' }, '이 버전의 원문을 보관하지 않아 파일 이름, 크기, 실행 비트만 비교했어요.'));
+    if (!change.contentRetained) {
+      const why = change.contentNote?.includes('missing or damaged') ? '보관한 사본이 없거나 손상돼서'
+        : change.contentNote?.includes('does not match') ? '보관한 사본이 기록과 달라서'
+        : '이 버전의 원문을 보관하지 않아서';
+      pane.append(h('div', { class: 'result err' }, `${why} 파일 이름, 크기, 실행 비트만 비교했어요.`));
+    }
 
     if (selectedFile >= change.files.length) selectedFile = 0;
     const tabs = h('div', { class: 'files' });
@@ -356,26 +383,29 @@ function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
       '부분 근거: 텍스트 파일의 HTTP(S) origin만 탐지해요. 탐지된 변화가 없어도 안전하다는 뜻은 아니에요.'
         + (change.analysisComplete ? '' : ' 일부 파일은 분석하지 못했어요.') + (change.truncated ? ' 변경 목록이 길어 일부만 보여요.' : '')));
   } else if (!d && (i.state === 'changed' || i.state === 'reviewed')) {
-    pane.append(h('p', { class: 'sec-sub', style: 'text-align:left' }, '변경 내용을 불러오는 중…'));
+    pane.append(h('p', { class: 'sec-sub', style: 'text-align:left' }, detailError ?? '변경 내용을 불러오는 중…'));
   }
 
-  if (i.currentDigest) pane.append(h('div', { class: 'digest-bind' }, `처리 대상: ${i.currentDigest} · 읽는 중 파일이 바뀌면 다시 확인해요`));
+  pane.append(h('div', { class: 'digest-bind' }, target
+    ? `처리 대상: ${target} · 읽는 중 파일이 바뀌면 다시 확인해요`
+    : '처리 대상: 화면의 변경 내용이 최신 버전과 맞을 때 정해져요'));
 
+  const waiting = '변경 내용을 불러온 뒤 확인할 수 있어요';
   if (i.state === 'changed') {
     const cb = h('input', { type: 'checkbox', id: 'remember' }) as HTMLInputElement;
     cb.checked = rememberOnReview;
     cb.addEventListener('change', () => { rememberOnReview = cb.checked; });
-    const btn = h('button', { class: 'btn primary' }, '✓ 변경 확인 완료');
-    btn.addEventListener('click', () => void runAction(rememberOnReview ? 'remember' : 'reviewed', i));
+    const btn = h('button', { class: 'btn primary', disabled: !target, title: target ? null : waiting }, '✓ 변경 확인 완료');
+    btn.addEventListener('click', () => { if (target) void runAction(rememberOnReview ? 'remember' : 'reviewed', i, target); });
     pane.append(h('label', { class: 'check', for: 'remember' }, cb, '확인 후 이 버전을 다음 비교 기준으로 기록'),
       h('div', { class: 'actions' }, h('span', { class: 'note' }, actionNote(v)), btn));
   } else if (i.state === 'reviewed') {
-    const btn = h('button', { class: 'btn' }, '이 버전을 비교 기준으로 기록');
-    btn.addEventListener('click', () => void runAction('remember', i));
+    const btn = h('button', { class: 'btn', disabled: !target, title: target ? null : waiting }, '이 버전을 비교 기준으로 기록');
+    btn.addEventListener('click', () => { if (target) void runAction('remember', i, target); });
     pane.append(h('div', { class: 'actions' }, h('span', { class: 'note' }, actionNote(v)), btn));
   } else if (i.state === 'new') {
-    const btn = h('button', { class: 'btn' }, '확인함');
-    btn.addEventListener('click', () => void runAction('reviewed', i));
+    const btn = h('button', { class: 'btn', disabled: !target, title: target ? null : waiting }, '확인함');
+    btn.addEventListener('click', () => { if (target) void runAction('reviewed', i, target); });
     pane.append(h('div', { class: 'actions' }, h('span', { class: 'note' }, actionNote(v)), btn));
   }
   if (actionResult) pane.append(h('div', { class: `result ${actionResult.ok ? 'ok' : 'err'}` }, actionResult.text));
@@ -395,6 +425,12 @@ function renderPane(pane: HTMLElement, v: ServiceView, i: InstanceView): void {
       : '조직 승인은 정책의 Root가 위임한 승인자가 이 정확한 digest에 서명했는지로 판단해요. 최초 기록과 변경 확인은 이 앱의 비교 이력일 뿐 승인을 만들지 않아요.'));
   pane.append(meaning);
 
+  if (d?.previousVersions.length) {
+    pane.append(h('h3', { style: 'font-size:13px;margin:18px 0 6px' }, `이전 버전 (${v.prefs.retentionDays}일 보관)`),
+      h('table', { class: 'tbl' }, ...d.previousVersions.map((p) => h('tr', {},
+        h('td', { class: 'mono' }, short(p.digest)), h('td', {}, `기록 ${time(p.recordedAt)}`),
+        h('td', {}, `교체 ${time(p.supersededAt)}`), h('td', {}, p.retained ? '원문 보관됨' : '메타데이터만')))));
+  }
   if (d?.history.length) {
     pane.append(h('h3', { style: 'font-size:13px;margin:18px 0 6px' }, '이 Skill의 기록'),
       h('table', { class: 'tbl' }, ...d.history.slice(0, 8).map((e) => h('tr', {},
@@ -443,7 +479,17 @@ async function loadDetail(): Promise<void> {
   const key = `${i.id}:${i.currentDigest}:${i.baselineDigest}:${i.state}`;
   if (key === detailKey) return;
   detailKey = key;
-  const loaded = await api.getDetail(i.id);
+  detailError = null;
+  let loaded: InstanceDetail | null;
+  try {
+    loaded = await api.getDetail(i.id);
+  } catch (error) {
+    if (detailKey !== key) return;
+    detailKey = '';  // retried on the next update
+    detailError = `변경 내용을 불러오지 못했어요: ${error instanceof Error ? error.message : String(error)}`;
+    if (device === 'monitor' && tab === 'skills' && view) renderMonitorDetail(view);
+    return;
+  }
   if (detailKey !== key) return;
   detail = loaded;
   if (device === 'monitor' && tab === 'skills' && view) renderMonitorDetail(view);
@@ -454,7 +500,7 @@ async function loadDetail(): Promise<void> {
 function renderGateDetail(v: ServiceView): void {
   const p = v.host.policy;
   const rows = v.instances.filter((i) => i.state !== 'missing').map((i) => h('tr', {},
-    h('td', {}, i.name), h('td', {}, pkiBadge(i.pki, v)), h('td', {}, i.pki?.reason ?? '—'),
+    h('td', {}, i.name), h('td', {}, pkiBadge(i.pki, v, i.pkiCurrent)), h('td', {}, i.pki?.reason ?? '—'),
     h('td', { class: 'mono' }, short(i.pki?.approverKeyId ?? null))));
   const decisions = v.host.recentDecisions.slice().reverse().map((d) => h('tr', {},
     h('td', {}, time(d.timestamp)), h('td', {}, d.skill), h('td', {}, d.action), h('td', {}, d.verdict), h('td', {}, d.event)));
