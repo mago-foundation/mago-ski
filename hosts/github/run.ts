@@ -6,7 +6,7 @@ import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { isInside } from '../../src/fs-safe.ts';
 import { isMainModule } from '../../src/main-module.ts';
-import { findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy, type Policy } from '../../src/policy.ts';
+import { DiscoveryBudgetError, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy, type Policy } from '../../src/policy.ts';
 import { unverifiable, type VerificationResult } from '../../src/verify.ts';
 
 export interface GitHubCheckOptions {
@@ -19,8 +19,15 @@ export interface GitHubCheckOptions {
   now?: Date;
 }
 
+/** The summary lists at most this many Skills (failures first); the rest are counted, not listed. */
+export const MAX_SUMMARY_ROWS = 200;
+/** Workflow annotations are capped too; GitHub shows only a handful per step anyway. */
+export const MAX_ANNOTATIONS = 50;
+
 export interface GitHubCheckResult {
   mode: Policy['mode'];
+  /** Set when discovery exceeded its work budget; `results` then holds a single UNVERIFIABLE entry and no Skill was checked. */
+  budgetExceeded?: string;
   results: VerificationResult[];
   exitCode: number;
   summary: string;
@@ -80,7 +87,26 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
     decisionLogPath: null,
   };
   if (policy.skillDirs.length === 0) throw new Error('Policy has no skill_dirs; list the directories that hold Skills');
-  const { skillDirs: found, tooDeep } = await findSkillDirs(policy.skillDirs);
+  let discovery;
+  try {
+    discovery = await findSkillDirs(policy.skillDirs);
+  } catch (error) {
+    if (!(error instanceof DiscoveryBudgetError)) throw error;
+    // Bounded fail-closed report: nothing is verified and no per-Skill rows are produced.
+    const result = unverifiable(workspace, 'skill discovery', error.message, now);
+    return {
+      mode: policy.mode, budgetExceeded: error.message, results: [result],
+      exitCode: policy.mode === 'enforce' ? 1 : 0,
+      summary: [
+        `### mago-ski: Skill discovery budget exceeded (${policy.mode} mode)`,
+        '',
+        `${markdownCell(error.message)}. No Skills were checked.`,
+        '',
+        policy.mode === 'shadow' ? '_Shadow mode: failures are reported but do not fail the check._' : '',
+      ].join('\n'),
+    };
+  }
+  const { skillDirs: found, tooDeep } = discovery;
   const trust = await loadPolicyTrust(policy, now);
   const results: VerificationResult[] = [];
   for (const skillDir of found) {
@@ -90,7 +116,8 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   }
   for (const directory of tooDeep) results.push(tooDeepResult(directory, now));
   const failures = results.filter((result) => result.verdict !== 'VERIFIED');
-  const rows = results.map((result) => {
+  const ordered = [...failures, ...results.filter((result) => result.verdict === 'VERIFIED')];
+  const rows = ordered.slice(0, MAX_SUMMARY_ROWS).map((result) => {
     const relative = path.relative(workspace, result.skillDir) || '.';
     return `| ${result.verdict === 'VERIFIED' ? 'pass' : 'fail'} | ${markdownCell(result.skillName)} | ${markdownCell(relative)} | ${result.verdict} | ${markdownCell(result.reason)} |`;
   });
@@ -100,6 +127,7 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
     '| | Skill | Path | Verdict | Detail |',
     '|---|---|---|---|---|',
     ...rows,
+    ...(ordered.length > MAX_SUMMARY_ROWS ? ['', `_${ordered.length - MAX_SUMMARY_ROWS} more Skills not listed (the table shows failures first, at most ${MAX_SUMMARY_ROWS} rows)._`] : []),
     '',
     failures.length > 0 && policy.mode === 'shadow' ? '_Shadow mode: failures are reported but do not fail the check._' : '',
   ].join('\n');
@@ -114,11 +142,17 @@ async function main(): Promise<void> {
   const [policyRoot, workspace, policy] = process.argv.slice(2);
   if (!policyRoot || !workspace || !policy) throw new Error('usage: run.ts POLICY_ROOT WORKSPACE POLICY');
   const result = await runGitHubCheck({ policyRoot, workspace, policy });
+  let annotations = 0;
   for (const entry of result.results) {
     if (entry.verdict === 'VERIFIED') continue;
+    if (annotations >= MAX_ANNOTATIONS) {
+      process.stdout.write(`::notice title=mago-ski::${MAX_ANNOTATIONS} annotations shown; see the job summary for the rest\n`);
+      break;
+    }
+    annotations += 1;
     const level = result.mode === 'enforce' ? 'error' : 'warning';
-    const file = path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md'));
-    process.stdout.write(`::${level} file=${escapeAnnotation(file)},title=mago-ski ${entry.verdict}::${escapeAnnotation(`${entry.skillName}: ${entry.reason}`)}\n`);
+    const location = result.budgetExceeded ? '' : `file=${escapeAnnotation(path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md')))},`;
+    process.stdout.write(`::${level} ${location}title=mago-ski ${entry.verdict}::${escapeAnnotation(`${entry.skillName}: ${entry.reason}`)}\n`);
   }
   process.stdout.write(`${result.summary}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${result.summary}\n`);

@@ -3,41 +3,89 @@
 // duplicate keys, alternate escapes and reordered fields cannot change meaning.
 
 export const MAX_CANONICAL_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_CANONICAL_JSON_NODES        = 200_000;
+const MAX_CANONICAL_JSON_DEPTH        = 64;
+const DEFAULT_MAX_STRING_LENGTH       = 1_024;
+const UTF8_BOM_CHAR_CODE              = 0xfeff;
 
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+const utf8Decoder         = new TextDecoder('utf-8', { fatal: true });
+const controlCharPattern  = /[\u0000-\u001f\u007f]/u;
 
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+interface SerializationState {
+  nodes: number;
 }
 
-function canonicalValue(value: unknown, depth: number, state: { nodes: number }): string {
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function canonicalValue(value: unknown, depth: number, state: SerializationState): string {
   state.nodes += 1;
-  if (state.nodes > 200_000 || depth > 64) throw new Error('Canonical JSON exceeds structural limits');
-  if (value === null) return 'null';
-  if (typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) throw new Error('Canonical JSON numbers must be safe integers');
+  if (state.nodes > MAX_CANONICAL_JSON_NODES || depth > MAX_CANONICAL_JSON_DEPTH) {
+    throw new Error('Canonical JSON exceeds structural limits');
+  }
+
+  if (value === null) {
+    return 'null';
+  }
+
+  if (typeof value === 'string') {
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalValue(item, depth + 1, state)).join(',')}]`;
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
   }
+
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error('Canonical JSON numbers must be safe integers');
+    }
+    return Object.is(value, -0) ? '0' : JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    const elements = value.map((item) => canonicalValue(item, depth + 1, state));
+    return `[${elements.join(',')}]`;
+  }
+
   if (isRecord(value)) {
-    const entries = Object.keys(value).sort().map((key) => {
+    const sortedKeys = Object.keys(value).sort();
+    const entries = sortedKeys.map((key) => {
+      if (key === '__proto__') {
+        throw new Error('Canonical JSON forbids "__proto__" object keys');
+      }
       const item = value[key];
-      if (item === undefined) throw new Error(`Canonical JSON field ${JSON.stringify(key)} is undefined`);
+      if (item === undefined) {
+        throw new Error(`Canonical JSON field ${JSON.stringify(key)} is undefined`);
+      }
       return `${JSON.stringify(key)}:${canonicalValue(item, depth + 1, state)}`;
     });
     return `{${entries.join(',')}}`;
   }
+
   throw new Error('Canonical JSON contains an unsupported value');
 }
 
 export function serializeCanonicalJson(value: unknown): string {
-  return `${canonicalValue(value, 0, { nodes: 0 })}\n`;
+  const state: SerializationState = { nodes: 0 };
+  return `${canonicalValue(value, 0, state)}\n`;
 }
 
 export function canonicalBytes(value: unknown): Buffer {
@@ -45,56 +93,109 @@ export function canonicalBytes(value: unknown): Buffer {
 }
 
 export function parseCanonicalJsonBytes(input: Uint8Array, label = 'JSON document'): unknown {
-  const bytes = Buffer.from(input);
-  if (bytes.length === 0 || bytes.length > MAX_CANONICAL_JSON_BYTES) {
+  let text: string;
+  let value: unknown;
+  let canonical: string;
+
+  if (
+    !(input instanceof Uint8Array) ||
+    input.byteLength === 0 ||
+    input.byteLength > MAX_CANONICAL_JSON_BYTES
+  ) {
     throw new Error(`${label} must be between 1 byte and ${MAX_CANONICAL_JSON_BYTES} bytes`);
   }
-  let text: string;
+
   try {
-    text = utf8Decoder.decode(bytes);
+    text = utf8Decoder.decode(input);
   } catch {
     throw new Error(`${label} is not valid UTF-8`);
   }
-  if (text.charCodeAt(0) === 0xfeff || !text.endsWith('\n')) {
+
+  if (text.charCodeAt(0) === UTF8_BOM_CHAR_CODE || !text.endsWith('\n')) {
     throw new Error(`${label} must be canonical UTF-8 JSON with one trailing LF`);
   }
-  let value: unknown;
+
   try {
-    value = JSON.parse(text.slice(0, -1));
+    value = JSON.parse(text.slice(0, -1), (key, parsedValue) => {
+      if (key === '__proto__') {
+        throw new Error('__proto__ key is forbidden');
+      }
+      if (typeof parsedValue === 'number' && Object.is(parsedValue, -0)) {
+        throw new Error('negative zero is not canonical');
+      }
+      return parsedValue;
+    });
   } catch {
     throw new Error(`${label} is not valid JSON`);
   }
-  let canonical: string;
+
   try {
     canonical = serializeCanonicalJson(value);
   } catch (error) {
-    throw new Error(`${label} is structurally invalid: ${(error as Error).message}`);
+    throw new Error(`${label} is structurally invalid: ${errorMessage(error)}`);
   }
-  if (!bytes.equals(Buffer.from(canonical, 'utf8'))) {
+
+  if (canonical !== text) {
     throw new Error(`${label} is not canonical JSON (duplicate keys and alternate encodings are rejected)`);
   }
+
   return value;
 }
 
-export function exactKeys(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+export function exactKeys(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+
+  const actualKeys = Object.keys(value).sort();
+  const expectedKeys = [...new Set(keys)].sort();
+
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
     throw new Error(`${label} has missing or unsupported fields`);
   }
+
   return value;
 }
 
-export function requireString(value: unknown, label: string, maxLength = 1024): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new Error(`${label} must be a non-empty string of at most ${maxLength} characters without control characters`);
+export function requireString(
+  value: unknown,
+  label: string,
+  maxLength = DEFAULT_MAX_STRING_LENGTH,
+): string {
+  if (!Number.isSafeInteger(maxLength) || maxLength < 1) {
+    throw new Error(`Invalid maxLength limit for ${label}`);
   }
+
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    controlCharPattern.test(value)
+  ) {
+    throw new Error(
+      `${label} must be a non-empty string of at most ${maxLength} characters without control characters`,
+    );
+  }
+
   return value;
 }
 
 export function requireArray(value: unknown, label: string, maxLength: number): unknown[] {
-  if (!Array.isArray(value) || value.length > maxLength) throw new Error(`${label} must be an array of at most ${maxLength} items`);
+  if (!Number.isSafeInteger(maxLength) || maxLength < 0) {
+    throw new Error(`Invalid maxLength limit for ${label}`);
+  }
+
+  if (!Array.isArray(value) || value.length > maxLength) {
+    throw new Error(`${label} must be an array of at most ${maxLength} items`);
+  }
+
   return value;
 }
 
@@ -102,5 +203,6 @@ export function requirePositiveInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${label} must be a positive integer`);
   }
+
   return value;
 }

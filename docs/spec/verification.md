@@ -1,6 +1,6 @@
 # Verification
 
-Status: draft, implemented by mago-ski 0.1 (`src/verify.ts`). Verdict test vectors: [`tests/vectors/cases.json`](../../tests/vectors/cases.json).
+Status: draft, implemented by mago-ski 0.1 and later (`src/verify.ts`). Verdict test vectors: [`tests/vectors/cases.json`](../../tests/vectors/cases.json).
 
 ## Verdicts
 
@@ -41,6 +41,16 @@ Each certificate, for a Skill named `NAME` whose current tree digest is `D`:
 
 If any candidate is `VERIFIED`, the Skill is verified. Otherwise the result is the first match in this order: `REVOKED`, `UNAPPROVED_CHANGE`, `EXPIRED`, `UNTRUSTED_SIGNER`, `UNVERIFIABLE`, `NO_CERTIFICATE`.
 
+### Certificate candidate budget
+
+Candidates come from the checkout under review, so they are bounded. They are read and evaluated one at a time, in the order explicit file, policy `certificate_dirs`, in-Skill file; only the best result so far is kept, and the first `VERIFIED` candidate ends the scan (later candidates are not read). Each candidate file is at most 8 MiB. For one Skill, at most 64 candidate files may exist and they may total at most 32 MiB; going over either limit, or any candidate that is not a regular non-symlink file, makes the Skill `UNVERIFIABLE` with a reason naming the limit.
+
 ## Skill name
 
 The name checked against the certificate is, in order: the name the host gives (the Pi host passes the name Pi loaded), the `name` field in `SKILL.md` frontmatter, or the directory name.
+
+`SKILL.md` is read only if it is a regular, non-symlink file no larger than the tree collector's per-file limit (64 MiB), and the type and size are checked before any content is read. A symlinked, special or oversized `SKILL.md` makes the Skill `UNVERIFIABLE`.
+
+## Discovery budget
+
+Hosts that scan `skill_dirs` (the GitHub Action and `mago-ski verify-all`) stop discovery when a root holds more than 1,000 Skills (directories reported as too deep and linked Skills count) or when more than 50,000 directory entries have been visited. Discovery then fails closed with a message instead of returning a partial list: `verify-all` exits non-zero with the message, and the GitHub Action reports one summary line and no per-Skill rows (failing the check in `enforce` mode, reported only in `shadow` mode). The Action summary lists at most 200 Skills, failures first, and says how many were not listed.

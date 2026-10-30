@@ -16,6 +16,9 @@ field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>consol
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cd "$work"
+# The CLI never reads policy from the current directory (a checkout could choose its own root of trust):
+# it uses --policy, else $MAGO_SKI_POLICY (absolute), else ~/.mago-ski/policy.json.
+export MAGO_SKI_POLICY="$work/.mago-ski/policy.json"
 mkdir -p keys .mago-ski skills
 
 step "Setup: an offline root key, and Alice as an approver for Skills named docs-*"

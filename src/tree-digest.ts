@@ -4,45 +4,47 @@ import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalBytes } from './canonical-json.ts';
 
-export const TREE_PROFILE = 'mago.skill-tree/v2';
-export const CERTIFICATE_FILENAME = '.mago-ski-cert.json';
-export const IGNORE_FILENAME = '.skilldigestignore';
+export const TREE_PROFILE             = 'mago.skill-tree/v2';
+export const CERTIFICATE_FILENAME     = '.mago-ski-cert.json';
+export const IGNORE_FILENAME          = '.skilldigestignore';
 /** Always covered: it holds the instructions and the description hosts show the model. */
-export const SKILL_FILENAME = 'SKILL.md';
-export const MAX_TREE_FILES = 20_000;
-export const MAX_TREE_ENTRIES = 50_000;
-export const MAX_FILE_BYTES = 64 * 1024 * 1024;
-export const MAX_TREE_BYTES = 256 * 1024 * 1024;
-export const MAX_RELATIVE_PATH_BYTES = 4_096;
-const MAX_IGNORE_BYTES = 64 * 1024;
-const MAX_IGNORE_PATTERNS = 256;
+export const SKILL_FILENAME           = 'SKILL.md';
+export const MAX_TREE_FILES           = 20_000;
+export const MAX_TREE_ENTRIES         = 50_000;
+export const MAX_FILE_BYTES           = 64 * 1024 * 1024;
+export const MAX_TREE_BYTES           = 256 * 1024 * 1024;
+export const MAX_RELATIVE_PATH_BYTES  = 4_096;
+const MAX_IGNORE_BYTES                = 64 * 1024;
+const MAX_IGNORE_PATTERNS             = 256;
 
 export interface TreeFile {
-  path: string;
-  size: number;
-  sha256: string;
-  exec: boolean;
+  path:     string;
+  size:     number;
+  sha256:   string;
+  exec:     boolean;
 }
 
 export interface SkillTree {
-  profile: typeof TREE_PROFILE;
-  digest: string;
-  root: string;
-  files: TreeFile[];
+  profile:    typeof TREE_PROFILE;
+  digest:     string;
+  root:       string;
+  files:      TreeFile[];
   totalBytes: number;
   /** Paths left out of the digest: the root `.git`, the in-tree certificate, and `.skilldigestignore` entries. */
-  excluded: string[];
+  excluded:   string[];
 }
 
 interface FileRecord {
-  path: string;
-  pathBytes: Buffer;
+  path:         string;
+  pathBytes:    Buffer;
   absolutePath: string;
-  stat: BigIntStats;
+  stat:         BigIntStats;
 }
 
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
-const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+const utf8Decoder   = new TextDecoder('utf-8', { fatal: true });
+const noFollow      = fsConstants.O_NOFOLLOW ?? 0;
+// A FIFO swapped in after enumeration must fail the fstat check below, not block open(2).
+const nonBlock      = fsConstants.O_NONBLOCK ?? 0;
 
 function fail(message: string): never {
   throw new Error(message);
@@ -56,15 +58,19 @@ function decodeEntryName(name: Buffer): string {
     fail('Skill tree contains a path that is not valid UTF-8');
   }
   if (
-    decoded.length === 0 || decoded === '.' || decoded === '..' ||
-    decoded.includes('/') || decoded.includes('\\') || decoded.includes(':') ||
+    decoded.length === 0 || 
+    decoded === '.' || 
+    decoded === '..' ||
+    decoded.includes('/') || 
+    decoded.includes('\\') || 
+    decoded.includes(':') ||
     /[. ]$/u.test(decoded) ||
     /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/iu.test(decoded) ||
     /[\u0000-\u001f\u007f]/u.test(decoded) ||
     decoded.normalize('NFC') !== decoded
-  ) {
+  )
     fail(`Skill tree contains an unsupported path component: ${JSON.stringify(decoded)}`);
-  }
+  
   return decoded;
 }
 
@@ -75,32 +81,46 @@ function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
 
 /** Executable bit of a regular file. Windows has no POSIX mode bits, so it always reports false there. */
 export function isExecutable(mode: number | bigint): boolean {
-  if (process.platform === 'win32') return false;
+  if (process.platform === 'win32') 
+    return false;
+  
   return (BigInt(mode) & 0o111n) !== 0n;
 }
 
 async function readStable(absolutePath: string, label: string, expected?: BigIntStats): Promise<{ content: Buffer; stat: BigIntStats }> {
   let handle;
   try {
-    handle = await open(absolutePath, fsConstants.O_RDONLY | noFollow);
+    handle = await open(absolutePath, fsConstants.O_RDONLY | noFollow | nonBlock);
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || (expected && !sameFileVersion(expected, before))) fail(`Skill file changed while being read: ${label}`);
-    if (before.size > BigInt(MAX_FILE_BYTES)) fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${label}`);
+    
+    if (!before.isFile() || (expected && !sameFileVersion(expected, before))) 
+      fail(`Skill file changed while being read: ${label}`);
+    
+    if (before.size > BigInt(MAX_FILE_BYTES)) 
+      fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${label}`);
+    
     const chunks: Buffer[] = [];
     let total = 0;
     while (true) {
       const chunk = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) 
+        break;
+      
       total += bytesRead;
-      if (total > MAX_FILE_BYTES) fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${label}`);
+      if (total > MAX_FILE_BYTES) 
+        fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${label}`);
+      
       chunks.push(chunk.subarray(0, bytesRead));
     }
+    
     const after = await handle.stat({ bigint: true });
-    if (!sameFileVersion(before, after) || total !== Number(before.size)) fail(`Skill file changed while being read: ${label}`);
+    if (!sameFileVersion(before, after) || total !== Number(before.size)) 
+      fail(`Skill file changed while being read: ${label}`);
     return { content: Buffer.concat(chunks, total), stat: after };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ELOOP') fail(`Skill tree contains a symbolic link: ${label}`);
+    if ((error as NodeJS.ErrnoException)?.code === 'ELOOP') 
+      fail(`Skill tree contains a symbolic link: ${label}`);
     throw error;
   } finally {
     await handle?.close();
@@ -114,7 +134,8 @@ export function sha256Hex(bytes: Uint8Array): string {
 /** Hashes one file for read-time checks. Returns the same fields the certificate records. */
 export async function hashFile(absolutePath: string, relativePath: string): Promise<TreeFile> {
   const entry = await lstat(absolutePath, { bigint: true });
-  if (entry.isSymbolicLink() || !entry.isFile()) fail(`Not a regular file: ${relativePath}`);
+  if (entry.isSymbolicLink() || !entry.isFile()) 
+    fail(`Not a regular file: ${relativePath}`);
   const { content, stat } = await readStable(absolutePath, relativePath, entry);
   return { path: relativePath, size: content.length, sha256: sha256Hex(content), exec: isExecutable(stat.mode) };
 }
@@ -128,15 +149,22 @@ export function parseIgnoreFile(text: string): IgnoreRule[] {
   const rules: IgnoreRule[] = [];
   for (const rawLine of text.split(/\r?\n/u)) {
     const line = rawLine.trim();
-    if (line === '' || line.startsWith('#')) continue;
-    if (rules.length >= MAX_IGNORE_PATTERNS) fail(`${IGNORE_FILENAME} exceeds ${MAX_IGNORE_PATTERNS} patterns`);
     const directoryOnly = line.endsWith('/');
     const pattern = directoryOnly ? line.slice(0, -1) : line;
     const segments = pattern.split('/');
+    
+    if (line === '' || line.startsWith('#')) continue;
+    if (rules.length >= MAX_IGNORE_PATTERNS) 
+      fail(`${IGNORE_FILENAME} exceeds ${MAX_IGNORE_PATTERNS} patterns`);
     if (
-      pattern === '' || pattern.startsWith('/') || pattern.includes('\\') || /[*?[\]!]/u.test(pattern) ||
+      pattern === '' || 
+      pattern.startsWith('/') || 
+      pattern.includes('\\') || 
+      /[*?[\]!]/u.test(pattern) ||
       segments.some((segment) => segment === '' || segment === '.' || segment === '..') ||
-      pattern === IGNORE_FILENAME || pattern === SKILL_FILENAME || pattern.normalize('NFC') !== pattern
+      pattern === IGNORE_FILENAME || 
+      pattern === SKILL_FILENAME || 
+      pattern.normalize('NFC') !== pattern
     ) {
       fail(`${IGNORE_FILENAME} contains an unsupported pattern: ${JSON.stringify(line)} (use plain relative paths; globs are not supported)`);
     }
@@ -147,26 +175,52 @@ export function parseIgnoreFile(text: string): IgnoreRule[] {
 
 function isIgnored(relativePath: string, isDirectory: boolean, rules: IgnoreRule[]): boolean {
   for (const rule of rules) {
-    if (relativePath === rule.pattern && (isDirectory || !rule.directoryOnly)) return true;
-    if (relativePath.startsWith(`${rule.pattern}/`)) return true;
+    if (relativePath === rule.pattern && (isDirectory || !rule.directoryOnly)) 
+      return true;
+    
+    if (relativePath.startsWith(`${rule.pattern}/`)) 
+      return true;
   }
   return false;
 }
 
+/** Checks that a Skill root exists and is a real directory, with messages that name the path. */
+export async function requireSkillRoot(root: string): Promise<BigIntStats> {
+  let rootStat: BigIntStats;
+  try {
+    rootStat = await lstat(root, { bigint: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') 
+      fail(`Skill directory not found: ${root}`);
+    throw error;
+  }
+  if (rootStat.isSymbolicLink()) 
+    fail('Skill root must be a real directory, not a symbolic link');
+  if (!rootStat.isDirectory()) 
+    fail(`Skill path is not a directory: ${root}`);
+  return rootStat;
+}
+
 async function enumerate(root: string): Promise<{ root: string; records: FileRecord[]; excluded: string[] }> {
-  const rootStat = await lstat(root, { bigint: true });
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail('Skill root must be a real directory, not a symbolic link');
+  const rootStat = await requireSkillRoot(root);
   const canonicalRoot = await realpath(root);
   let rules: IgnoreRule[] = [];
   const ignorePath = path.join(canonicalRoot, IGNORE_FILENAME);
+
   try {
     const entry = await lstat(ignorePath, { bigint: true });
-    if (entry.isSymbolicLink() || !entry.isFile()) fail(`${IGNORE_FILENAME} must be a regular file`);
-    if (entry.size > BigInt(MAX_IGNORE_BYTES)) fail(`${IGNORE_FILENAME} exceeds ${MAX_IGNORE_BYTES} bytes`);
+    if (entry.isSymbolicLink() || !entry.isFile()) 
+      fail(`${IGNORE_FILENAME} must be a regular file`);
+    
+    if (entry.size > BigInt(MAX_IGNORE_BYTES)) 
+      fail(`${IGNORE_FILENAME} exceeds ${MAX_IGNORE_BYTES} bytes`);
+    
     const { content } = await readStable(ignorePath, IGNORE_FILENAME, entry);
     rules = parseIgnoreFile(utf8Decoder.decode(content));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') 
+      throw error;
   }
 
   const records: FileRecord[] = [];
@@ -175,28 +229,37 @@ async function enumerate(root: string): Promise<{ root: string; records: FileRec
   let entryCount = 0;
 
   async function visit(directory: string, relativeDirectory: string, depth: number): Promise<void> {
-    if (depth > 64) fail('Skill tree exceeds the maximum directory depth of 64');
+    if (depth > 64) 
+      fail('Skill tree exceeds the maximum directory depth of 64');
+    
     const directoryStat = await lstat(directory, { bigint: true });
-    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink())
       fail(`Skill tree contains a changed or symbolic-link directory: ${relativeDirectory || '.'}`);
-    }
+    
     const expected = relativeDirectory ? path.join(canonicalRoot, relativeDirectory) : canonicalRoot;
-    if (await realpath(directory) !== expected) fail(`Skill tree directory path changed during traversal: ${relativeDirectory || '.'}`);
+    if (await realpath(directory) !== expected) 
+      fail(`Skill tree directory path changed during traversal: ${relativeDirectory || '.'}`);
+    
     const dir = await opendir(expected, { encoding: 'buffer' as BufferEncoding, bufferSize: 32 });
     for await (const dirent of dir) {
       entryCount += 1;
-      if (entryCount > MAX_TREE_ENTRIES) fail(`Skill tree exceeds the ${MAX_TREE_ENTRIES}-entry limit`);
+      if (entryCount > MAX_TREE_ENTRIES) 
+        fail(`Skill tree exceeds the ${MAX_TREE_ENTRIES}-entry limit`);
       const name = decodeEntryName(dirent.name as unknown as Buffer);
       const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
       const pathBytes = Buffer.from(relativePath, 'utf8');
-      if (pathBytes.length > MAX_RELATIVE_PATH_BYTES) fail(`Skill path exceeds the ${MAX_RELATIVE_PATH_BYTES}-byte limit`);
+      
+      if (pathBytes.length > MAX_RELATIVE_PATH_BYTES) 
+        fail(`Skill path exceeds the ${MAX_RELATIVE_PATH_BYTES}-byte limit`);
       const caseKey = relativePath.normalize('NFKC').toLowerCase();
-      if (seenCaseFolded.has(caseKey)) fail(`Skill tree contains a case-insensitive path collision: ${relativePath}`);
+      if (seenCaseFolded.has(caseKey)) 
+        fail(`Skill tree contains a case-insensitive path collision: ${relativePath}`);
       seenCaseFolded.add(caseKey);
 
       const absolutePath = path.join(expected, name);
       const stat = await lstat(absolutePath, { bigint: true });
-      if (stat.isSymbolicLink()) fail(`Skill tree contains a symbolic link: ${relativePath}`);
+      if (stat.isSymbolicLink()) 
+        fail(`Skill tree contains a symbolic link: ${relativePath}`);
       const isDirectory = stat.isDirectory();
       if (!relativeDirectory && (name === '.git' || (name === CERTIFICATE_FILENAME && !isDirectory))) {
         excluded.push(isDirectory ? `${relativePath}/` : relativePath);
@@ -209,8 +272,10 @@ async function enumerate(root: string): Promise<{ root: string; records: FileRec
       if (isDirectory) {
         await visit(absolutePath, relativePath, depth + 1);
       } else if (stat.isFile()) {
-        if (records.length >= MAX_TREE_FILES) fail(`Skill tree exceeds the ${MAX_TREE_FILES}-file limit`);
-        if (stat.size > BigInt(MAX_FILE_BYTES)) fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${relativePath}`);
+        if (records.length >= MAX_TREE_FILES) 
+          fail(`Skill tree exceeds the ${MAX_TREE_FILES}-file limit`);
+        if (stat.size > BigInt(MAX_FILE_BYTES)) 
+          fail(`Skill file exceeds the ${MAX_FILE_BYTES}-byte limit: ${relativePath}`);
         records.push({ path: relativePath, pathBytes, absolutePath, stat });
       } else {
         fail(`Skill tree contains an unsupported special file: ${relativePath}`);
@@ -245,14 +310,17 @@ export async function collectSkillTree(rootPath: string, { includeContents = fal
   const files: TreeFile[] = [];
   const contents = includeContents ? new Map<string, Buffer>() : undefined;
   let totalBytes = 0;
+  
   for (const record of records) {
     const { content, stat } = await readStable(record.absolutePath, record.path, record.stat);
     totalBytes += content.length;
-    if (totalBytes > MAX_TREE_BYTES) fail(`Skill tree exceeds the ${MAX_TREE_BYTES}-byte total limit`);
+    if (totalBytes > MAX_TREE_BYTES) 
+      fail(`Skill tree exceeds the ${MAX_TREE_BYTES}-byte total limit`);
     files.push({ path: record.path, size: content.length, sha256: sha256Hex(content), exec: isExecutable(stat.mode) });
     contents?.set(record.path, content);
   }
-  if (!files.some((file) => file.path === SKILL_FILENAME)) fail(`Skill tree must contain ${SKILL_FILENAME} at its root`);
+  if (!files.some((file) => file.path === SKILL_FILENAME)) 
+    fail(`Skill tree must contain ${SKILL_FILENAME} at its root`);
   const tree: SkillTree & { contents?: Map<string, Buffer> } = {
     profile: TREE_PROFILE, digest: digestFileList(files), root, files, totalBytes, excluded,
   };

@@ -16,6 +16,7 @@ mago-ski answers one question: **is the Skill this agent is about to use the exa
 | **Hiding the instructions from the digest**: `.skilldigestignore` listing `SKILL.md` | Rejected. `SKILL.md` is always covered, and certificates without it are `UNVERIFIABLE` |
 | **Exposing uncovered files**: `.git`, ignored files, or an unused in-tree certificate file in a verified Skill | The Pi host refuses `read` of any file not in the certificate and refuses `grep` over Skills that have excluded files. The in-tree certificate counts as safe only when it is the certificate that verified the Skill |
 | **Symlinks**: a linked Skill directory, a linked `SKILL.md`, or a link inside a Skill pointing elsewhere | Digests reject symlinks. Discovery (CLI, GitHub Action) reports linked Skills as `UNVERIFIABLE` instead of skipping them, and fails rather than skipping Skills deeper than its search limit. The Pi host matches tool paths both before and after resolving links |
+| **Names outside the digest**: a contributor renames a verified Skill's directory, or names files inside an unverified Skill, so that the text reaches the model | The directory path is not covered by the certificate. The Pi host shows a Skill's path to the model only if it is plainly spelled (see the [Pi host](hosts/pi.md)), and removes entries of unverified Skills from `find` and `ls` results |
 | **Path aliases**: `@/path`, `file://` URLs, Unicode spaces or filename variants that Pi's tools resolve to a Skill file | The Pi host resolves tool paths the same way Pi's tools do before matching them |
 | **Verification errors** | The Pi host fails closed in enforce mode: a Skill that cannot be checked is `UNVERIFIABLE`, and if checking crashes outright, file and shell tools that touch any Skill path are blocked |
 | **Pull request trusting itself**: a PR adds its own root or approver | The GitHub Action reads policy, trust root and revocation list from the protected base revision |
@@ -25,12 +26,12 @@ mago-ski answers one question: **is the Skill this agent is about to use the exa
 
 - **Malicious first versions and fooled reviewers.** A certificate records a decision; it does not make the decision correct. Review quality is the organization's job.
 - **Prompt injection at runtime.** A verified Skill can still be steered by untrusted data it reads (the confused-deputy problem). Runtime evaluation of tool calls against the approved contract is a separate layer (Mago's CLEAR), not part of mago-ski.
-- **Shell commands that reach Skill files indirectly.** In Pi, `bash` and `powershell` are checked by matching Skill paths in the command text. Relative paths after `cd`, globs, variables or encoded paths can evade it. In enforce mode, the guarantees that hold are: unverified Skills are not advertised, `/skill:` cannot load them, and the structured file tools (`read`, `grep`, `edit`, `write`, `find`, `ls`) refuse their files. `find` and `ls` may still list file names inside verified Skills.
+- **Shell commands that reach Skill files indirectly.** In Pi, `bash` and `powershell` are checked by matching Skill paths in the command text. Relative paths after `cd`, globs, variables or encoded paths can evade it. In enforce mode, the guarantees that hold are: unverified Skills are not advertised, `/skill:` cannot load them, and the structured file tools (`read`, `grep`, `edit`, `write`, `find`, `ls`) refuse their files. `find` and `ls` may still list file names inside verified Skills; in an unverified Skill they are removed from the results (a `bash` `ls` or `find` is not filtered). Names of files a verified Skill excludes from its certificate can still appear.
 - **Other code in the agent process.** A hostile Pi extension, MCP server or custom tool runs with the same permissions as mago-ski and can read files directly or change the Skill list after mago-ski filters it. Load mago-ski last and only trusted extensions.
 - **A compromised host.** Root or same-user malware can change files, the policy, the state file or the extension itself. This includes racing directory replacement between path resolution and reading; the digest re-checks file identity, but a same-user attacker controls the file system.
-- **A compromised root key.** Everything chains to it. Keep it offline. Root key rotation is designed but not implemented in v1.
+- **A compromised root key.** Everything chains to it. Keep it offline. Recovery from a leaked root key is proposed in [Root recovery v1](spec/root-recovery-v1.md) but not implemented.
 - **Files excluded from the digest** (`.skilldigestignore`, root `.git`) are not approved. The Pi host refuses to read them from a verified Skill, but other tools may still use them.
-- **Windows.** Not supported in 0.1. Windows has no POSIX executable bit, so it cannot reproduce Linux and macOS digests; see the [digest spec](spec/skill-tree-v2.md).
+- **Windows.** Not supported yet. Windows has no POSIX executable bit, so it cannot reproduce Linux and macOS digests; see the [digest spec](spec/skill-tree-v2.md).
 
 ## Revocation timing
 
@@ -39,6 +40,6 @@ Revocation is not instant everywhere. A host acts on a revocation once it reads 
 ## Assumptions
 
 - The root private key is offline and only its holder can sign trust documents.
-- Approver private keys are kept by the people they name; `approve` refuses a key stored inside the Skill directory.
-- The host policy, trust documents and state file are writable only by the user or administrator, not by the code under review. The Pi host never reads policy from the project directory.
+- Approver private keys are kept by the people they name; `approve` refuses a key stored inside the Skill directory, and refuses a Skill that contains private-key material in a recognizable format (PEM, PKCS#8, OpenSSH and SSH2 private keys, PGP private key blocks, PuTTY `.ppk` files and age secret keys). This is a best-effort check for accidents, not a general secret scanner.
+- The host policy, trust documents and state file are writable only by the user or administrator, not by the code under review. Neither the Pi host nor the CLI reads policy from the project directory (the CLI uses `--policy`, `MAGO_SKI_POLICY` or `~/.mago-ski/policy.json`). The policy may place `decision_log` and `state_file` only inside its own directory.
 - Clocks are roughly correct (5 minutes of skew is tolerated for issue times).

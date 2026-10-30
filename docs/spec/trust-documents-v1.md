@@ -1,6 +1,6 @@
 # Trust documents v1
 
-Status: draft, implemented by mago-ski 0.1. Test vectors: [`tests/vectors/`](../../tests/vectors/).
+Status: draft, implemented by mago-ski 0.1 and later. Test vectors: [`tests/vectors/`](../../tests/vectors/).
 
 An organization's trust is anchored in one **root key**, kept offline. Hosts pin the root key's fingerprint (its key id). The root signs two documents: the trust root (who may approve what) and the revocation list (what is no longer trusted). Both are DSSE envelopes signed by the root key, in the same envelope format as [certificates](skill-certificate-v1.md), with canonical JSON payloads.
 
@@ -72,10 +72,10 @@ Hand-edited JSON, read by hosts and the CLI. Paths are relative to the policy fi
 | `trust_root`, `revocations` | yes | Signed documents |
 | `certificate_dirs` | no | Extra certificate locations |
 | `skill_dirs` | no | Directories scanned by `verify-all` and the GitHub Action |
-| `state_file` | no | Rollback protection (below). Strongly recommended on hosts |
-| `decision_log` | no | JSON Lines file of decisions |
+| `state_file` | no | Rollback protection (below). Strongly recommended on hosts. Must resolve to a file inside the policy file's directory |
+| `decision_log` | no | JSON Lines file of decisions, one JSON object per line. Must resolve to a file inside the policy file's directory (after following symbolic links); it is opened without following symbolic links and must be a regular file. Records are data, not shell syntax: do not source them |
 
-The policy itself decides who is trusted, so it must live where the code under review cannot change it. The Pi host reads it only from `MAGO_SKI_POLICY` or `~/.mago-ski/policy.json`; the GitHub Action reads it from the pull request's base revision.
+The policy itself decides who is trusted, so it must live where the code under review cannot change it. The Pi host and the CLI read it only from `MAGO_SKI_POLICY` (an absolute path) or `~/.mago-ski/policy.json`, and the CLI also accepts an explicit `--policy FILE`; the GitHub Action reads it from the pull request's base revision.
 
 ## Host state (rollback protection)
 
@@ -100,4 +100,4 @@ One JSON object per line:
 ## Key rotation
 
 - **Approver keys:** add the new key (`root add-approver`), re-approve the Skills, then remove the old key (`root remove-approver`). Certificates from a removed approver stop verifying once a host reads the updated trust root; revoke the old key instead if it may be compromised.
-- **Root key:** not implemented in v1. Planned design: the new root's first trust root is also signed by the old root, and hosts that pin the old fingerprint accept the new one only through that cross-signed document. Until then, replacing the root means distributing a new fingerprint to every host.
+- **Root key:** not implemented in v1; replacing the root means distributing a new fingerprint to every host. Proposed design, which also covers a leaked root key: [Root recovery v1](root-recovery-v1.md).

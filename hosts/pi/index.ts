@@ -1,25 +1,29 @@
 // mago-ski host verifier for Pi (https://github.com/earendil-works/pi).
 //
 // Load it as a Pi extension. Policy comes from MAGO_SKI_POLICY or ~/.mago-ski/policy.json,
-// never from the project directory, because project files may be controlled by the code under review.
+// never from the project directory, because project files may be controlled by the code under review:
+// a relative or in-project policy path is refused and the extension fails closed.
 //
 // Enforce mode: unverified Skills are not advertised to the model, `/skill:name` cannot load them,
 // and the structured file tools refuse their files. Shell tools (bash, powershell) are checked
-// best-effort by matching Skill paths in the command text. Shadow mode allows everything and, when a
+// best-effort by matching Skill paths in the command text. `find` and `ls` results have the names
+// inside unverified Skills removed. Shadow mode allows everything and, when a
 // decision log is configured, records what enforce mode would have blocked.
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { realpath } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, realpath } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import { isInside, readRegularFile } from '../../src/fs-safe.ts';
 import { appendDecision, loadPolicy, loadPolicyTrust, verifyWithPolicy, type DecisionRecord, type Mode, type Policy } from '../../src/policy.ts';
 import { formatTimestamp } from '../../src/time.ts';
 import { CERTIFICATE_FILENAME, hashFile, sha256Hex } from '../../src/tree-digest.ts';
+import { validateSkillName } from '../../src/names.ts';
 import { unverifiable, type TrustContextResult, type VerificationResult } from '../../src/verify.ts';
 import { piReadTarget, piReadVariants, piResolveToCwd } from './paths.ts';
 
 export interface MagoSkiPiOptions {
-  /** Policy file; defaults to $MAGO_SKI_POLICY, then ~/.mago-ski/policy.json. */
+  /** Policy file (absolute, or starting with "~/"); defaults to $MAGO_SKI_POLICY, then ~/.mago-ski/policy.json. Must be outside the project. */
   policyPath?: string;
   now?: () => Date;
 }
@@ -46,8 +50,11 @@ type Block = { block: true; reason: string } | undefined;
 const SHELL_TOOLS = new Set(['bash', 'powershell']);
 const FILE_TOOLS = new Set(['read', 'edit', 'write', 'grep', 'find', 'ls']);
 
-function defaultPolicyPath(): string {
-  return process.env.MAGO_SKI_POLICY || path.join(homedir(), '.mago-ski', 'policy.json');
+const HOME_POLICY_DIR = '.mago-ski';
+
+/** Where the policy comes from when nothing is configured. */
+function homePolicyPath(): string {
+  return path.join(homedir(), HOME_POLICY_DIR, 'policy.json');
 }
 
 /** Resolves symlinks on the longest existing prefix. Throws on errors other than ENOENT. */
@@ -71,8 +78,32 @@ function expandHome(value: string): string {
   return value === '~' ? homedir() : value.startsWith('~/') ? path.join(homedir(), value.slice(2)) : value;
 }
 
-/** Same frontmatter handling and block format as Pi's own /skill: expansion. */
-export function skillBlock(name: string, filePath: string, baseDir: string, content: string, args: string): string {
+/**
+ * Skill paths reach the model in Pi's Skill list and in `/skill:` blocks, but the certificate does
+ * not cover the Skill directory, so a contributor can rename it. Beneath a base the user chose (the
+ * working directory, the home directory) a path may use only the characters below; the base itself
+ * only has to be free of control characters and quoting or markup characters.
+ */
+const PROMPT_PATH_PART = /^[A-Za-z0-9._/~@+-]*$/u;
+const PROMPT_PATH_BASE = /^[^\p{C}\p{Zl}\p{Zp}<>"'`\\]+$/u;
+
+/** Why a path must not be shown to the model, or null when it may be. `bases` are trusted prefixes. */
+export function promptPathProblem(target: string, bases: string[] = []): string | null {
+  if (target.length <= 1024 && PROMPT_PATH_PART.test(target) && target !== '') return null;
+  for (const base of bases) {
+    const prefix = base.endsWith('/') ? base : `${base}/`;
+    if (!path.isAbsolute(base) || !PROMPT_PATH_BASE.test(base) || !(target === base || target.startsWith(prefix))) continue;
+    const rest = target.slice(base.length);
+    if (target.length <= 1024 && PROMPT_PATH_PART.test(rest)) return null;
+  }
+  return 'the Skill directory path has characters outside A-Z a-z 0-9 . _ / ~ @ + - below your working or home directory (or is too long), and the certificate does not cover the path; rename or move the directory';
+}
+
+/** Same frontmatter handling and block format as Pi's own /skill: expansion. Throws on unsafe metadata. */
+export function skillBlock(name: string, filePath: string, baseDir: string, content: string, args: string, trustedBases: string[] = []): string {
+  validateSkillName(name);
+  const problem = promptPathProblem(filePath, trustedBases) ?? promptPathProblem(baseDir, trustedBases);
+  if (problem) throw new Error(problem);
   const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/u, '').trim();
   const block = `<skill name="${name}" location="${filePath}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
   return args ? `${block}\n\n${args}` : block;
@@ -104,16 +135,50 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     /** Enforce-mode latch: verification itself crashed, so every Skill path is treated as unverified. */
     let failedClosed = false;
     const lastLogged = new Map<string, Verdictish>();
+    /** Skill directories already reported for an unsafe path, so the notice and log line appear once. */
+    const reportedPaths = new Set<string>();
 
     const mode = (): Mode => (policy ? policy.mode : 'enforce');
     const active = () => policy !== null || policyError !== null;
     const enforcing = () => mode() === 'enforce';
 
+    /**
+     * The policy decides the mode, so it must come from the host, never from the project. An explicit
+     * path (option or $MAGO_SKI_POLICY) has to be absolute and must not resolve into the project,
+     * unless it lives under ~/.mago-ski. Returns the reason it is refused, or null.
+     */
+    async function policyPathProblem(configured: string, ctx: ExtensionContext): Promise<string | null> {
+      if (!path.isAbsolute(configured)) return 'the policy path must be absolute (or start with "~/"); a relative path would resolve against the project';
+      const target = await canonical(configured);
+      const hostDir = await canonical(path.join(homedir(), HOME_POLICY_DIR));
+      if (isInside(hostDir, target)) return null;
+      const home = await canonical(homedir());
+      const roots = new Set<string>();
+      for (const start of [ctx.cwd, process.cwd()]) {
+        if (typeof start !== 'string' || start === '') continue;
+        const cwd = await canonical(start);
+        roots.add(cwd);
+        // A policy anywhere in the same repository counts as the project's, even from a subdirectory.
+        // The search stops at the home directory, so a dotfiles repository there does not claim it all.
+        for (let dir = cwd; dir !== home; dir = path.dirname(dir)) {
+          if (existsSync(path.join(dir, '.git'))) { roots.add(dir); break; }
+          if (path.dirname(dir) === dir) break;
+        }
+      }
+      for (const root of roots) if (isInside(root, target)) return `the policy file is inside the project (${root}); project files may be controlled by the code under review`;
+      return null;
+    }
+
     async function ensurePolicy(ctx: ExtensionContext): Promise<void> {
       if (loaded) return;
       loaded = true;
-      const policyPath = options.policyPath ?? defaultPolicyPath();
+      const explicit = options.policyPath ?? (process.env.MAGO_SKI_POLICY || undefined);
+      const policyPath = explicit === undefined ? homePolicyPath() : expandHome(explicit);
       try {
+        if (explicit !== undefined) {
+          const problem = await policyPathProblem(policyPath, ctx);
+          if (problem) throw Object.assign(new Error(problem), { code: 'EPOLICYPATH' });
+        }
         policy = await loadPolicy(policyPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -209,6 +274,39 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     /** Skills inside a directory a tool would search. */
     function contained(paths: string[]): Entry[] {
       return entries.filter((entry) => dirsOf(entry).some((dir) => paths.some((target) => target !== dir && isInside(target, dir))));
+    }
+
+    /**
+     * Rewrites the text of a `find` or `ls` result that listed an unverified Skill. Both tools print one
+     * path (relative to `root`) per line plus an optional trailing notice. Names may contain newlines, so
+     * a line is kept only if it names something that exists under `root` and is not in an unverified
+     * Skill. Returns null when nothing had to be removed.
+     */
+    async function filterListing(text: string, root: string, unverified: Entry[]): Promise<{ text: string; list: string; removed: number } | null> {
+      const notice = /\n\n(\[(?:\d+ (?:results|entries) limit reached(?:\. Use limit=\d+ for more(?:, or refine pattern)?)?|[\d.]+KB limit reached)(?:\. [\d.]+KB limit reached)?\])$/u.exec(text);
+      const body = notice ? text.slice(0, notice.index) : text;
+      if (body === '(empty directory)' || body === 'No files found matching pattern') return null;
+      const kept: string[] = [];
+      let removed = 0;
+      for (const line of body.split('\n')) {
+        const abs = path.join(root, line);
+        let inSkill = false;
+        if (line !== '') {
+          try {
+            await lstat(abs);
+            const real = await canonical(abs);
+            inSkill = unverified.some((entry) => dirsOf(entry).some((dir) => isInside(dir, abs) || isInside(dir, real)));
+          } catch {
+            inSkill = true; // not a real path (part of a name with a newline) or unreadable: do not pass it on
+          }
+        }
+        if (inSkill) removed++;
+        else kept.push(line);
+      }
+      if (removed === 0) return null;
+      const hidden = `[mago-ski: ${removed} entr${removed === 1 ? 'y' : 'ies'} hidden because they belong to a Skill that is not verified]`;
+      const list = kept.join('\n');
+      return { text: [list, notice?.[1], hidden].filter((part) => part).join('\n\n'), list, removed };
     }
 
     /** Logs the decision; returns a block in enforce mode, undefined in shadow mode. */
@@ -328,7 +426,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
 
     pi.on('session_start', async (_event, ctx) => {
       if (process.platform === 'win32' && ctx.hasUI) {
-        ctx.ui.notify('mago-ski: Windows is not supported in 0.1. Executable bits are not covered, so Skills approved on Linux or macOS may not verify.', 'warning');
+        ctx.ui.notify('mago-ski: Windows is not supported yet. Executable bits are not covered, so Skills approved on Linux or macOS may not verify.', 'warning');
       }
       await ensurePolicy(ctx);
     });
@@ -344,8 +442,20 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
         }
         const checked = await refresh(event.systemPromptOptions.skills, ctx);
         failedClosed = false;
+        // Pi lists each Skill's path to the model; a verified Skill whose path is not plainly spelled stays out of the list.
+        const unsafe = new Set<string>();
+        for (const entry of checked) {
+          const problem = promptPathProblem(entry.filePath, [ctx.cwd, homedir()]);
+          if (!problem || entry.result.verdict !== 'VERIFIED') continue;
+          unsafe.add(entry.lexDir);
+          if (!reportedPaths.has(entry.lexDir)) {
+            reportedPaths.add(entry.lexDir);
+            await judge(entry, 'advertise', 'UNAPPROVED_CHANGE', problem);
+            if (ctx.hasUI) ctx.ui.notify(`mago-ski ${enforcing() ? 'did not advertise' : 'would not advertise (shadow)'} Skill "${entry.name}": ${problem}`, enforcing() ? 'error' : 'warning');
+          }
+        }
         if (enforcing()) {
-          const allowed = new Set(checked.filter((entry) => entry.result.verdict === 'VERIFIED').map((entry) => entry.lexDir));
+          const allowed = new Set(checked.filter((entry) => entry.result.verdict === 'VERIFIED' && !unsafe.has(entry.lexDir)).map((entry) => entry.lexDir));
           event.systemPromptOptions.skills = event.systemPromptOptions.skills.filter((skill) => allowed.has(path.resolve(skill.baseDir)));
         }
       } catch (error) {
@@ -377,7 +487,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
           const bytes = await readRegularFile(entry.filePath, 'SKILL.md', 8 * 1024 * 1024);
           const approved = entry.result.files?.find((file) => file.path === 'SKILL.md');
           if (!approved || approved.sha256 !== sha256Hex(bytes)) throw new Error('SKILL.md changed after verification');
-          return { action: 'transform', text: skillBlock(entry.name, entry.filePath, entry.baseDir, bytes.toString('utf8'), args) };
+          return { action: 'transform', text: skillBlock(entry.name, entry.filePath, entry.baseDir, bytes.toString('utf8'), args, [ctx.cwd, homedir()]) };
         } catch (error) {
           const blocked = await judge(entry, 'skill-command', 'UNAPPROVED_CHANGE', (error as Error).message);
           if (!blocked) return { action: 'continue' };
@@ -389,6 +499,38 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!blocked) return { action: 'continue' };
       if (ctx.hasUI) ctx.ui.notify(blocked.reason, 'error');
       return { action: 'handled' };
+    });
+
+    // find and ls print names, so names inside an unverified Skill are removed from what the model sees.
+    pi.on('tool_result', async (event, ctx) => {
+      if (!active() || event.isError || entries.length === 0) return undefined;
+      if (event.toolName !== 'find' && event.toolName !== 'ls') return undefined;
+      const input = event.input as Record<string, unknown>;
+      const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
+      const { targets, piPath } = await toolTargets(event.toolName, rawPath, ctx.cwd);
+      const unverified = contained(targets).filter((entry) => entry.result.verdict !== 'VERIFIED');
+      if (unverified.length === 0) return undefined;
+
+      const content = [...event.content];
+      let list: string | undefined;
+      let removed = 0;
+      for (const [index, item] of content.entries()) {
+        if (item.type !== 'text') continue;
+        const filtered = await filterListing(item.text, piPath, unverified);
+        if (!filtered) continue;
+        content[index] = { ...item, text: filtered.text };
+        list = filtered.list;
+        removed += filtered.removed;
+      }
+      if (removed === 0) return undefined;
+      for (const entry of unverified) await judge(entry, `tool:${event.toolName}`, entry.result.verdict, entry.result.reason);
+      if (!enforcing()) return undefined;
+      // The truncation record in `details` carries the unfiltered text too.
+      const details = event.details as { truncation?: Record<string, unknown> } | undefined;
+      return {
+        content,
+        ...(details?.truncation ? { details: { ...details, truncation: { ...details.truncation, content: list ?? '' } } } : {}),
+      };
     });
 
     pi.on('tool_call', async (event, ctx) => {
