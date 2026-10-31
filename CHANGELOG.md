@@ -4,6 +4,10 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code interception spike (`docs/spikes/`): which hooks and settings can enforce Skill approval on Claude Code, and the resulting adapter design.
+
 ## [0.2.0] - 2026-10-30
 
 Adds `approve --expect-digest` and the desktop GUI proof of concept (in the repository, not in the npm package), and includes the fixes from the Codex Security review of 0.1.0.
