@@ -70,6 +70,8 @@ export interface AdmissionStore {
   reapSessions(isLive: (ref: string) => boolean | Promise<boolean>): Promise<MutationResult & { reaped?: number }>;
   expireSessions(maxAgeMs: number, bootMs: number): Promise<MutationResult & { expired?: number }>;
   assess(sessionRef: string, name: string, check: (name: string, digest: string) => Promise<Verdict>): Promise<AssessResult>;
+  /** Current generation of every installed Skill (read-only). */
+  installed(): Promise<{ name: string; digest: string }[]>;
   /** 'unloaded' = a transient error at open, retried on every call; an unloaded or corrupt store is not ready. */
   health(): Promise<'ready' | 'corrupt' | 'unloaded'>;
 }
@@ -356,6 +358,17 @@ export async function openAdmissionStore(dir: string, options: { bootId: string;
         return p === 'ok' ? { ok: true, reaped } : p === 'busy' ? BUSY : { ok: false, reason: 'write-failed' };
       }, BUSY);
     },
+
+    installed: () => locked<{ name: string; digest: string }[]>(async () => {
+      if (corrupt || !state) return [];
+      const s = state;
+      const out: { name: string; digest: string }[] = [];
+      for (const name of new Set([...s.base.keys(), ...s.log.map((e) => e.name)])) {
+        const digest = currentAt(s, name, s.seq);
+        if (digest !== null) out.push({ name, digest });
+      }
+      return out;
+    }, []),
 
     health: () => locked<'ready' | 'corrupt' | 'unloaded'>(async () => (corrupt ? 'corrupt' : state ? 'ready' : 'unloaded'), 'unloaded'),
 

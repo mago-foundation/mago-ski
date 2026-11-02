@@ -107,7 +107,7 @@ test('session-start then invoke is allowed; revocation denies the next invoke; m
   assert.equal((await decide(f.svc, 'session-start', HOST)).kind, 'ack'); // re-sent start
   for (const ev of ['skill-invoke', 'prompt-expansion']) assert.equal((await decide(f.svc, ev, HOST, 'alpha')).verdict, 'VERIFIED');
   await f.revoke(digest);
-  assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'REVOKED');
+  assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'NO_CERTIFICATE'); // enforce: a revoked current generation is uninstalled
   assert.equal((await stat(f.svc.sockets.decision)).mode & 0o777, 0o666);
   assert.equal((await stat(f.svc.sockets.admin)).mode & 0o777, 0o600);
 });

@@ -74,12 +74,14 @@ import { isRecord, MAX_CANONICAL_JSON_BYTES } from '../canonical-json.ts';
 import { readRegularFile, writeFileAtomic } from '../fs-safe.ts';
 import { validateDigest, validateSkillName } from '../names.ts';
 import type { Mode } from '../policy.ts';
+import { formatTimestamp } from '../time.ts';
 import { evaluateCertificate, VERDICT_RANK, type Verdict } from '../verify.ts';
 import { MAX_SESSIONS, openAdmissionStore, type AdmissionStore, type MutationResult } from './admission.ts';
 import { parseGateRequest, serializeGateResult, type GateRequest, type GateResult } from './contract.ts';
 import { installSkill } from './generations.ts';
 import { bootId, bootMs, NotLiveError, nofileSoftLimit, processFacts, processInfo } from './proc.ts';
 import { parseStrictJson, DEFAULT_STRICT_JSON_LIMITS } from './strict-json.ts';
+import { readInbox } from './refresh.ts';
 import { openTrustStore, type TrustStore } from './trust-store.ts';
 
 export interface GateServiceConfig {
@@ -118,6 +120,10 @@ export interface GateServiceConfig {
   processInfo?: typeof processInfo;
   /** Tests: replaces the reader of net.core.somaxconn (default /proc/sys/net/core/somaxconn; unreadable = no limit). */
   somaxconn?: () => Promise<number>;
+  /** Root-only directory the customer's distribution drops `trust-root.json` and `revocations.json` into (see refresh.ts). */
+  inboxDir?: string;
+  /** Inbox check period (default 60000 ms); only used when inboxDir is set. */
+  refreshIntervalMs?: number;
   /** Tests: fault hook passed to the admission store (see admission.ts). */
   admissionFault?: (op: 'read' | 'write') => string | undefined;
 }
@@ -289,18 +295,19 @@ export function createGateService(config: GateServiceConfig): GateService {
     return r;
   });
   let reaper: NodeJS.Timeout | undefined;
+  let refresher: NodeJS.Timeout | undefined;
 
   /** Engine verdict for exactly this Skill name and digest under the trust context of this moment. */
   const verdictCache = new Map<string, { verdict: Verdict; at: number }>();
   const CACHE_TTL_MS = 1000;
   const CACHE_MAX = 4096;
-  async function check(name: string, digest: string, ctx?: { cancelled: boolean }): Promise<Verdict> {
+  async function check(name: string, digest: string, ctx?: { cancelled: boolean }, fresh = false): Promise<Verdict> {
     const at = now().getTime();
     const current = await trust!.current(now());
     if (!current.ready) return 'UNVERIFIABLE';
     const key = `${current.versions.trustRootVersion}|${current.versions.revocationsVersion}|${name}|${digest}`;
     const hit = verdictCache.get(key);
-    if (hit && at - hit.at >= 0 && at - hit.at < CACHE_TTL_MS) return hit.verdict;
+    if (!fresh && hit && at - hit.at >= 0 && at - hit.at < CACHE_TTL_MS) return hit.verdict;
     if (ctx?.cancelled) throw new Error('cancelled');
     const verdict = await compute(name, digest, current.context);
     if (verdictCache.size >= CACHE_MAX) verdictCache.clear();
@@ -378,6 +385,55 @@ export function createGateService(config: GateServiceConfig): GateService {
     verdictCache.clear();
   }
 
+  // REFRESH + RECONCILE (admin queue only). The inbox is offered to the trust store; a rejected or unreadable inbox changes
+  // nothing and extends nothing. Reconcile then re-checks the CURRENT generation of every installed Skill (cache bypassed):
+  // enforce uninstalls a non-VERIFIED one (no fallback to an older generation), shadow only records would-uninstall.
+  // When trust is not ready nothing can be evaluated, so nothing is uninstalled (decisions already deny in enforce).
+  const refreshStatus: { atBootMs: number | null; result: string; reason?: string } = { atBootMs: null, result: 'never' };
+  let autoUninstalled: { name: string; digest: string; verdict: string; bootMs: number }[] = [];
+  let wouldUninstall: { name: string; digest: string; verdict: string }[] = [];
+  let reconcileError: string | null = null; // last reconcile failure (decisions still deny per digest; this is visibility)
+
+  // Never throws: a failure is recorded in status; decisions still evaluate every digest, so this is defence in depth.
+  async function reconcileInstalls(): Promise<{ name: string; digest: string; verdict: string }[]> {
+    try { const gone = await reconcileOnce(); reconcileError = null; return gone; }
+    catch (error) { reconcileError = error instanceof Error ? error.message.slice(0, 200) : 'reconcile failed'; return []; }
+  }
+
+  async function reconcileOnce(): Promise<{ name: string; digest: string; verdict: string }[]> {
+    const gone: { name: string; digest: string; verdict: string }[] = [];
+    wouldUninstall = [];
+    if (!trust || !admission || !(await trust.current(now())).ready) return gone;
+    for (const { name, digest } of await admission.installed()) {
+      let verdict: Verdict;
+      try { verdict = await check(name, digest, undefined, true); } catch { continue; } // unreadable evidence: leave as is
+      if (verdict === 'VERIFIED') continue;
+      if (mode === 'shadow') { wouldUninstall.push({ name, digest, verdict }); continue; }
+      const ms = await bootMs();
+      if ((await admission.uninstall(name, ms)).ok) {
+        gone.push({ name, digest, verdict });
+        autoUninstalled = [...autoUninstalled, { name, digest, verdict, bootMs: ms }].slice(-100);
+      }
+    }
+    return gone;
+  }
+
+  async function refreshNow(): Promise<{ result: string; reason?: string; uninstalled: { name: string; digest: string; verdict: string }[] }> {
+    let out: { result: string; reason?: string } = { result: 'no-inbox' };
+    if (config.inboxDir && trust) {
+      const inbox = await readInbox(path.resolve(config.inboxDir), config.rootUid);
+      if (inbox.kind === 'absent') out = { result: 'no-files' };
+      else if (inbox.kind === 'unsafe') out = { result: 'unsafe-inbox', reason: inbox.reason };
+      else {
+        const r = await trust.accept({ trustRootBytes: inbox.trustRootBytes, revocationsBytes: inbox.revocationsBytes }, now());
+        out = r.ok ? { result: r.changed ? 'accepted' : 'unchanged' } : { result: 'rejected', reason: `${r.reason}: ${r.message}` };
+      }
+      refreshStatus.atBootMs = await bootMs(); refreshStatus.result = out.result;
+      if (out.reason) refreshStatus.reason = out.reason; else delete refreshStatus.reason;
+    }
+    return { ...out, uninstalled: await reconcileInstalls() };
+  }
+
   async function admin(raw: unknown): Promise<AdminResult> {
     if (!isRecord(raw) || typeof raw['cmd'] !== 'string') throw new Error('command must be an object with cmd');
     if (!ready || !trust || !admission) return { ok: false, error: 'service is not ready' };
@@ -386,7 +442,11 @@ export function createGateService(config: GateServiceConfig): GateService {
         onlyKeys(raw, []);
         const c = await trust.current(now());
         const health = await admission.health(); // also retries a store that could not load at start
-        return { ok: true, ready: ready && health === 'ready', mode, trust: c.ready ? 'ready' : c.reason, admission: health };
+        return {
+          ok: true, ready: ready && health === 'ready', mode, trust: c.ready ? 'ready' : c.reason, admission: health,
+          revocationsExpiresAt: c.ready ? formatTimestamp(c.context.revocations.expiresAt) : null, // the remaining offline window
+          lastRefresh: { ...refreshStatus }, reconcileError, autoUninstalled, wouldUninstall,
+        };
       }
       case 'accept-trust': {
         onlyKeys(raw, ['trust_root_b64', 'revocations_b64']);
@@ -394,7 +454,9 @@ export function createGateService(config: GateServiceConfig): GateService {
           trustRootBytes: b64(raw['trust_root_b64'], 'trust_root_b64', MAX_CANONICAL_JSON_BYTES),
           revocationsBytes: b64(raw['revocations_b64'], 'revocations_b64', MAX_CANONICAL_JSON_BYTES),
         }, now());
-        return r.ok ? { ok: true, changed: r.changed } : { ok: false, error: `${r.reason}: ${r.message}` };
+        if (!r.ok) return { ok: false, error: `${r.reason}: ${r.message}` };
+        await reconcileInstalls();
+        return { ok: true, changed: r.changed };
       }
       case 'install': {
         onlyKeys(raw, ['skill_name', 'source_dir', 'certificate_b64']);
@@ -419,6 +481,13 @@ export function createGateService(config: GateServiceConfig): GateService {
         const u = await admission.uninstall(validateSkillName(raw['skill_name']), await bootMs());
         return u.ok ? { ok: true } : { ok: false, error: `uninstall refused: ${u.reason}` };
       }
+      case 'refresh': {
+        onlyKeys(raw, []);
+        if (!config.inboxDir) return { ok: false, error: 'no inbox configured' };
+        const r = await refreshNow();
+        const ok = r.result === 'accepted' || r.result === 'unchanged' || r.result === 'no-files';
+        return ok ? { ok: true, result: r.result, uninstalled: r.uninstalled } : { ok: false, error: `${r.result}: ${r.reason ?? ''}` };
+      }
       default: return { ok: false, error: 'unknown command' };
     }
   }
@@ -442,6 +511,10 @@ export function createGateService(config: GateServiceConfig): GateService {
         await exclusive(sweep).catch(() => {});
         reaper = setInterval(() => { void exclusive(sweep).catch(() => {}); }, 60_000);
         reaper.unref();
+        if (config.inboxDir) {
+          refresher = setInterval(() => { void serial(refreshNow).catch(() => {}); }, config.refreshIntervalMs ?? 60_000);
+          refresher.unref();
+        }
       } catch { ready = false; } // stay up and answer trust-unavailable
       const soft = config.nofileLimit ?? await nofileSoftLimit();
       if (!(soft - 260 >= 16)) throw new Error(`RLIMIT_NOFILE soft limit ${soft} is too low (need at least 276)`);
@@ -464,6 +537,7 @@ export function createGateService(config: GateServiceConfig): GateService {
 
     async stop() {
       if (reaper) clearInterval(reaper);
+      if (refresher) clearInterval(refresher);
       await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => { s.close(() => r()); for (const c of live) c.destroy(); })));
     },
   };
