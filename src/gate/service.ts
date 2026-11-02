@@ -1,6 +1,6 @@
 // Root gate service core (E3 packet 6). Linux only. It owns the trust store, the admission store, the generation
 // store and a per-digest certificate store, and answers hook adapters on a Unix socket. Production runs as root
-// (`rootUid` 0); tests pass their own uid. Out of scope here: metadata refresh, the decision log, harness adapters.
+// (`rootUid` 0); tests pass their own uid. Out of scope here: harness adapters.
 //
 // IDENTITY. Node has no peer credentials, so the request's `session` (`pid:<n>`) is only a pointer. The service reads
 // the kernel's view of that pid (/proc: start time, exe) and requires exe to be in the configured allowlist of host
@@ -59,6 +59,12 @@
 // queued connects made legitimate connects wait for SYN retries (measured 14-17 of 20 answered; 20 of 20 at 4096).
 // check() reads at most 16 certificate files per digest (later files are ignored).
 //
+// DECISION LOG (decision-log.ts, `<stateDir>/log` unless `logDir`). Every decision answer is recorded with minimised fields; the
+// session is a keyed hash (random per-service-instance salt, memory only) of the kernel-derived ref. In enforce mode an
+// `allow` (VERIFIED) is returned only after its record is appended AND fsync'd; if that fails the answer is gate-error
+// `internal`. Every other record is best-effort and a failure never changes the answer (deny stays deny; shadow never
+// blocks). Failures only raise `degradedCount` and flip `log.state` to `degraded` in `status`. An unopened log is retried.
+//
 // READINESS. If startup could not open the stores, every decision is gate-error `trust-unavailable`. session-start
 // needs only the admission store (so a session started while trust is stale is still recorded); skill events also
 // need a ready trust store at decision time. A Skill that is not installed answers NO_CERTIFICATE.
@@ -66,7 +72,7 @@
 // ORDERING (admission.ts caller contract): install = stage+verify+publish generation, store certificate, THEN read
 // bootMs and publish to admission, so the stamp is never earlier than the generation's visibility. All admin
 // operations run through one queue. Uninstall leaves immutable generations on disk; hiding them is packet 9's job.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, readFile, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -76,6 +82,7 @@ import { validateDigest, validateSkillName } from '../names.ts';
 import type { Mode } from '../policy.ts';
 import { formatTimestamp } from '../time.ts';
 import { evaluateCertificate, VERDICT_RANK, type Verdict } from '../verify.ts';
+import { openDecisionLog, type DecisionLog } from './decision-log.ts';
 import { MAX_SESSIONS, openAdmissionStore, type AdmissionStore, type MutationResult } from './admission.ts';
 import { parseGateRequest, serializeGateResult, type GateRequest, type GateResult } from './contract.ts';
 import { installSkill } from './generations.ts';
@@ -124,6 +131,13 @@ export interface GateServiceConfig {
   inboxDir?: string;
   /** Inbox check period (default 60000 ms); only used when inboxDir is set. */
   refreshIntervalMs?: number;
+  /** Decision log directory (default `<stateDir>/log`), build/profile id written into every record, retention. */
+  logDir?: string;
+  buildId?: string;
+  logMaxSegments?: number;
+  logMaxSegmentBytes?: number;
+  /** Tests: return true to make the next log append fail. */
+  logFault?: () => boolean;
   /** Tests: fault hook passed to the admission store (see admission.ts). */
   admissionFault?: (op: 'read' | 'write') => string | undefined;
 }
@@ -332,7 +346,57 @@ export function createGateService(config: GateServiceConfig): GateService {
   const inflightCap = config.maxInflightPerUid ?? 8;
   const readInfo = config.processInfo ?? processInfo;
 
+  const salt = randomBytes(32); // per service instance, never stored: logs from different boots cannot be joined by pid
+  const logDir = path.resolve(config.logDir ?? path.join(stateDir, 'log'));
+  let dlog: DecisionLog | undefined;
+  let opening: Promise<DecisionLog> | undefined;
+  let logHealthy = true;
+  let degradedCount = 0;
+  const unattributed: Record<string, number> = {}; // requests with no kernel-derived session: counted, never logged (flood-proof)
+  const getLog = (): Promise<DecisionLog> => dlog ? Promise.resolve(dlog) : (opening ??= openDecisionLog(logDir, {
+    rootUid: config.rootUid, now,
+    ...(config.logMaxSegments !== undefined ? { maxSegments: config.logMaxSegments } : {}),
+    ...(config.logMaxSegmentBytes !== undefined ? { maxSegmentBytes: config.logMaxSegmentBytes } : {}),
+    ...(config.logFault ? { fault: config.logFault } : {}),
+  }).then((l) => (dlog = l), (e) => { opening = undefined; throw e; }));
+
+  interface Meta { ref: string | null; digests: string[]; versions: { trustRootVersion: number; revocationsVersion: number } | null }
+
   async function handleDecision(request: GateRequest, ctx: { cancelled: boolean } = { cancelled: false }): Promise<GateResult> {
+    const t0 = performance.now();
+    const meta: Meta = { ref: null, digests: [], versions: null };
+    const result = await decide(request, ctx, meta);
+    const enforce = mode !== 'shadow';
+    const action = result.kind === 'ack' ? 'ack' : result.kind === 'verdict' && result.verdict === 'VERIFIED' ? 'allow' : enforce ? 'deny' : 'observe';
+    const durable = action === 'allow' && enforce;
+    if (meta.ref === null) {
+      // Never an unlogged allow: verdicts only exist after a session was derived; refuse if that ever changes.
+      if (action === 'allow') return { v: 1, request_id: request.request_id, kind: 'gate-error', code: 'internal', mode };
+      const k = result.kind === 'gate-error' ? result.code : result.kind;
+      unattributed[k] = (unattributed[k] ?? 0) + 1;
+      return result;
+    }
+    try {
+      const log = await getLog();
+      let skill: string | null = null;
+      try { skill = request.skill === undefined ? null : validateSkillName(request.skill); } catch { /* unusual value: not logged */ }
+      await log.append({
+        bootMs: await bootMs(), mode, action, event: request.event,
+        session: meta.ref === null ? null : createHash('sha256').update(salt).update(meta.ref).digest('hex').slice(0, 16),
+        skill, digests: meta.digests.filter((d) => { try { validateDigest(d); return true; } catch { return false; } }),
+        trustRootVersion: meta.versions?.trustRootVersion ?? null, revocationsVersion: meta.versions?.revocationsVersion ?? null,
+        result: result.kind === 'verdict' ? result.verdict : result.kind === 'ack' ? 'ack' : result.code,
+        build: config.buildId ?? 'gate-service/v1', elapsedMs: Math.round(performance.now() - t0),
+      }, durable);
+      logHealthy = true;
+    } catch {
+      logHealthy = false; degradedCount++;
+      if (durable) return { v: 1, request_id: request.request_id, mode, kind: 'gate-error', code: 'internal' }; // no allow without its record
+    }
+    return result;
+  }
+
+  async function decide(request: GateRequest, ctx: { cancelled: boolean }, meta: Meta): Promise<GateResult> {
     const base = { v: 1 as const, request_id: request.request_id, mode };
     const fail = (code: Extract<GateResult, { kind: 'gate-error' }>['code']): GateResult => ({ ...base, kind: 'gate-error', code });
     try {
@@ -344,14 +408,14 @@ export function createGateService(config: GateServiceConfig): GateService {
         const info = await readInfo(Number(pid));
         const exe = info.exe.endsWith(DELETED) ? info.exe.slice(0, -DELETED.length) : info.exe;
         if (!config.hostExes.includes(info.exe) && !config.hostExes.includes(exe)) throw new Error('not a host binary');
-        startedBootMs = info.startedBootMs; uid = info.uid; ref = `${pid}:${startedBootMs}`;
+        startedBootMs = info.startedBootMs; uid = info.uid; ref = `${pid}:${startedBootMs}`; meta.ref = ref;
       } catch { return fail('no-session-record'); }
 
       if (ctx.cancelled) return fail('internal'); // the client is gone; nothing will be written
       if ((inflight.get(uid) ?? 0) >= inflightCap) return fail('internal'); // cheap refusal: this uid already has its share in flight
       inflight.set(uid, (inflight.get(uid) ?? 0) + 1);
       try {
-        return await decideAdmitted(request, ctx, base, fail, ref, startedBootMs, uid);
+        return await decideAdmitted(request, ctx, base, fail, ref, startedBootMs, uid, meta);
       } finally {
         const left = (inflight.get(uid) ?? 1) - 1;
         if (left <= 0) inflight.delete(uid); else inflight.set(uid, left);
@@ -360,7 +424,7 @@ export function createGateService(config: GateServiceConfig): GateService {
   }
 
   async function decideAdmitted(request: GateRequest, ctx: { cancelled: boolean }, base: { v: 1; request_id: string; mode: Mode },
-    fail: (code: Extract<GateResult, { kind: 'gate-error' }>['code']) => GateResult, ref: string, startedBootMs: number, uid: number): Promise<GateResult> {
+    fail: (code: Extract<GateResult, { kind: 'gate-error' }>['code']) => GateResult, ref: string, startedBootMs: number, uid: number, meta: Meta): Promise<GateResult> {
     if (request.event === 'session-start') {
       const r = await admitOnce(ref, startedBootMs, uid);
       // A re-sent start for the same live process is fine; the result is an acknowledgement, never a verdict.
@@ -368,8 +432,10 @@ export function createGateService(config: GateServiceConfig): GateService {
     }
     const current = await trust!.current(now());
     if (!current.ready) return fail('trust-unavailable');
+    meta.versions = current.versions;
     if (ctx.cancelled) return fail('internal');
     const a = await admission!.assess(ref, request.skill!, (n, d) => check(n, d, ctx));
+    if (a.kind === 'verdict') meta.digests = a.digests;
     if (a.kind === 'verdict') return { ...base, kind: 'verdict', verdict: a.verdict };
     if (a.reason === 'no-session-record') return fail('no-session-record');
     if (a.reason === 'not-installed') return { ...base, kind: 'verdict', verdict: 'NO_CERTIFICATE' };
@@ -445,6 +511,7 @@ export function createGateService(config: GateServiceConfig): GateService {
         return {
           ok: true, ready: ready && health === 'ready', mode, trust: c.ready ? 'ready' : c.reason, admission: health,
           revocationsExpiresAt: c.ready ? formatTimestamp(c.context.revocations.expiresAt) : null, // the remaining offline window
+          log: { state: dlog && logHealthy ? 'ready' : 'degraded', degradedCount, unattributed: { ...unattributed }, ...(dlog?.status() ?? { segment: null, lastSeq: 0, chainBreaks: 0 }) },
           lastRefresh: { ...refreshStatus }, reconcileError, autoUninstalled, wouldUninstall,
         };
       }
@@ -508,6 +575,7 @@ export function createGateService(config: GateServiceConfig): GateService {
         trust = await openTrustStore(path.join(stateDir, 'trust'), { rootFingerprint: config.rootFingerprint, now: now(), ...(config.maxListAgeMs !== undefined ? { maxListAgeMs: config.maxListAgeMs } : {}) });
         admission = await openAdmissionStore(path.join(stateDir, 'admission'), { bootId: await bootId(), ...(config.admissionFault ? { fault: config.admissionFault } : {}) });
         ready = true;
+        await getLog().catch(() => { logHealthy = false; });
         await exclusive(sweep).catch(() => {});
         reaper = setInterval(() => { void exclusive(sweep).catch(() => {}); }, 60_000);
         reaper.unref();
@@ -538,6 +606,7 @@ export function createGateService(config: GateServiceConfig): GateService {
     async stop() {
       if (reaper) clearInterval(reaper);
       if (refresher) clearInterval(refresher);
+      await dlog?.close().catch(() => {});
       await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => { s.close(() => r()); for (const c of live) c.destroy(); })));
     },
   };
