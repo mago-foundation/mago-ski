@@ -55,6 +55,7 @@ test('result round-trips for every verdict and error code in both modes', () => 
     const results: GateResult[] = [
       ...VERDICTS.map((verdict) => ({ v: 1 as const, request_id: 'r1', kind: 'verdict' as const, verdict, mode })),
       ...GATE_ERROR_CODES.map((code) => ({ v: 1 as const, request_id: 'r1', kind: 'gate-error' as const, code, mode })),
+      { v: 1 as const, request_id: 'r1', kind: 'ack' as const, mode },
     ];
     for (const r of results) {
       const line = serializeGateResult(r);
@@ -104,4 +105,14 @@ test('a configured mode other than exactly shadow fails closed to enforce', () =
   for (const mode of ['Enforce', undefined, '', 'shadow ']) {
     assert.equal(decideAction({ kind: 'parse-failure' }, mode as never), 'deny', String(mode));
   }
+});
+
+test('ack: strict shape, and never permission', () => {
+  const ack = { v: 1, request_id: 'r1', kind: 'ack', mode: 'enforce' };
+  assert.deepEqual({ ...parseGateResult(req(ack), 'r1') }, ack);
+  assert.throws(() => parseGateResult(req({ ...ack, verdict: 'VERIFIED' }), 'r1'));
+  assert.throws(() => parseGateResult(req({ ...ack, code: 'internal' }), 'r1'));
+  assert.equal(decideAction(ack as GateResult, 'enforce'), 'deny');
+  assert.equal(decideAction({ ...ack, mode: 'shadow' } as GateResult, 'shadow'), 'observe');
+  assert.equal(decideAction({ ...ack, mode: 'enforce' } as GateResult, 'shadow'), 'deny');
 });

@@ -399,3 +399,113 @@ test('duplicate or inconsistent state (duplicates, decreasing times, open and en
     assert.deepEqual(await (await open()).assess('s', 'n', check), { kind: 'error', reason: 'state-corrupt' }, JSON.stringify(c));
   }
 });
+
+// Reaping is valid only because the service's kernel-derived refs (pid:starttime) cannot recur within a boot; with
+// employee-supplied refs a reaped ref could be re-admitted to shed history, which is why endSession tombstones instead.
+const H = 3_600_000;
+async function reapSetup(t: TestContext) {
+  const { dir, open, verdicts, check } = await setup(t);
+  const s = await open();
+  for (const d of ['d1', 'd2', 'd3']) verdicts.set(d, V);
+  ok(await s.publish('n', 'd1', 1 * H));
+  ok(await s.admitSession('a', 1.5 * H, { startedBootMs: 1.5 * H }));
+  ok(await s.publish('n', 'd2', 2 * H));
+  ok(await s.publish('n', 'd3', 27 * H));
+  ok(await s.admitSession('c', 27 * H, { startedBootMs: 27 * H }));
+  const logLen = async () => (JSON.parse(await readFile(path.join(dir, 'admission.json'), 'utf8')) as { log: unknown[] }).log.length;
+  return { s, check, logLen };
+}
+
+test('reapSessions removes dead sessions only, without tombstoning; others keep their history', async (t) => {
+  const { s, check } = await reapSetup(t);
+  const r = await s.reapSessions((ref) => ref !== 'a');
+  assert.equal(r.ok && r.reaped, 1);
+  assert.deepEqual(await s.assess('a', 'n', check), { kind: 'error', reason: 'no-session-record' });
+  assert.equal((await s.assess('c', 'n', check) as { verdict: string }).verdict, V);
+  assert.equal((await s.reapSessions(() => true) as { reaped: number }).reaped, 0);
+  assert.equal((await s.reapSessions(() => { throw new Error('x'); }) as { reaped: number }).reaped, 0); // throwing keeps
+  // not tombstoned: a fresh admission of the same ref is a new session (only safe for refs that cannot recur)
+  ok(await s.admitSession('a', 27 * H, { startedBootMs: 27 * H }));
+  assert.deepEqual(await s.assess('a', 'n', check), { kind: 'verdict', verdict: V, digests: ['d2', 'd3'] }); // fresh history: no d1
+});
+
+test('an old open session keeps its full history while it is not reaped', async (t) => {
+  const { s, check } = await reapSetup(t);
+  ok(await s.reapSessions((ref) => ref === 'a'));
+  assert.deepEqual(await s.assess('a', 'n', check), { kind: 'verdict', verdict: V, digests: ['d1', 'd2', 'd3'] });
+});
+
+test('reaping a session that pinned the log lets compaction advance', async (t) => {
+  const { s, logLen } = await reapSetup(t);
+  assert.equal(await logLen(), 2); // d1 folded, d2 and d3 kept because 'a' (admitted after d1) pins d2
+  ok(await s.reapSessions((ref) => ref !== 'a'));
+  assert.equal(await logLen(), 1); // d2 now folded into base
+});
+
+// Transient I/O is injected through the store's test-only `fault` hook (no real fd exhaustion needed).
+test('transient read/write errors fail one operation as io-busy without latching or mutating; EIO latches corrupt', async (t) => {
+  const { dir, check, verdicts } = await setup(t);
+  let fault: string | undefined;
+  const s = await openAdmissionStore(dir, { bootId: 'boot-1', fault: () => fault });
+  verdicts.set('d1', V);
+  ok(await s.publish('n', 'd1', at(1)));
+  ok(await adm(s, 's', 1));
+  for (const code of ['EMFILE', 'ENFILE', 'EAGAIN', 'EINTR', 'ENOMEM']) {
+    fault = code; // every read and write fails
+    const busy = { ok: false, reason: 'io-busy' };
+    assert.deepEqual(await s.publish('n', 'd2', at(2)), busy);
+    assert.deepEqual(await s.reapSessions(() => false), busy);
+    assert.deepEqual(await s.assess('s', 'n', check), { kind: 'error', reason: 'io-busy' });
+    fault = undefined;
+    assert.deepEqual(await s.assess('s', 'n', check), { kind: 'verdict', verdict: V, digests: ['d1'] }); // nothing latched or lost
+  }
+  // a write-only failure leaves memory unchanged: the retry succeeds and is the only d2 entry
+  fault = undefined;
+  const wf = { v: undefined as string | undefined };
+  const s2 = await openAdmissionStore(dir, { bootId: 'boot-1', fault: (op) => (op === 'write' ? wf.v : undefined) });
+  wf.v = 'EMFILE';
+  assert.deepEqual(await s2.publish('n', 'd2', at(2)), { ok: false, reason: 'io-busy' });
+  wf.v = undefined;
+  ok(await s2.publish('n', 'd2', at(2)));
+  verdicts.set('d2', V);
+  assert.deepEqual(await s2.assess('s', 'n', check), { kind: 'verdict', verdict: V, digests: ['d1', 'd2'] });
+  fault = undefined;
+  wf.v = 'EIO';
+  assert.deepEqual(await s2.publish('n', 'd3', at(3)), { ok: false, reason: 'write-failed' });
+  wf.v = undefined;
+  assert.deepEqual(await s2.assess('s', 'n', check), { kind: 'error', reason: 'state-corrupt' });
+});
+
+test('a slow sweep does not block assess; a session admitted after the snapshot is untouched', async (t) => {
+  const { s, check } = await reapSetup(t);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const asked: string[] = [];
+  const sweep = s.reapSessions(async (ref) => { asked.push(ref); await gate; return ref === 'c'; }); // 'a' judged dead, 'c' alive
+  while (asked.length === 0) await new Promise((r) => setTimeout(r, 5));
+  const r = await Promise.race([s.assess('c', 'n', check), new Promise((res) => setTimeout(() => res('blocked'), 1000))]);
+  assert.notEqual(r, 'blocked', 'assess waited for the sweep');
+  ok(await s.admitSession('z', 27 * H, { startedBootMs: 27 * H })); // admitted while the sweep waits
+  release();
+  const done = await sweep;
+  assert.equal(done.ok && done.reaped, 1);
+  assert.equal(asked.includes('z'), false);
+  assert.equal((await s.assess('z', 'n', check)).kind, 'verdict');
+  assert.deepEqual(await s.assess('a', 'n', check), { kind: 'error', reason: 'no-session-record' });
+});
+
+test('a transient error at open leaves the store unloaded (not corrupt); the next operation loads it', async (t) => {
+  const { dir } = await setup(t);
+  let fault: string | undefined = 'EMFILE';
+  const s = await openAdmissionStore(dir, { bootId: 'boot-1', fault: (op) => (op === 'read' ? fault : undefined) });
+  assert.equal(await s.health(), 'unloaded');
+  assert.deepEqual(await s.publish('n', 'd1', at(1)), { ok: false, reason: 'io-busy' });
+  fault = undefined;
+  ok(await s.publish('n', 'd1', at(1)));
+  assert.equal(await s.health(), 'ready');
+  let eio: string | undefined = 'EIO';
+  const bad = await openAdmissionStore(dir, { bootId: 'boot-1', fault: (op) => (op === 'read' ? eio : undefined) });
+  assert.equal(await bad.health(), 'corrupt'); // a non-transient error still latches
+  eio = undefined;
+  assert.equal(await bad.health(), 'corrupt');
+});

@@ -30,7 +30,9 @@ export interface GateRequest {
 
 export type GateResult =
   | { v: 1; request_id: string; kind: 'verdict'; verdict: Verdict; mode: Mode }
-  | { v: 1; request_id: string; kind: 'gate-error'; code: GateErrorCode; mode: Mode };
+  | { v: 1; request_id: string; kind: 'gate-error'; code: GateErrorCode; mode: Mode }
+  /** Reply to session-start only. It carries no verdict and is never permission (decideAction denies/observes it). */
+  | { v: 1; request_id: string; kind: 'ack'; mode: Mode };
 
 /** Any failure to obtain a valid GateResult (transport error, timeout, parse error). */
 export interface ParseFailure {
@@ -83,19 +85,21 @@ export function parseGateResult(bytes: Uint8Array, expectedRequestId: string): G
   const kind = parsed['kind'];
   const raw  = record(parsed, kind === 'verdict'
     ? ['v', 'request_id', 'kind', 'verdict', 'mode']
+    : kind === 'ack' ? ['v', 'request_id', 'kind', 'mode']
     : ['v', 'request_id', 'kind', 'code', 'mode'], 'result');
   const requestId = token(raw['request_id'], 'request_id');
   if (requestId !== expectedRequestId) throw new Error('result request_id does not match the request');
   const mode = closed(raw['mode'], MODES, 'mode');
   if (kind === 'verdict')
     return { v: 1, request_id: requestId, kind, verdict: closed(raw['verdict'], VERDICTS, 'verdict'), mode };
+  if (kind === 'ack') return { v: 1, request_id: requestId, kind, mode };
   if (kind === 'gate-error')
     return { v: 1, request_id: requestId, kind, code: closed(raw['code'], GATE_ERROR_CODES, 'code'), mode };
   throw new Error('result kind is not an allowed value');
 }
 
 /**
- * Only a VERIFIED verdict allows. Anything else denies when enforce applies and is observed
+ * Only a VERIFIED verdict allows (an ack never does). Anything else denies when enforce applies and is observed
  * (would-deny, never blocked) when it does not. Enforce applies if the local configuration says
  * enforce (or holds anything other than exactly 'shadow') or the service's result says enforce,
  * so nothing in a result can downgrade local enforce. A parse failure carries no mode and

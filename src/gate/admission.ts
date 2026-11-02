@@ -8,6 +8,15 @@
 // Session refs MUST be minted by the service and bound to the host process by the service (packet 6), never an
 // employee-supplied id; only authenticated host lifecycle events may call admitSession/endSession. Ended or expired
 // refs are tombstoned until the boot id changes, so a ref cannot be re-admitted to shed its history.
+// REAPING. reapSessions(isLive) removes open sessions the caller says are dead WITHOUT tombstoning them, then compacts.
+// Liveness is evaluated outside the store lock (snapshot, evaluate, then remove only refs still present and unchanged).
+// Only valid for refs that cannot recur within a boot (the service's kernel-derived `pid:starttime` refs); a reaped ref
+// admitted again is a brand-new session with a fresh (shorter) history. NEVER call it with employee-supplied refs.
+// An isLive that throws keeps the session (fail safe).
+// TRANSIENT I/O. A read/write error of EMFILE, ENFILE, EAGAIN, EINTR or ENOMEM fails only that operation (`io-busy`,
+// a deny for that request) and neither latches `corrupt` nor changes the in-memory state. Every other I/O error
+// (EIO included) and every integrity failure (parse, rollback, inconsistent content, symlink) latches corrupt. If a
+// directory fsync is what failed after the rename, the next operation adopts the (newer) file as usual. It runs inside the store lock, so keep it quick.
 // TIME. Every time here is boot-relative milliseconds (`bootMs`, a non-negative safe integer), never wall-clock time.
 // The caller MUST pass CLOCK_BOOTTIME-based values: its own "now" from /proc/uptime, and a host process start from
 // /proc/<pid>/stat field 22 / CLK_TCK. Those are immune to wall-clock steps; sessions are per boot already (bootId).
@@ -49,17 +58,20 @@ export const START_MARGIN_MS = 1000;
 const MAX_LOG_PARSE = 2 * MAX_LOG;
 
 /** `no-session-record` and `internal` come from contract.ts; the others are local to admission. */
-export type AssessError = Extract<GateErrorCode, 'no-session-record' | 'internal'> | 'not-installed' | 'state-corrupt' | 'bound-exceeded';
+export type AssessError = Extract<GateErrorCode, 'no-session-record' | 'internal'> | 'not-installed' | 'state-corrupt' | 'bound-exceeded' | 'io-busy';
 export type AssessResult = { kind: 'verdict'; verdict: Verdict; digests: string[] } | { kind: 'error'; reason: AssessError };
-export type MutationResult = { ok: true } | { ok: false; reason: 'state-corrupt' | 'session-exists' | 'session-ended' | 'invalid-start' | 'session-limit' | 'log-full' | 'write-failed' | 'clock-moved-backwards' };
+export type MutationResult = { ok: true } | { ok: false; reason: 'state-corrupt' | 'io-busy' | 'session-exists' | 'session-ended' | 'invalid-start' | 'session-limit' | 'log-full' | 'write-failed' | 'clock-moved-backwards' };
 
 export interface AdmissionStore {
   publish(name: string, digest: string, bootMs: number): Promise<MutationResult>;
   uninstall(name: string, bootMs: number): Promise<MutationResult>;
   admitSession(sessionRef: string, bootMs: number, options: { startedBootMs: number }): Promise<MutationResult>;
   endSession(sessionRef: string): Promise<MutationResult>;
+  reapSessions(isLive: (ref: string) => boolean | Promise<boolean>): Promise<MutationResult & { reaped?: number }>;
   expireSessions(maxAgeMs: number, bootMs: number): Promise<MutationResult & { expired?: number }>;
   assess(sessionRef: string, name: string, check: (name: string, digest: string) => Promise<Verdict>): Promise<AssessResult>;
+  /** 'unloaded' = a transient error at open, retried on every call; an unloaded or corrupt store is not ready. */
+  health(): Promise<'ready' | 'corrupt' | 'unloaded'>;
 }
 
 interface LogEntry { seq: number; name: string; digest: string | null; at: number }
@@ -159,7 +171,12 @@ function requireBootMs(v: unknown, label: string): number {
 }
 const BACKWARDS = { ok: false, reason: 'clock-moved-backwards' } as const;
 
-export async function openAdmissionStore(dir: string, options: { bootId: string }): Promise<AdmissionStore> {
+const TRANSIENT = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EINTR', 'ENOMEM']);
+const isTransient = (e: unknown): boolean => TRANSIENT.has((e as NodeJS.ErrnoException)?.code ?? '');
+const BUSY = { ok: false, reason: 'io-busy' } as const;
+
+/** `fault` is a test-only hook: it may return an errno code to make the next read or write fail with that error. */
+export async function openAdmissionStore(dir: string, options: { bootId: string; fault?: (op: 'read' | 'write') => string | undefined }): Promise<AdmissionStore> {
   const bootId = requireString(options.bootId, 'bootId', 128);
   dir = path.resolve(dir);
   await mkdir(dir, { mode: 0o700 }).catch((e) => { if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') throw e; });
@@ -172,54 +189,69 @@ export async function openAdmissionStore(dir: string, options: { bootId: string 
   let held: Buffer | null = null;
   let state: State | null = null;
 
+  const inject = (op: 'read' | 'write'): void => {
+    const code = options.fault?.(op);
+    if (code) throw Object.assign(new Error(`injected ${code}`), { code });
+  };
   async function read(): Promise<Buffer | null> {
-    try { return await readRegularFile(file, 'admission state', MAX_CANONICAL_JSON_BYTES); } catch (e) {
+    try {
+      inject('read'); return await readRegularFile(file, 'admission state', MAX_CANONICAL_JSON_BYTES); } catch (e) {
       if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e;
       // A missing state file is a fresh store only if the directory is otherwise empty.
       if ((await readdir(dir)).some((n) => !/^\..*\.tmp$/u.test(n))) throw new Error('state file is missing but the directory is not empty');
       return null;
     }
   }
-  async function persist(next: State): Promise<boolean> {
+  /** 'busy': a transient error, nothing changed in memory and nothing is latched. */
+  async function persist(next: State): Promise<'ok' | 'busy' | 'failed'> {
     const bytes = toBytes(next);
     try {
+      inject('write');
       await writeFileAtomic(file, bytes, 0o600);
       const h = await open(dir, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0));
       try { await h.sync(); } finally { await h.close(); }
-    } catch { corrupt = true; return false; } // on-disk state now unknown: stop rather than guess
+    } catch (e) {
+      if (isTransient(e)) return 'busy';
+      corrupt = true; return 'failed'; // on-disk state now unknown: stop rather than guess
+    }
     held = bytes; state = next;
+    return 'ok';
+  }
+
+  /** Loads (or creates) the state. Throws a transient error to be retried on the next operation; anything else latches corrupt. */
+  async function load(): Promise<void> {
+    const disk = await read();
+    const loaded = disk ? parse(disk) : null;
+    if (loaded && loaded.bootId === bootId) { held = disk; state = loaded; return; }
+    // A different boot (or no file): no recorded session can still be running. Tombstones are per boot and
+    // boot-relative times are meaningless across boots, so fold the whole log into base.
+    const old = loaded ?? { bootId, seq: 0, high: 0, folded: 0, log: [], base: new Map<string, string>(), sessions: new Map(), ended: new Set<string>() };
+    const base = new Map(old.base);
+    for (const e of old.log) { if (e.digest === null) base.delete(e.name); else base.set(e.name, e.digest); }
+    const p = await persist({ ...old, bootId, high: 0, folded: 0, log: [], base, sessions: new Map(), ended: new Set() });
+    if (p === 'busy') throw Object.assign(new Error('busy'), { code: 'EAGAIN' });
+    if (p !== 'ok') throw new Error('cannot persist');
+  }
+  // A transient error at open leaves the store "not loaded yet" (retried inside the lock by the next operation).
+  try { await load(); } catch (e) { if (!isTransient(e)) corrupt = true; }
+
+  /** Inside the lock: reload if the file changed under us; never accept older state. */
+  async function refresh(): Promise<boolean> { // false = transient error, the caller answers io-busy
+    if (corrupt) return true;
+    if (!state) { try { await load(); } catch (e) { if (isTransient(e)) return false; corrupt = true; } return true; }
+    try {
+      const disk = await read();
+      if (disk !== null && held !== null && disk.equals(held)) return true;
+      const next = disk ? parse(disk) : null;
+      if (!next || next.bootId !== state.bootId || next.seq < state.seq) { corrupt = true; return true; }
+      state = next; held = disk;
+    } catch (e) { if (isTransient(e)) return false; corrupt = true; }
     return true;
   }
 
-  try {
-    held = await read();
-    const loaded = held ? parse(held) : null;
-    state = loaded ?? { bootId, seq: 0, high: 0, folded: 0, log: [], base: new Map(), sessions: new Map(), ended: new Set() };
-    // A different boot: no recorded session can still be running.
-    if (!loaded || loaded.bootId !== bootId) {
-      // Tombstones are per boot; boot-relative times are meaningless across boots, so fold the whole log into base.
-      const base = new Map(state.base);
-      for (const e of state.log) { if (e.digest === null) base.delete(e.name); else base.set(e.name, e.digest); }
-      state = { ...state, bootId, high: 0, folded: 0, log: [], base, sessions: new Map(), ended: new Set() };
-      if (!(await persist(state))) throw new Error('cannot persist');
-    }
-  } catch { corrupt = true; }
-
-  /** Inside the lock: reload if the file changed under us; never accept older state. */
-  async function refresh(): Promise<void> {
-    if (corrupt || !state) return;
-    try {
-      const disk = await read();
-      if (disk !== null && held !== null && disk.equals(held)) return;
-      const next = disk ? parse(disk) : null;
-      if (!next || next.bootId !== state.bootId || next.seq < state.seq) { corrupt = true; return; }
-      state = next; held = disk;
-    } catch { corrupt = true; }
-  }
-
   let tail: Promise<unknown> = Promise.resolve();
-  const locked = <T>(fn: () => Promise<T>): Promise<T> => {
-    const run = tail.then(async () => { await refresh(); return fn(); });
+  const locked = <T>(fn: () => Promise<T>, busy: T): Promise<T> => {
+    const run = tail.then(async () => (await refresh()) ? fn() : busy);
     tail = run.catch(() => {});
     return run;
   };
@@ -229,8 +261,9 @@ export async function openAdmissionStore(dir: string, options: { bootId: string 
     const next = clone(state);
     const refused = fn(next);
     if (refused) return refused;
-    return (await persist(next)) ? { ok: true } : { ok: false, reason: 'write-failed' };
-  });
+    const p = await persist(next);
+    return p === 'ok' ? { ok: true } : p === 'busy' ? BUSY : { ok: false, reason: 'write-failed' };
+  }, BUSY);
 
   const event = (name: string, digest: string | null, bootMs: number) => {
     requireString(name, 'name', 128);
@@ -296,16 +329,46 @@ export async function openAdmissionStore(dir: string, options: { bootId: string 
       return r.ok ? { ...r, expired } : r;
     },
 
+    // Two phases: liveness is evaluated OUTSIDE the lock (the caller reads /proc), so a slow sweep never blocks assess or
+    // admissions. Only refs that are still present with the same admission point are removed; a session admitted after the snapshot is untouched.
+    async reapSessions(isLive) {
+      const snap = await locked<Map<string, Session> | 'corrupt' | 'busy'>(async () => (corrupt || !state ? 'corrupt' : new Map(state.sessions)), 'busy');
+      if (snap === 'busy') return BUSY;
+      if (snap === 'corrupt') return { ok: false, reason: 'state-corrupt' };
+      const dead: string[] = [];
+      for (const ref of snap.keys()) {
+        let live = true;
+        try { live = await isLive(ref); } catch { /* keep */ }
+        if (!live) dead.push(ref);
+      }
+      if (dead.length === 0) return { ok: true, reaped: 0 };
+      return locked<MutationResult & { reaped?: number }>(async () => {
+        if (corrupt || !state) return { ok: false, reason: 'state-corrupt' };
+        const next = clone(state);
+        let reaped = 0;
+        for (const ref of dead) {
+          const was = snap.get(ref)!, cur = next.sessions.get(ref);
+          if (cur && cur.seq === was.seq && cur.at === was.at) { next.sessions.delete(ref); reaped++; }
+        }
+        if (reaped === 0) return { ok: true, reaped: 0 };
+        compact(next, next.high);
+        const p = await persist(next);
+        return p === 'ok' ? { ok: true, reaped } : p === 'busy' ? BUSY : { ok: false, reason: 'write-failed' };
+      }, BUSY);
+    },
+
+    health: () => locked<'ready' | 'corrupt' | 'unloaded'>(async () => (corrupt ? 'corrupt' : state ? 'ready' : 'unloaded'), 'unloaded'),
+
     async assess(ref, name, check) {
       // Snapshot under the lock; the (slow) checks run outside it so they never block publishing.
-      const snap = await locked(async () => {
+      const snap = await locked<{ error: AssessError | undefined; digests: string[] | undefined }>(async () => {
         if (corrupt || !state) return { error: 'state-corrupt' as const, digests: undefined };
         const sess = state.sessions.get(ref);
         if (!sess) return { error: 'no-session-record' as const, digests: undefined };
         if (currentAt(state, name, state.seq) === null) return { error: 'not-installed' as const, digests: undefined };
         const digests = setFor(state, name, sess.seq);
         return digests.length > MAX_SET ? { error: 'bound-exceeded' as const, digests: undefined } : { error: undefined, digests };
-      });
+      }, { error: 'io-busy' as const, digests: undefined });
       if (!snap.digests) return { kind: 'error', reason: snap.error! };
       let worst: Verdict = 'VERIFIED';
       try {
