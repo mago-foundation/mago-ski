@@ -16,7 +16,8 @@ function run(args: string[]) {
 }
 
 test('a missing or non-directory Skill path is named plainly by every command', async (t) => {
-  const org = await setupOrg(t);
+  // The spawned CLI uses the wall clock, so the trust documents must be current, not dated T0.
+  const org = await setupOrg(t, { now: new Date() });
   const missing = path.join(org.dir, 'skills', 'docs-helper');
   const file = path.join(org.dir, 'not-a-dir');
   await writeFile(file, 'x');
