@@ -30,4 +30,4 @@ await appendDecision(policy.decisionLogPath, decisionRecord(result, policy.mode,
 
 ## Claude Code (planned)
 
-Claude Code hooks (`PreToolUse`, `UserPromptSubmit`) cover H2–H5. Whether H1 is possible (removing a Skill from what the model is told) needs the same spike Pi had; if not, the verified-install store applies.
+The [Claude Code spike](../spikes/claude-code-interception.md) found that no hook can change the Skill list (H1) and that a project's settings can turn user hooks off, so enforcement needs managed settings and the verified-install store: `strictPluginOnlyCustomization: ["skills"]` with a mago-ski plugin holding verified copies, plus managed `UserPromptExpansion` and `PreToolUse` hooks for H2–H5. Without managed settings, only shadow mode is possible.
