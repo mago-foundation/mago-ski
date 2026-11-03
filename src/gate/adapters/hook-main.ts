@@ -12,10 +12,11 @@ async function readStdin(): Promise<Buffer | null> {
   return Buffer.concat(chunks);
 }
 
-export async function hookMain(argv: readonly string[], extra: Omit<HookDeps, 'readStdin'> = {}): Promise<never> {
+export async function hookMain(argv: readonly string[], extra: Omit<HookDeps, 'readStdin'> = {},
+  run: (argv: readonly string[], deps: HookDeps) => Promise<{ code: number; stdout: string; stderr: string; mode?: string }> = runHook): Promise<never> {
   let outcome: { code: number; stdout: string; stderr: string; mode?: string } =
     { code: 2, stdout: '', stderr: 'mago-ski could not verify this Skill; it is blocked until verification works.' };
-  try { outcome = await runHook(argv, { ...extra, readStdin }); } catch { /* keeps the explicit block above */ }
+  try { outcome = await run(argv, { ...extra, readStdin }); } catch { /* keeps the explicit block above */ }
   const shadow = outcome.mode === 'shadow';
   if (outcome.stderr) process.stderr.write(outcome.stderr);
   // A broken stdout must not turn an intended deny into an allow: exit 2 with a stderr reason (shadow: exit 0).

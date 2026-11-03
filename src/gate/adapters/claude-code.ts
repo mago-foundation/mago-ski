@@ -47,6 +47,8 @@ export interface HookConfig {
   clientDeadlineMs: number;
   selfDeadlineMs: number;
   rootUid: number;
+  /** The validated config object, for adapters that add their own keys (see `extraKeys`). */
+  raw: Record<string, unknown>;
 }
 
 export interface HookOutcome { code: number; stdout: string; stderr: string; mode?: Mode }
@@ -67,13 +69,13 @@ const notApproved = (verdict: string): string =>
   `This Skill is not approved by your organisation (mago-ski: ${verdict}). If it was updated, restart the session to use the new version.`;
 
 /** Strict, closed config: root-owned in production (a deployment requirement; here only "not group/other writable"). */
-export async function loadConfig(file: string, rootUid = 0): Promise<HookConfig> {
+export async function loadConfig(file: string, rootUid = 0, extraKeys: readonly string[] = []): Promise<HookConfig> {
   if (!path.isAbsolute(file)) throw new Error('config path must be absolute');
   const st = await lstat(file);
   if (!st.isFile() || (st.mode & 0o022) !== 0 || st.uid !== rootUid) throw new Error('config must be a regular, root-owned, non-writable file');
   const raw = parseStrictJson(await readFile(file));
   if (!isRecord(raw)) throw new Error('config must be an object');
-  const allowed = ['v', 'socket', 'mode', 'host_exes', 'client_deadline_ms', 'self_deadline_ms'];
+  const allowed = ['v', 'socket', 'mode', 'host_exes', 'client_deadline_ms', 'self_deadline_ms', ...extraKeys];
   if (Object.keys(raw).some((k) => !allowed.includes(k)) || raw['v'] !== 1) throw new Error('config has unknown fields or version');
   const { socket, mode, host_exes: exes } = raw;
   if (typeof socket !== 'string' || !path.isAbsolute(socket) || socket.length > 107) throw new Error('bad socket');
@@ -87,7 +89,7 @@ export async function loadConfig(file: string, rootUid = 0): Promise<HookConfig>
     return v;
   };
   return {
-    socket, mode, hostExes: exes as string[], rootUid,
+    socket, mode, hostExes: exes as string[], rootUid, raw,
     clientDeadlineMs: ms(raw['client_deadline_ms'], DEFAULT_CLIENT_DEADLINE_MS),
     selfDeadlineMs: ms(raw['self_deadline_ms'], DEFAULT_SELF_DEADLINE_MS),
   };
