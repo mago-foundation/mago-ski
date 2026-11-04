@@ -308,7 +308,7 @@ test('a replaced host binary (exe "<path> (deleted)") is accepted as the allowli
 });
 
 test('dead sessions are reaped: more than 1100 short-lived hosts are all admitted', { skip: LINUX_ONLY }, async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { maxRequestsPerSecPerUid: 1e9 }); // one uid on purpose: tests reaping, not the rate limit
   let admitted = 0;
   for (let round = 0; round < 12; round++) {
     const kids = Array.from({ length: 100 }, () => spawn(NODE, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' }));
@@ -450,7 +450,7 @@ test('proc: a real unreaped zombie child is not live', { skip: LINUX_ONLY }, asy
 });
 
 test('an answered connection frees its slot even if the client never closes; a legitimate client still gets answers', { skip: LINUX_ONLY }, async (t) => {
-  const f = await fixture(t, { maxConnections: 50 });
+  const f = await fixture(t, { maxConnections: 50, maxRequestsPerSecPerUid: 1e9 }); // one uid on purpose: tests connection slots, not the rate limit
   const flood = spawn(NODE, ['-e', `
     const net = require('node:net'); const sock = process.argv[1]; let n = 0;
     const line = () => JSON.stringify({ v: 1, request_id: 'f' + (++n), event: 'session-start', session: process.argv[2] }) + '\\n';
