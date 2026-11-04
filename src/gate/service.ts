@@ -86,7 +86,7 @@ import { openDecisionLog, type DecisionLog } from './decision-log.ts';
 import { MAX_SESSIONS, openAdmissionStore, type AdmissionStore, type MutationResult } from './admission.ts';
 import { parseGateRequest, serializeGateResult, type GateRequest, type GateResult } from './contract.ts';
 import { installSkill } from './generations.ts';
-import { bootId, bootMs, NotLiveError, nofileSoftLimit, processFacts, processInfo } from './proc.ts';
+import { assertGatePlatform, bootId, bootMs, NotLiveError, nofileSoftLimit, processFacts, processInfo } from './proc.ts';
 import { parseStrictJson, DEFAULT_STRICT_JSON_LIMITS } from './strict-json.ts';
 import { readInbox } from './refresh.ts';
 import { openTrustStore, type TrustStore } from './trust-store.ts';
@@ -569,6 +569,7 @@ export function createGateService(config: GateServiceConfig): GateService {
     handleAdmin,
 
     async start() {
+      assertGatePlatform(); // before anything is created on disk
       try {
         await ownedDir(stateDir, config.rootUid, 0o700, true);
         for (const d of [stagingDir, certsDir]) await ownedDir(d, config.rootUid, d === certsDir ? 0o755 : 0o700, d !== certsDir);

@@ -9,7 +9,7 @@ import test, { type TestContext } from 'node:test';
 import { readlinkSync } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import { updateRevocations } from '../src/admin.ts';
-import { bootId, bootMs, NotLiveError, parseStatus, processFacts as realFacts, processInfo } from '../src/gate/proc.ts';
+import { assertGatePlatform, bootId, bootMs, NotLiveError, parseStatus, processFacts as realFacts, processInfo } from '../src/gate/proc.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
 import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill, type Org } from './helpers.ts';
 
@@ -80,6 +80,28 @@ function host(t: TestContext, file = NODE): ChildProcess {
   return c;
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test('the gate platform check accepts Linux only and names the platform it refuses', () => {
+  assert.doesNotThrow(() => assertGatePlatform('linux'));
+  for (const platform of ['darwin', 'win32', 'freebsd'] as const) {
+    assert.throws(() => assertGatePlatform(platform), new RegExp(`runs on Linux only \\(this is ${platform}\\)`, 'u'));
+  }
+});
+
+test('on a platform other than Linux the service refuses to start and creates nothing', async (t) => {
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...real, value: 'darwin' });
+  t.after(() => { Object.defineProperty(process, 'platform', real); });
+  const base = await scratch(t);
+  const dirs = ['state', 'gens', 'dec', 'adm'].map((d) => path.join(base, d));
+  const svc = createGateService({
+    stateDir: dirs[0]!, generationsDir: dirs[1]!, decisionSocketDir: dirs[2]!, adminSocketDir: dirs[3]!,
+    rootFingerprint: 'unused', mode: 'enforce', hostExes: [NODE], rootUid: process.getuid?.() ?? 0,
+  });
+  t.after(() => svc.stop()); // only matters if start() wrongly succeeds; stop() is safe on a service that never started
+  await assert.rejects(svc.start(), /the mago-ski gate service runs on Linux only \(this is darwin\)/u);
+  for (const dir of dirs) await assert.rejects(stat(dir), { code: 'ENOENT' });
+});
 
 test('proc: boot id, boot ms, own process, comm with spaces and parenthesis', { skip: LINUX_ONLY }, async (t) => {
   assert.match(await bootId(), /^[0-9a-f-]{36}$/u);

@@ -11,6 +11,14 @@ export class NotLiveError extends Error {}
 
 export interface ProcessInfo { startedBootMs: number; exe: string; uid: number }
 
+/**
+ * Throws a clear error on any platform but Linux. Everything in this module reads /proc, so the gate service checks this
+ * before it touches the disk; otherwise a non-Linux host would fail later with an unexplained ENOENT on a /proc path.
+ */
+export function assertGatePlatform(platform: NodeJS.Platform = process.platform): void {
+  if (platform !== 'linux') throw new Error(`the mago-ski gate service runs on Linux only (this is ${platform})`);
+}
+
 export async function bootId(): Promise<string> {
   const id = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
   if (!BOOT_ID.test(id)) throw new Error('unexpected boot_id format');
