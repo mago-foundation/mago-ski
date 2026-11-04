@@ -465,6 +465,9 @@ test('an answered connection frees its slot even if the client never closes; a l
     if (out && (JSON.parse(out) as { kind: string }).kind === 'ack') good++;
     await sleep(10);
   }
+  // Stop the flood and the service before cleanup removes their directories (every flood request is logged here).
+  await new Promise((r) => { flood.once('exit', r); flood.kill('SIGKILL'); });
+  await f.svc.stop();
   assert.ok(good >= 36, `only ${good}/40 legitimate requests answered`);
 });
 
