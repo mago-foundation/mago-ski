@@ -38,7 +38,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}) {
   await mkdir(inbox, { mode: 0o700 });
   let clock = new Date();
   const svc = createGateService({
-    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'),
+    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'),
     decisionSocketDir: path.join(base, 'dec'), adminSocketDir: path.join(base, 'adm'),
     rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: process.getuid!(),
     inboxDir: inbox, refreshIntervalMs: 3_600_000, now: () => clock, ...extra,
