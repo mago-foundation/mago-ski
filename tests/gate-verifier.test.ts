@@ -135,7 +135,9 @@ test('child does not inherit NODE_OPTIONS, LD_PRELOAD or any parent environment'
   assert.equal(outcome.kind, 'verdict');
   const keys = JSON.parse(await readFile(out, 'utf8')) as string[];
   assert.ok(!keys.includes('NODE_OPTIONS') && !keys.includes('LD_PRELOAD'), keys.join());
-  assert.deepEqual(keys, []);
+  // macOS adds __CF_USER_TEXT_ENCODING to every new process itself, even with an empty environment.
+  const osAdded = process.platform === 'darwin' ? new Set(['__CF_USER_TEXT_ENCODING']) : new Set<string>();
+  assert.deepEqual(keys.filter((key) => !osAdded.has(key)), []);
 });
 
 test('deadline resolves even when an escaped descendant holds the stdout pipe', async (t) => {

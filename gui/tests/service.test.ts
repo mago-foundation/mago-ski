@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { access, appendFile, chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { approve, setupOrg, tempDir, writeSkill } from '../../tests/helpers.ts';
+import { approve, setupOrg, T0, tempDir, writeSkill } from '../../tests/helpers.ts';
 import { ObservationService } from '../src/service/service.ts';
 import type { ServiceView } from '../src/service/types.ts';
 
@@ -24,9 +24,11 @@ async function setup(t: TestContext, env: NodeJS.ProcessEnv = {}): Promise<Env> 
   return { home, dataDir: path.join(dir, 'gui-data'), agents, pi, env };
 }
 
-async function startService(t: TestContext, e: Env, options: { watch?: boolean; debounceMs?: number } = {}) {
+async function startService(t: TestContext, e: Env, options: { watch?: boolean; debounceMs?: number; now?: Date } = {}) {
+  const fixed = options.now;
   const service = new ObservationService({
     dataDir: e.dataDir, env: e.env, home: e.home, intervalMs: 0, watch: options.watch ?? false, debounceMs: options.debounceMs ?? 50,
+    ...(fixed ? { now: () => fixed } : {}),
   });
   t.after(async () => await service.stop());
   await service.start();
@@ -219,7 +221,8 @@ test('PKI verdicts come from the host policy, read without writing the host stat
   const approved = await writeSkill(e.agents, 'docs-helper');
   await writeSkill(e.agents, 'pdf-tools');
   await approve(org, approved);
-  const service = await startService(t, e);
+  // The org's trust documents are signed at the fixed fixture time T0; check at T0 so they do not expire with the wall clock.
+  const service = await startService(t, e, { now: T0 });
   const view = service.view();
 
   assert.deepEqual(view.host.policy.kind === 'loaded' && [view.host.policy.mode, view.host.policy.trustOk], ['enforce', true]);

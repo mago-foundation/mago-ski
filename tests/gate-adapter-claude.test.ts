@@ -12,7 +12,7 @@ import { askService } from '../src/gate/adapters/client.ts';
 import { loadConfig } from '../src/gate/adapters/claude-code.ts';
 import { claudeCodeManagedSettings } from '../src/gate/adapters/claude-code-settings.ts';
 import { createGateService } from '../src/gate/service.ts';
-import { approve, setupOrg, tempDir, writeSkill } from './helpers.ts';
+import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 
 const UID = String(process.getuid!());
 const NODE = realpathSync(process.execPath);
@@ -115,7 +115,7 @@ const denied = (o: Out, kind: 'PreToolUse' | 'UserPromptExpansion', msg: RegExp)
 };
 const silent = (o: Out) => assert.deepEqual(o, { code: 0, stdout: '', stderr: '' });
 
-test('claude hook: real service, allow, revoke, unapproved, both routes, session-start', async (t) => {
+test('claude hook: real service, allow, revoke, unapproved, both routes, session-start', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install, revoke } = await service(t);
   const alpha = await install('alpha');
   const cfg = await configFile(t, svc.sockets.decision);
@@ -133,14 +133,14 @@ test('claude hook: real service, allow, revoke, unapproved, both routes, session
   denied(await run(upe('/alpha')), 'UserPromptExpansion', /restart the session/u);
 });
 
-test('claude hook: unknown session is denied by the service (no session-start sent)', async (t) => {
+test('claude hook: unknown session is denied by the service (no session-start sent)', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const host = fakeHost(t);
   denied(await host.hook([await configFile(t, svc.sockets.decision), 'enforce', UID], pre('alpha')), 'PreToolUse', MSG_UNVERIFIED);
 });
 
-test('claude hook: malformed input denies in enforce, is silent in shadow', async (t) => {
+test('claude hook: malformed input denies in enforce, is silent in shadow', { skip: LINUX_ONLY }, async (t) => {
   const { svc } = await service(t);
   const sock = svc.sockets.decision;
   const cases: [string, string, 'PreToolUse' | 'UserPromptExpansion' | undefined][] = [
@@ -187,7 +187,7 @@ test('claude hook: service down, hang, bad answers; each denies in enforce and i
   assert.ok(Date.now() - started < 3000);
 });
 
-test('claude hook: config unreadable or weaker than argv', async (t) => {
+test('claude hook: config unreadable or weaker than argv', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const host = fakeHost(t);
@@ -205,13 +205,13 @@ test('claude hook: config unreadable or weaker than argv', async (t) => {
   denied(await host.hook([weak, 'enforce', UID], pre('alpha')), 'PreToolUse', MSG_UNVERIFIED);
 });
 
-test('claude hook: no allowlisted host ancestor denies', async (t) => {
+test('claude hook: no allowlisted host ancestor denies', { skip: LINUX_ONLY }, async (t) => {
   const { svc } = await service(t);
   const host = fakeHost(t);
   denied(await host.hook([await configFile(t, svc.sockets.decision, { host_exes: ['/nonexistent/claude'] }), 'enforce', UID], pre('alpha')), 'PreToolUse', MSG_UNVERIFIED);
 });
 
-test('host pid discovery uses the real /proc; client reports a closed failure for a missing socket', async () => {
+test('host pid discovery uses the real /proc; client reports a closed failure for a missing socket', { skip: LINUX_ONLY }, async () => {
   assert.equal(await findHostPid([NODE], process.pid), process.pid);
   await assert.rejects(findHostPid(['/nonexistent'], process.pid));
   const r = await askService('/nonexistent/s.sock', { v: 1, request_id: 'a', event: 'session-start', session: 'pid:1' }, 200);
@@ -257,7 +257,7 @@ test('claude hook command: NODE_OPTIONS and NODE_PATH in the parent env cannot h
   assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, 'deny');
 });
 
-test('claude hook: config and socket ownership/permissions are authenticated', async (t) => {
+test('claude hook: config and socket ownership/permissions are authenticated', { skip: LINUX_ONLY }, async (t) => {
   const { svc } = await service(t);
   const host = fakeHost(t);
   const sockDir = await tempDir(t);
@@ -287,7 +287,7 @@ test('claude hook: config and socket ownership/permissions are authenticated', a
   assert.deepEqual(await askService(plain, req, 300, process.getuid!()), { ok: false, failure: 'connect-failed' });
 });
 
-test('claude hook: long prompt (70 KB) and command_args (20 KB) are not denied for size', async (t) => {
+test('claude hook: long prompt (70 KB) and command_args (20 KB) are not denied for size', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const host = fakeHost(t);
@@ -311,7 +311,7 @@ test('claude hook: a broken stdout exits 2 with a stderr reason instead of the i
   assert.match(err, /could not deliver/u);
 });
 
-test('claude hook: the production entry ignores a uid passed in argv (config and socket must be root-owned)', async (t) => {
+test('claude hook: the production entry ignores a uid passed in argv (config and socket must be root-owned)', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const cfg = await configFile(t, svc.sockets.decision);

@@ -10,7 +10,7 @@ import { updateRevocations } from '../src/admin.ts';
 import { extractMentions, readProcEnviron, runHook } from '../src/gate/adapters/codex.ts';
 import { codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
 import { createGateService } from '../src/gate/service.ts';
-import { approve, setupOrg, tempDir, writeSkill } from './helpers.ts';
+import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 
 const UID = String(process.getuid!());
 const NODE = realpathSync(process.execPath);
@@ -131,7 +131,7 @@ test('codex mention grammar follows mentions.rs', () => {
   assert.deepEqual(m('[$home](/x/SKILL.md)'), []);
 });
 
-test('codex hook: real service; mentions, bash, revoke', async (t) => {
+test('codex hook: real service; mentions, bash, revoke', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install, revoke } = await service(t);
   const alpha = await install('alpha');
   const r = await roots(t);
@@ -157,7 +157,7 @@ test('codex hook: real service; mentions, bash, revoke', async (t) => {
   silent(await run(bash(`ls ${r.admin}`))); // no Skill named
 });
 
-test('codex hook: a repo Skill under cwd is found; a symlinked root fails closed', async (t) => {
+test('codex hook: a repo Skill under cwd is found; a symlinked root fails closed', { skip: LINUX_ONLY }, async (t) => {
   const { svc } = await service(t);
   const r = await roots(t, ['alpha'], []);
   const repo = await tempDir(t);
@@ -177,7 +177,7 @@ test('codex hook: a repo Skill under cwd is found; a symlinked root fails closed
   silent(await host.hook([cfg, 'enforce', UID], submit('nothing', { cwd: linked }))); // no mention: roots not scanned
 });
 
-test('codex hook: service down, hang, bad answers; deny in enforce, silent in shadow; ordinary input never asks', async (t) => {
+test('codex hook: service down, hang, bad answers; deny in enforce, silent in shadow; ordinary input never asks', { skip: LINUX_ONLY }, async (t) => {
   const dir = await tempDir(t);
   const r = await roots(t, ['alpha'], []);
   const hang = await fakeServer(t, () => undefined);
@@ -204,7 +204,7 @@ test('codex hook: service down, hang, bad answers; deny in enforce, silent in sh
   assert.ok(Date.now() - started < 3000);
 });
 
-test('codex hook: malformed input denies (exit 2) in enforce, is silent in shadow', async (t) => {
+test('codex hook: malformed input denies (exit 2) in enforce, is silent in shadow', { skip: LINUX_ONLY }, async (t) => {
   const { svc } = await service(t);
   const r = await roots(t);
   const cases: [string, string][] = [
@@ -230,7 +230,7 @@ test('codex hook: malformed input denies (exit 2) in enforce, is silent in shado
   denied(await host.hook([bad, 'enforce', UID], submit('hi')), MSG_UNVERIFIED);
 });
 
-test('codex hook: the production entry ignores a uid in argv', async (t) => {
+test('codex hook: the production entry ignores a uid in argv', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const r = await roots(t, ['alpha'], []);
@@ -297,7 +297,7 @@ async function adapter(t: TestContext, extra: object = {}) {
   return { r, run: (stdin: string) => host.hook([cfg, 'enforce', UID], stdin) };
 }
 
-test('codex hook: any SKILL.md in a non-admin root (depth 6, through symlinks, any name) makes every token asked', async (t) => {
+test('codex hook: any SKILL.md in a non-admin root (depth 6, through symlinks, any name) makes every token asked', { skip: LINUX_ONLY }, async (t) => {
   const places: [string, string[], boolean][] = [ // [label, path below the root, expected to be found]
     ['top', ['x'], true], ['nested', ['grp', 'deep', 'y'], true], ['depth6', ['a', 'b', 'c', 'd', 'e', 'f'], true],
     ['depth7', ['a', 'b', 'c', 'd', 'e', 'f', 'g'], false],
@@ -340,7 +340,7 @@ test('codex hook: rogue Skills with exotic frontmatter or a plugin namespace are
   }
 });
 
-test('codex hook: an approved admin Skill still passes when rogue Skills exist; $5 prose follows the machine state', async (t) => {
+test('codex hook: an approved admin Skill still passes when rogue Skills exist; $5 prose follows the machine state', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const dirty = await roots(t); // has a user Skill
@@ -358,7 +358,7 @@ test('codex hook: an approved admin Skill still passes when rogue Skills exist; 
   silent(await host.hook([await configFile(t, '/nonexistent/s.sock', dirty, {}, 'shadow'), 'shadow', UID], submit('costs $5')));
 });
 
-test('codex hook: hidden directories are skipped, but an explicitly listed hidden root (.system) is scanned', async (t) => {
+test('codex hook: hidden directories are skipped, but an explicitly listed hidden root (.system) is scanned', { skip: LINUX_ONLY }, async (t) => {
   const base = await tempDir(t);
   const system = path.join(base, '.codex', 'skills', '.system');
   const user = path.join(base, '.codex', 'skills');
@@ -372,7 +372,7 @@ test('codex hook: hidden directories are skipped, but an explicitly listed hidde
   blocked(await host.hook([withSystem, 'enforce', UID], submit('$skill-installer')));
 });
 
-test('codex hook: unreadable entries, symlinked SKILL.md and the directory cap fail closed; mention-free prompts pass', async (t) => {
+test('codex hook: unreadable entries, symlinked SKILL.md and the directory cap fail closed; mention-free prompts pass', { skip: LINUX_ONLY }, async (t) => {
   const { r, run } = await adapter(t);
   await mkdir(path.join(r.user, 'u'), { recursive: true });
   if (process.getuid!() !== 0) {
@@ -392,7 +392,7 @@ test('codex hook: unreadable entries, symlinked SKILL.md and the directory cap f
   blocked(await run(submit('use $unrelated')));
 });
 
-test('codex hook: every cwd ancestor is scanned (an employee-set marker hides nothing); a file at a repo root location fails closed', async (t) => {
+test('codex hook: every cwd ancestor is scanned (an employee-set marker hides nothing); a file at a repo root location fails closed', { skip: LINUX_ONLY }, async (t) => {
   const { run } = await adapter(t);
   const top = await tempDir(t);
   const repo = path.join(top, 'repo');
@@ -428,7 +428,7 @@ test('codex hook: project_root_markers is no longer a config key (config rejecte
   void r;
 });
 
-test('codex hook: user roots follow the host environment (CODEX_HOME, HOME); bad or unreadable environment fails closed', async (t) => {
+test('codex hook: user roots follow the host environment (CODEX_HOME, HOME); bad or unreadable environment fails closed', { skip: LINUX_ONLY }, async (t) => {
   const r = await roots(t, ['alpha'], []);
   const cfg = await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [] });
   const codexHome = await tempDir(t);
@@ -510,7 +510,7 @@ test('codex hook: user roots follow the host environment (CODEX_HOME, HOME); bad
   assert.equal(env.home, process.env['HOME']);
 });
 
-test('codex hook: a same-name admin Skill is masked by a repo Skill; only the admin link passes', async (t) => {
+test('codex hook: a same-name admin Skill is masked by a repo Skill; only the admin link passes', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const r = await roots(t, ['alpha'], []);
@@ -538,7 +538,7 @@ test('codex hook: a missing or relative cwd fails closed for mentions only', asy
   silent(await run(submit('no mention', { cwd: undefined })));
 });
 
-test('codex hook: a cwd deeper than the ancestor cap with no marker fails closed (mentions only)', async (t) => {
+test('codex hook: a cwd deeper than the ancestor cap with no marker fails closed (mentions only)', { skip: LINUX_ONLY }, async (t) => {
   const { run } = await adapter(t);
   const deep = path.join(await tempDir(t), ...Array.from({ length: 70 }, (_, i) => `d${i}`));
   await mkdir(deep, { recursive: true });
@@ -549,7 +549,7 @@ test('codex hook: a cwd deeper than the ancestor cap with no marker fails closed
   silent(await run(submit('use $x', { cwd: shallow }))); // reaches "/" without a marker: cwd only, complete
 });
 
-test('codex hook: a repo Skill named like a just-revoked admin Skill is not reachable', async (t) => {
+test('codex hook: a repo Skill named like a just-revoked admin Skill is not reachable', { skip: LINUX_ONLY }, async (t) => {
   const { svc, install, revoke } = await service(t);
   const alpha = await install('alpha');
   const r = await roots(t, [], []);

@@ -11,7 +11,7 @@ import { Worker } from 'node:worker_threads';
 import { updateRevocations } from '../src/admin.ts';
 import { bootId, bootMs, NotLiveError, parseStatus, processFacts as realFacts, processInfo } from '../src/gate/proc.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
-import { approve, setupOrg, tempDir, writeSkill, type Org } from './helpers.ts';
+import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill, type Org } from './helpers.ts';
 
 const NODE = realpathSync(process.execPath);
 const HOST = `pid:${process.pid}`;
@@ -81,7 +81,7 @@ function host(t: TestContext, file = NODE): ChildProcess {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-test('proc: boot id, boot ms, own process, comm with spaces and parenthesis', async (t) => {
+test('proc: boot id, boot ms, own process, comm with spaces and parenthesis', { skip: LINUX_ONLY }, async (t) => {
   assert.match(await bootId(), /^[0-9a-f-]{36}$/u);
   const a = await bootMs(); await sleep(20);
   assert.ok((await bootMs()) >= a);
@@ -99,7 +99,7 @@ test('proc: boot id, boot ms, own process, comm with spaces and parenthesis', as
   await assert.rejects(processInfo(2 ** 30));
 });
 
-test('session-start then invoke is allowed; revocation denies the next invoke; modes and socket modes', async (t) => {
+test('session-start then invoke is allowed; revocation denies the next invoke; modes and socket modes', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const dir = await writeSkill(f.work, 'alpha');
   const digest = await f.install('alpha', dir);
@@ -112,12 +112,12 @@ test('session-start then invoke is allowed; revocation denies the next invoke; m
   assert.equal((await stat(f.svc.sockets.admin)).mode & 0o777, 0o600);
 });
 
-test('shadow mode is returned in results', async (t) => {
+test('shadow mode is returned in results', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { mode: 'shadow' });
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).mode, 'shadow');
 });
 
-test('update v1 -> v2: allowed; v1 revoked later denies old sessions only', async (t) => {
+test('update v1 -> v2: allowed; v1 revoked later denies old sessions only', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const dir = await writeSkill(f.work, 'beta');
   const v1 = await f.install('beta', dir);
@@ -133,7 +133,7 @@ test('update v1 -> v2: allowed; v1 revoked later denies old sessions only', asyn
   assert.equal((await decide(f.svc, 'skill-invoke', `pid:${fresh.pid}`, 'beta')).verdict, 'VERIFIED');
 });
 
-test('uninstall denies; an uninstalled or unknown Skill is NO_CERTIFICATE', async (t) => {
+test('uninstall denies; an uninstalled or unknown Skill is NO_CERTIFICATE', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await f.install('gamma', await writeSkill(f.work, 'gamma'));
   await decide(f.svc, 'session-start', HOST);
@@ -143,7 +143,7 @@ test('uninstall denies; an uninstalled or unknown Skill is NO_CERTIFICATE', asyn
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'never-installed')).verdict, 'NO_CERTIFICATE');
 });
 
-test('identity: unknown pid, exe not allowlisted, no session-start, malformed session', async (t) => {
+test('identity: unknown pid, exe not allowlisted, no session-start, malformed session', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await f.install('delta', await writeSkill(f.work, 'delta'));
   assert.equal((await decide(f.svc, 'session-start', 'pid:1073741824')).code, 'no-session-record');
@@ -153,7 +153,7 @@ test('identity: unknown pid, exe not allowlisted, no session-start, malformed se
   assert.equal((await decide(other.svc, 'session-start', HOST)).code, 'no-session-record');
 });
 
-test('trust not ready: no state yet, and stores that cannot open', async (t) => {
+test('trust not ready: no state yet, and stores that cannot open', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, {}, false);
   assert.equal((await decide(f.svc, 'session-start', HOST)).kind, 'ack');
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'x')).code, 'trust-unavailable');
@@ -172,7 +172,7 @@ test('trust not ready: no state yet, and stores that cannot open', async (t) => 
   }
 });
 
-test('socket protocol: malformed, oversized, two requests, slow client, connection cap with eviction', async (t) => {
+test('socket protocol: malformed, oversized, two requests, slow client, connection cap with eviction', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { deadlineMs: 300, maxConnections: 2 });
   const sock = f.svc.sockets.decision;
   assert.equal(await talk(sock, '{"v":1,\n'), '');
@@ -193,7 +193,7 @@ test('socket protocol: malformed, oversized, two requests, slow client, connecti
   idle.forEach((c) => c.destroy());
 });
 
-test('admin socket: unknown and malformed commands are rejected; status works', async (t) => {
+test('admin socket: unknown and malformed commands are rejected; status works', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const ask = async (o: unknown) => JSON.parse(await talk(f.svc.sockets.admin, `${JSON.stringify(o)}\n`)) as { ok: boolean; error?: string; ready?: boolean; trust?: string };
   assert.equal((await ask({ v: 1, cmd: 'shell', x: 1 })).ok, false);
@@ -212,7 +212,7 @@ test('admin socket: unknown and malformed commands are rejected; status works', 
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'eps')).verdict, 'VERIFIED');
 });
 
-test('install refuses a wrong-name or unapproved Skill and an unready trust store', async (t) => {
+test('install refuses a wrong-name or unapproved Skill and an unready trust store', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const dir = await writeSkill(f.work, 'zeta');
   const issued = await approve(f.org, dir, { now: new Date(), out: path.join(f.work, 'z.json') });
@@ -225,7 +225,7 @@ test('install refuses a wrong-name or unapproved Skill and an unready trust stor
   assert.equal((await bare.svc.handleAdmin({ v: 1, cmd: 'install', skill_name: 'zeta', source_dir: dir, certificate_b64: cert })).ok, false);
 });
 
-test('a thread id is not a host process (Tgid check)', async (t) => {
+test('a thread id is not a host process (Tgid check)', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const w = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage(require('node:fs').readlinkSync('/proc/thread-self')); setInterval(() => {}, 1000);`, { eval: true });
   t.after(() => w.terminate());
@@ -238,7 +238,7 @@ test('a thread id is not a host process (Tgid check)', async (t) => {
   assert.equal((await decide(f.svc, 'session-start', HOST)).kind, 'ack');
 });
 
-test('a replaced host binary (exe "<path> (deleted)") is accepted as the allowlisted path, only then', async (t) => {
+test('a replaced host binary (exe "<path> (deleted)") is accepted as the allowlisted path, only then', { skip: LINUX_ONLY }, async (t) => {
   const dir = await scratch(t);
   const copy = path.join(dir, 'host-copy');
   await copyFile(NODE, copy);
@@ -253,7 +253,7 @@ test('a replaced host binary (exe "<path> (deleted)") is accepted as the allowli
   assert.equal((await decide(other.svc, 'session-start', `pid:${child.pid}`)).code, 'no-session-record');
 });
 
-test('dead sessions are reaped: more than 1100 short-lived hosts are all admitted', async (t) => {
+test('dead sessions are reaped: more than 1100 short-lived hosts are all admitted', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   let admitted = 0;
   for (let round = 0; round < 12; round++) {
@@ -269,7 +269,7 @@ test('dead sessions are reaped: more than 1100 short-lived hosts are all admitte
   assert.equal(admitted, 1200);
 });
 
-test('per-uid cap on open live sessions; a dead one frees a slot', async (t) => {
+test('per-uid cap on open live sessions; a dead one frees a slot', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { maxSessionsPerUid: 3 });
   const kids = [host(t), host(t), host(t), host(t)];
   await Promise.all(kids.map((k) => new Promise((r) => k.once('spawn', r))));
@@ -280,7 +280,7 @@ test('per-uid cap on open live sessions; a dead one frees a slot', async (t) => 
   assert.equal((await decide(f.svc, 'session-start', `pid:${kids[3]!.pid}`)).kind, 'ack');
 });
 
-test('idle decision connections close after 300 ms and do not starve a legitimate request', async (t) => {
+test('idle decision connections close after 300 ms and do not starve a legitimate request', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const idle = Array.from({ length: 64 }, () => { const c = net.connect(f.svc.sockets.decision); c.on('error', () => {}); return c; });
   t.after(() => idle.forEach((c) => c.destroy()));
@@ -290,13 +290,13 @@ test('idle decision connections close after 300 ms and do not starve a legitimat
   assert.ok(idle.every((c) => c.destroyed || c.readableEnded || !c.writable), 'idle connections were closed');
 });
 
-test('a client that half-closes right after its request still gets the reply', async (t) => {
+test('a client that half-closes right after its request still gets the reply', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   assert.equal(JSON.parse(await talk(f.svc.sockets.decision, `${req('session-start', HOST)}\n`, { end: true })).kind, 'ack');
   assert.equal(JSON.parse(await talk(f.svc.sockets.admin, `${JSON.stringify({ v: 1, cmd: 'status' })}\n`, { end: true })).ok, true);
 });
 
-test('a reconnecting flood far above the cap does not starve legitimate requests (oldest pending is evicted)', async (t) => {
+test('a reconnecting flood far above the cap does not starve legitimate requests (oldest pending is evicted)', { skip: LINUX_ONLY }, async (t) => {
   const nofile = Number((await readFile('/proc/self/limits', 'utf8')).match(/Max open files\s+(\d+)/u)?.[1] ?? 0);
   if (nofile < 4096) return t.skip(`RLIMIT_NOFILE soft limit ${nofile} is below 4096`);
   const f = await fixture(t, { maxConnections: 200 });
@@ -317,7 +317,7 @@ test('a reconnecting flood far above the cap does not starve legitimate requests
   assert.ok(good >= 18, `only ${good}/20 legitimate requests answered`);
 });
 
-test('a request whose processing outlasts the 300 ms idle deadline still gets its reply', async (t) => {
+test('a request whose processing outlasts the 300 ms idle deadline still gets its reply', { skip: LINUX_ONLY }, async (t) => {
   let slow = 0;
   const f = await fixture(t, {
     maxSessionsPerUid: 1, sweepMinIntervalMs: 0,
@@ -331,7 +331,7 @@ test('a request whose processing outlasts the 300 ms idle deadline still gets it
   assert.equal(r.code, 'internal');
 });
 
-test('sweep: only ENOENT/ESRCH mean dead; any other error keeps the session', async (t) => {
+test('sweep: only ENOENT/ESRCH mean dead; any other error keeps the session', { skip: LINUX_ONLY }, async (t) => {
   let err: NodeJS.ErrnoException | undefined;
   const f = await fixture(t, {
     maxSessionsPerUid: 1, sweepMinIntervalMs: 0,
@@ -346,7 +346,7 @@ test('sweep: only ENOENT/ESRCH mean dead; any other error keeps the session', as
   assert.equal((await decide(f.svc, 'session-start', HOST)).kind, 'ack'); // reaped, then admitted afresh
 });
 
-test('sweeps are rate limited: a burst of capped admissions triggers at most one sweep per second', async (t) => {
+test('sweeps are rate limited: a burst of capped admissions triggers at most one sweep per second', { skip: LINUX_ONLY }, async (t) => {
   let calls = 0;
   const f = await fixture(t, {
     maxSessionsPerUid: 1,
@@ -360,7 +360,7 @@ test('sweeps are rate limited: a burst of capped admissions triggers at most one
   assert.equal(calls, 1);
 });
 
-test('the connection cap follows the file-descriptor limit; a limit that is too low refuses to start', async (t) => {
+test('the connection cap follows the file-descriptor limit; a limit that is too low refuses to start', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { nofileLimit: 1000 });
   assert.equal(f.svc.decisionCap, 740); // soft limit - 4 (admin) - 256 (margin)
   const base = await scratch(t);
@@ -378,7 +378,7 @@ test('proc: zombie and dead states are not live (parser fixture)', () => {
   for (const st of ['Z (zombie)', 'X (dead)']) assert.throws(() => parseStatus(doc(st), 42), NotLiveError);
 });
 
-test('proc: a real unreaped zombie child is not live', async (t) => {
+test('proc: a real unreaped zombie child is not live', { skip: LINUX_ONLY }, async (t) => {
   // The parent blocks its event loop (Atomics.wait), so libuv cannot reap the child that exits at once.
   const parent = spawn(NODE, ['-e', `
     const c = require('node:child_process').spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -395,7 +395,7 @@ test('proc: a real unreaped zombie child is not live', async (t) => {
   await assert.rejects(realFacts(pid), NotLiveError);
 });
 
-test('an answered connection frees its slot even if the client never closes; a legitimate client still gets answers', async (t) => {
+test('an answered connection frees its slot even if the client never closes; a legitimate client still gets answers', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { maxConnections: 50 });
   const flood = spawn(NODE, ['-e', `
     const net = require('node:net'); const sock = process.argv[1]; let n = 0;
@@ -414,7 +414,7 @@ test('an answered connection frees its slot even if the client never closes; a l
   assert.ok(good >= 36, `only ${good}/40 legitimate requests answered`);
 });
 
-test('per-uid in-flight cap: the 9th concurrent request from one uid is refused, another uid is served', async (t) => {
+test('per-uid in-flight cap: the 9th concurrent request from one uid is refused, another uid is served', { skip: LINUX_ONLY }, async (t) => {
   const other = host(t);
   await new Promise((r) => other.once('spawn', r));
   const OTHER_UID = process.getuid!() + 12345;
@@ -443,7 +443,7 @@ test('per-uid in-flight cap: the 9th concurrent request from one uid is refused,
   assert.equal((await ask(HOST)).kind, 'verdict'); // the counter was released
 });
 
-test('verdict cache: repeated checks are served from cache for 1 s; an accepted revocation applies to the very next check', async (t) => {
+test('verdict cache: repeated checks are served from cache for 1 s; an accepted revocation applies to the very next check', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const digest = await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await decide(f.svc, 'session-start', HOST);
@@ -457,14 +457,14 @@ test('verdict cache: repeated checks are served from cache for 1 s; an accepted 
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'NO_CERTIFICATE');
 });
 
-test('the decision cap is lowered to somaxconn', async (t) => {
+test('the decision cap is lowered to somaxconn', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { somaxconn: async () => 100 });
   assert.equal(f.svc.decisionCap, 100);
   const g = await fixture(t, { somaxconn: async () => { throw new Error('unreadable'); } });
   assert.equal(g.svc.decisionCap, 1024);
 });
 
-test('a transient error opening the admission store: not ready until it loads, then it recovers', async (t) => {
+test('a transient error opening the admission store: not ready until it loads, then it recovers', { skip: LINUX_ONLY }, async (t) => {
   let fault: string | undefined = 'EMFILE';
   const f = await fixture(t, { admissionFault: (op) => (op === 'read' ? fault : undefined) });
   const ask = async () => JSON.parse(await talk(f.svc.sockets.admin, `${JSON.stringify({ v: 1, cmd: 'status' })}\n`)) as { ready: boolean; admission: string };
@@ -475,7 +475,7 @@ test('a transient error opening the admission store: not ready until it loads, t
   assert.equal((await decide(f.svc, 'session-start', HOST)).kind, 'ack');
 });
 
-test('a slow sweep does not block a concurrent skill decision', async (t) => {
+test('a slow sweep does not block a concurrent skill decision', { skip: LINUX_ONLY }, async (t) => {
   let slow = false;
   const f = await fixture(t, { maxSessionsPerUid: 1, sweepMinIntervalMs: 0, processFacts: async (pid) => { if (slow) await sleep(800); return realFacts(pid); } });
   await f.install('alpha', await writeSkill(f.work, 'alpha'));

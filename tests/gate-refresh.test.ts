@@ -8,7 +8,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { updateRevocations } from '../src/admin.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
-import { approve, setupOrg, tempDir, writeSkill } from './helpers.ts';
+import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 import { rm, readdir } from 'node:fs/promises';
 
 const NODE = realpathSync(process.execPath);
@@ -71,7 +71,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}) {
   return { org, svc, work, install, makeList, drop, status, inbox, setClock: (d: Date) => { clock = d; }, clockNow: () => clock };
 }
 
-test('enforce: a newer list in the inbox revokes the current generation, which is uninstalled and then denied', async (t) => {
+test('enforce: a newer list in the inbox revokes the current generation, which is uninstalled and then denied', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const digest = await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await decide(f.svc, 'session-start', HOST);
@@ -92,7 +92,7 @@ test('enforce: a newer list in the inbox revokes the current generation, which i
   assert.equal((await f.status())['autoUninstalled'].length, 1);
 });
 
-test('shadow: nothing is uninstalled, would-uninstall is recorded', async (t) => {
+test('shadow: nothing is uninstalled, would-uninstall is recorded', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { mode: 'shadow' });
   const digest = await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await f.drop(await f.makeList({ revoke: digest }));
@@ -104,7 +104,7 @@ test('shadow: nothing is uninstalled, would-uninstall is recorded', async (t) =>
   assert.deepEqual(s['wouldUninstall'], [{ name: 'alpha', digest, verdict: 'REVOKED' }]);
 });
 
-test('rejected documents change nothing and are reported', async (t) => {
+test('rejected documents change nothing and are reported', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const dir = await writeSkill(f.work, 'alpha');
   const digest = await f.install('alpha', dir);
@@ -136,7 +136,7 @@ test('rejected documents change nothing and are reported', async (t) => {
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'VERIFIED');
 });
 
-test('list expiry: not ready denies; a fresh list then uninstalls the Skill whose certificate expired', async (t) => {
+test('list expiry: not ready denies; a fresh list then uninstalls the Skill whose certificate expired', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await decide(f.svc, 'session-start', HOST);
@@ -155,7 +155,7 @@ test('list expiry: not ready denies; a fresh list then uninstalls the Skill whos
   assert.deepEqual(s['autoUninstalled'].map((u: any) => [u.name, u.verdict]), [['alpha', 'EXPIRED']]);
 });
 
-test('unsafe inbox: symlinked file, group-writable dir, oversized file, symlinked dir', async (t) => {
+test('unsafe inbox: symlinked file, group-writable dir, oversized file, symlinked dir', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const list = await f.makeList();
   await f.drop(list);
@@ -177,7 +177,7 @@ test('unsafe inbox: symlinked file, group-writable dir, oversized file, symlinke
   assert.equal((await refresh()).result, 'unsafe-inbox');
 });
 
-test('timer refresh picks up the inbox without an admin command', async (t) => {
+test('timer refresh picks up the inbox without an admin command', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { refreshIntervalMs: 50 });
   const digest = await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await f.drop(await f.makeList({ revoke: digest }));
@@ -185,7 +185,7 @@ test('timer refresh picks up the inbox without an admin command', async (t) => {
   assert.equal((await f.status())['autoUninstalled'].length, 1);
 });
 
-test('only the CURRENT generation is evaluated: an older revoked generation is not uninstalled but still denies old sessions', async (t) => {
+test('only the CURRENT generation is evaluated: an older revoked generation is not uninstalled but still denies old sessions', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   const dir = await writeSkill(f.work, 'beta');
   const v1 = await f.install('beta', dir);

@@ -6,7 +6,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { openDecisionLog, type LogInput } from '../src/gate/decision-log.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
-import { approve, setupOrg, tempDir, writeSkill } from './helpers.ts';
+import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 
 const NODE = realpathSync(process.execPath);
 const HOST = `pid:${process.pid}`;
@@ -169,7 +169,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}) {
 const ask = (svc: { handleDecision: Function }, event: string, skill?: string) =>
   svc.handleDecision({ v: 1, request_id: `r${++seq}`, event, session: HOST, ...(skill ? { skill } : {}) }) as Promise<{ kind: string; verdict?: string; code?: string }>;
 
-test('service: records are minimal, carry versions and digests, and are on disk before an enforce allow is returned', async (t) => {
+test('service: records are minimal, carry versions and digests, and are on disk before an enforce allow is returned', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { logFault: undefined });
   assert.equal((await ask(f.svc, 'session-start')).kind, 'ack');
   const r = await ask(f.svc, 'skill-invoke', 'alpha');
@@ -188,7 +188,7 @@ test('service: records are minimal, carry versions and digests, and are on disk 
   assert.deepEqual([st.log?.state, st.log?.lastSeq, st.log?.chainBreaks, st.log?.degradedCount], ['ready', 2, 0, 0]);
 });
 
-test('service: the pseudonymous session differs across instances; unusual request values are not logged', async (t) => {
+test('service: the pseudonymous session differs across instances; unusual request values are not logged', { skip: LINUX_ONLY }, async (t) => {
   const f1 = await fixture(t); const f2 = await fixture(t);
   for (const f of [f1, f2]) await ask(f.svc, 'session-start');
   const [a, b] = await Promise.all([all(f1.log), all(f2.log)]);
@@ -200,7 +200,7 @@ test('service: the pseudonymous session differs across instances; unusual reques
   assert.doesNotMatch(JSON.stringify(recs), /shadow|prompt text|etc/u);
 });
 
-test('service: a log write failure turns an enforce allow into internal, does not block denies, degrades status', async (t) => {
+test('service: a log write failure turns an enforce allow into internal, does not block denies, degrades status', { skip: LINUX_ONLY }, async (t) => {
   let fail = false;
   const f = await fixture(t, { logFault: () => fail });
   await ask(f.svc, 'session-start');
@@ -216,7 +216,7 @@ test('service: a log write failure turns an enforce allow into internal, does no
   assert.equal(((await f.svc.handleAdmin({ v: 1, cmd: 'status' })) as { log?: { state: string } }).log?.state, 'ready');
 });
 
-test('service: shadow mode never blocks on a log failure and counts it', async (t) => {
+test('service: shadow mode never blocks on a log failure and counts it', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { mode: 'shadow', logFault: () => true });
   await ask(f.svc, 'session-start');
   assert.equal((await ask(f.svc, 'skill-invoke', 'alpha')).verdict, 'VERIFIED');
@@ -224,7 +224,7 @@ test('service: shadow mode never blocks on a log failure and counts it', async (
   assert.deepEqual([st.log?.state, st.log?.degradedCount], ['degraded', 2]);
 });
 
-test('service: sequence continues across a restart; a loose log directory degrades and an enforce allow is denied', async (t) => {
+test('service: sequence continues across a restart; a loose log directory degrades and an enforce allow is denied', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await ask(f.svc, 'session-start'); await ask(f.svc, 'skill-invoke', 'alpha');
   await f.svc.stop(); // clean shutdown: checkpoint written
@@ -269,7 +269,7 @@ test('log: recovery is rate-limited to one attempt per second and refuses a loos
   assert.equal(log.status().chainBreaks, 0);
 });
 
-test('service: a deleted and recreated log directory starts a new segment with chain_break; a loose one is refused', async (t) => {
+test('service: a deleted and recreated log directory starts a new segment with chain_break; a loose one is refused', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await ask(f.svc, 'session-start');
   assert.equal((await ask(f.svc, 'skill-invoke', 'alpha')).verdict, 'VERIFIED');
@@ -289,7 +289,7 @@ test('service: a deleted and recreated log directory starts a new segment with c
   assert.equal((await ask(f.svc, 'skill-invoke', 'alpha')).code, 'internal');
 });
 
-test('service: unattributed requests are counted, not logged, and cannot evict real records', async (t) => {
+test('service: unattributed requests are counted, not logged, and cannot evict real records', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { logMaxSegmentBytes: 5000, logMaxSegments: 2 });
   await ask(f.svc, 'session-start');
   assert.equal((await ask(f.svc, 'skill-invoke', 'alpha')).verdict, 'VERIFIED');
