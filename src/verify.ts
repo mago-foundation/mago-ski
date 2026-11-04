@@ -24,7 +24,7 @@ export type Verdict = (typeof VERDICTS)[number];
  * Precedence rank for candidate selection (lower rank wins):
  * VERIFIED (0) beats all failures, followed by the failure priority order.
  */
-const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
+export const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
   VERIFIED: 0,
   REVOKED: 1,
   UNAPPROVED_CHANGE: 2,
@@ -518,7 +518,7 @@ export function unverifiable(
   requireValidDate(now, 'Verification time');
 
   const safeVerdict: Exclude<Verdict, 'VERIFIED'> =
-    verdict === ('VERIFIED' as string) || !(verdict in VERDICT_RANK) ? 'UNVERIFIABLE' : verdict;
+    verdict === ('VERIFIED' as string) || !Object.hasOwn(VERDICT_RANK, verdict) ? 'UNVERIFIABLE' : verdict;
 
   return {
     verdict: safeVerdict,

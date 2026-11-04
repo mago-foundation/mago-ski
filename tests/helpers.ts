@@ -7,6 +7,12 @@ import { generateKeyPair } from '../src/keys.ts';
 
 export const T0 = new Date('2026-10-01T00:00:00Z');
 
+/**
+ * Skip option for tests that need the Linux kernel (/proc, a Linux-only gate service, generation store or
+ * decision log). The gate is Linux only; on other platforms these tests are reported as skipped, not failed.
+ */
+export const LINUX_ONLY: false | string = process.platform === 'linux' ? false : 'Linux only: needs /proc';
+
 export function daysAfter(base: Date, days: number): Date {
   return new Date(base.getTime() + days * 86_400_000);
 }
