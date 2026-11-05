@@ -115,7 +115,7 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 ## Documentation
 
 - [Threat model](docs/threat-model.md): what is and is not protected
-- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md)
+- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md), [GUI administration rack](docs/spec/gui-admin-rack-v1.md) (draft)
 - [Test vectors](tests/vectors/) for other implementations
 - [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md)
 - [Security policy](SECURITY.md): how to report a vulnerability

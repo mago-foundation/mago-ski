@@ -2367,6 +2367,37 @@ unsupported target must remain unavailable.
 
 <a id="section-25"></a>
 
+### 24.3 Administration rack
+
+`[gui-admin]` · Specification: [GUI administration rack v1](spec/gui-admin-rack-v1.md).
+
+**OrganisationPin** — the policy file at a fixed admin-owned location (`/etc/mago-ski/policy.json`)
+from which the GUI takes the organisation's identity (pinned root, recovery set, root events).
+Used only when the file and every ancestor directory are root-owned and not group- or
+other-writable. A host policy the user can edit is never an OrganisationPin.
+
+**AdminRole** — what a key is under the pin and the signed documents: RootAdministrator,
+Approver, RecoveryTrustee, TimestampSigner or none. Computed, never declared; a key holds at
+most one.
+
+**IdentityProof** — a signature by the loaded private key over a fresh challenge bound to
+the pinned root, verified with the public key the documents name for the role. It proves
+possession, not authority: authority remains the hosts' verification of signed documents.
+
+**ArmedKey** — a private key held in the GUI's main process for one template session.
+Never written, logged or shown to the renderer; dropped on eject, template change, idle
+timeout, pin change and quit. The role is re-checked before every signature.
+
+**AdminTemplate** — a fixed chain of AdminDevices for one procedure (approve, manage
+approvers, revoke, publish, set up, root incident). Not reorderable: the order is part of
+the procedure. **AdminDevice** — one step with typed inputs and a state (locked, waiting,
+ready, done, failed); each corresponds to one or more CLI commands and calls the same engine
+functions.
+
+Relations: AdminTemplate —startsWith→ IdentityProof (except organisation setup);
+AdminDevice —requiresRole→ AdminRole; APPROVE —consumes→ the ExpectedVersion confirmed by
+INSPECT; AdminRole —derivedFrom→ OrganisationPin, TrustRoot, RevocationList, RootEventLog.
+
 ## 25. Restoration and retained-content provenance
 
 `[gui-v0.2]` candidate · Design basis: plan §§6, 12, 17, 19.
@@ -2428,6 +2459,7 @@ Design basis: plan §§14–20, 24. Stages below are requirements, not implement
 | Existing approval display | Certificate, TrustContext, VerificationResult | VerificationProjection, EvidenceFreshness | v0.1 | GUI-010; T16/T17/T19 |
 | Host/application status | Host, Mode, PolicyLoadState | AdapterCapability, ApplicationState | v0.1 | GUI-011/014; T13–T15/T24 |
 | Conditional GUI approval | ApproverKey, Approval, Certificate | ApprovalRequest with ExpectedVersion | v0.1 optional | W17; T08/T18/T19 |
+| Administration rack | ApproverKey, RootKey, TrustRoot, RevocationList, RootEventLog | OrganisationPin, AdminRole, IdentityProof, ArmedKey, AdminTemplate | gui-admin | [GUI administration rack v1](spec/gui-admin-rack-v1.md) |
 | Presets and notifications | Mode where actually configured | GuiPreferences, AttentionItem, Notification | v0.1 | GUI-013; D03/D06 |
 | Working change hold | Host hooks and exact digest | ChangeHold, HostApplyAcknowledgement | v0.2 candidate | Plan §17.1 |
 | Supported content restore | Current digest and verifier | RestoreCandidate/Request/Outcome | v0.2 candidate | Plan §17.2; §19.5 |
@@ -2496,6 +2528,12 @@ service already exists. They supplement, rather than replace, engine invariants 
     upload. New external analysis/sync must disclose its actual data flow.
 17. **Quiet operation is a valid success state.** With no meaningful change, the user should
     not have to operate the rack. Observation failure is never disguised as quiet health.
+18. **Administration authority is cryptographic.** The GUI recognises an administrative role
+    only by proof of possession of a key the OrganisationPin's documents name. Role display is
+    guidance; hosts accept only documents whose signatures verify against the pinned root.
+19. **The organisation is never chosen by the person at the keyboard.** The OrganisationPin
+    is read only from its admin-owned location; no environment variable, setting or dialog
+    redirects it.
 
 ### Worked example A — New third-party Skill with no PKI
 
