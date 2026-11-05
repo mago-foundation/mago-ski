@@ -47,7 +47,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}, a
   const org = await setupOrg(t, { now: new Date() });
   const base = await scratch(t);
   const svc = createGateService({
-    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'),
+    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'),
     decisionSocketDir: path.join(base, 'dec'), adminSocketDir: path.join(base, 'adm'),
     rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: process.getuid!(), ...extra,
   });
@@ -71,7 +71,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}, a
     const r = await svc.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: (await docs()).trust_root_b64, revocations_b64: (await readFile(out)).toString('base64') });
     assert.equal(r.ok, true, JSON.stringify(r));
   };
-  return { org, svc, work, install, revoke, docs, state: path.join(base, 'state') };
+  return { org, svc, work, install, revoke, docs, state: path.join(base, 'state'), managed: path.join(base, 'managed'), gens: path.join(base, 'gens') };
 }
 
 function host(t: TestContext, file = NODE): ChildProcess {
@@ -93,9 +93,9 @@ test('on a platform other than Linux the service refuses to start and creates no
   Object.defineProperty(process, 'platform', { ...real, value: 'darwin' });
   t.after(() => { Object.defineProperty(process, 'platform', real); });
   const base = await scratch(t);
-  const dirs = ['state', 'gens', 'dec', 'adm'].map((d) => path.join(base, d));
+  const dirs = ['state', 'gens', 'dec', 'adm', 'managed'].map((d) => path.join(base, d));
   const svc = createGateService({
-    stateDir: dirs[0]!, generationsDir: dirs[1]!, decisionSocketDir: dirs[2]!, adminSocketDir: dirs[3]!,
+    stateDir: dirs[0]!, generationsDir: dirs[1]!, managedDir: dirs[4]!, decisionSocketDir: dirs[2]!, adminSocketDir: dirs[3]!,
     rootFingerprint: 'unused', mode: 'enforce', hostExes: [NODE], rootUid: process.getuid?.() ?? 0,
   });
   t.after(() => svc.stop()); // only matters if start() wrongly succeeds; stop() is safe on a service that never started
@@ -165,6 +165,38 @@ test('uninstall denies; an uninstalled or unknown Skill is NO_CERTIFICATE', { sk
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'never-installed')).verdict, 'NO_CERTIFICATE');
 });
 
+test('hosts see the installed generation: install links it, an update swaps the link, uninstall and revoke remove it', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t);
+  const dir = await writeSkill(f.work, 'beta');
+  const v1 = await f.install('beta', dir);
+  const link = path.join(f.managed, 'beta');
+  assert.equal(readlinkSync(link), path.join(f.gens, 'beta', v1.slice('sha256:'.length)));
+  assert.equal(await readFile(path.join(link, 'SKILL.md'), 'utf8'), await readFile(path.join(dir, 'SKILL.md'), 'utf8'));
+  await writeFile(path.join(dir, 'extra.md'), 'v2\n');
+  const v2 = await f.install('beta', dir);
+  assert.equal(readlinkSync(link), path.join(f.gens, 'beta', v2.slice('sha256:'.length)));
+  assert.deepEqual((await readdir(f.managed)).sort(), ['beta']); // no temporary link left behind
+  await f.revoke(v2); // enforce: auto-uninstall hides it from hosts
+  await assert.rejects(stat(link), { code: 'ENOENT' });
+  await f.install('gamma', await writeSkill(f.work, 'gamma'));
+  assert.equal((await f.svc.handleAdmin({ v: 1, cmd: 'uninstall', skill_name: 'gamma' })).ok, true);
+  await assert.rejects(stat(path.join(f.managed, 'gamma')), { code: 'ENOENT' });
+});
+
+test('hosts see the installed generation: a real directory in the managed folder is refused, never replaced or removed', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.managed, 'delta', 'x'), { recursive: true });
+  const dir = await writeSkill(f.work, 'delta');
+  const issued = await approve(f.org, dir, { now: new Date(), out: path.join(f.work, 'delta-cert.json') });
+  const r = await f.svc.handleAdmin({ v: 1, cmd: 'install', skill_name: 'delta', source_dir: dir, certificate_b64: (await readFile(issued.path)).toString('base64') });
+  assert.equal(r.ok, false);
+  await decide(f.svc, 'session-start', HOST);
+  assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'delta')).verdict, 'NO_CERTIFICATE'); // never recorded
+  assert.equal((await f.svc.handleAdmin({ v: 1, cmd: 'uninstall', skill_name: 'delta' })).ok, false);
+  assert.ok((await stat(path.join(f.managed, 'delta', 'x'))).isDirectory());
+  assert.deepEqual((await readdir(f.managed)).sort(), ['delta']);
+});
+
 test('identity: unknown pid, exe not allowlisted, no session-start, malformed session', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t);
   await f.install('delta', await writeSkill(f.work, 'delta'));
@@ -183,7 +215,7 @@ test('trust not ready: no state yet, and stores that cannot open', { skip: LINUX
   await writeFile(path.join(base, 'state'), 'a file, not a directory');
   const org = await setupOrg(t, { now: new Date() });
   const broken = createGateService({
-    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), decisionSocketDir: path.join(base, 'dec'),
+    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'), decisionSocketDir: path.join(base, 'dec'),
     adminSocketDir: path.join(base, 'adm'), rootFingerprint: org.rootKeyId, mode: 'shadow', hostExes: [NODE], rootUid: process.getuid!(),
   });
   await broken.start();
@@ -276,7 +308,7 @@ test('a replaced host binary (exe "<path> (deleted)") is accepted as the allowli
 });
 
 test('dead sessions are reaped: more than 1100 short-lived hosts are all admitted', { skip: LINUX_ONLY }, async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { maxRequestsPerSecPerUid: 1e9 }); // one uid on purpose: tests reaping, not the rate limit
   let admitted = 0;
   for (let round = 0; round < 12; round++) {
     const kids = Array.from({ length: 100 }, () => spawn(NODE, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' }));
@@ -388,7 +420,7 @@ test('the connection cap follows the file-descriptor limit; a limit that is too 
   const base = await scratch(t);
   const org = await setupOrg(t, { now: new Date() });
   const low = createGateService({
-    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), decisionSocketDir: path.join(base, 'dec'),
+    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'), decisionSocketDir: path.join(base, 'dec'),
     adminSocketDir: path.join(base, 'adm'), rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: process.getuid!(), nofileLimit: 275,
   });
   await assert.rejects(low.start(), /too low/u);
@@ -418,7 +450,7 @@ test('proc: a real unreaped zombie child is not live', { skip: LINUX_ONLY }, asy
 });
 
 test('an answered connection frees its slot even if the client never closes; a legitimate client still gets answers', { skip: LINUX_ONLY }, async (t) => {
-  const f = await fixture(t, { maxConnections: 50 });
+  const f = await fixture(t, { maxConnections: 50, maxRequestsPerSecPerUid: 1e9 }); // one uid on purpose: tests connection slots, not the rate limit
   const flood = spawn(NODE, ['-e', `
     const net = require('node:net'); const sock = process.argv[1]; let n = 0;
     const line = () => JSON.stringify({ v: 1, request_id: 'f' + (++n), event: 'session-start', session: process.argv[2] }) + '\\n';
@@ -433,6 +465,9 @@ test('an answered connection frees its slot even if the client never closes; a l
     if (out && (JSON.parse(out) as { kind: string }).kind === 'ack') good++;
     await sleep(10);
   }
+  // Stop the flood and the service before cleanup removes their directories (every flood request is logged here).
+  await new Promise((r) => { flood.once('exit', r); flood.kill('SIGKILL'); });
+  await f.svc.stop();
   assert.ok(good >= 36, `only ${good}/40 legitimate requests answered`);
 });
 

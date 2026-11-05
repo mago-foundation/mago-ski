@@ -63,7 +63,7 @@
 //   empty stderr with exit 2 is NOT a block in Codex, so the adapter always writes a reason with its 2.
 // MODE/CONFIG/OWNERSHIP rules are the Claude adapter's (claude-code.ts): argv[1] is the mode, enforce wins, config and
 // socket must be root-owned, the adapter's own environment is not read. Extra config keys: `admin_root` (default
-// /etc/codex/skills) and `skill_roots` (extra absolute non-admin roots).
+// /etc/codex/skills; must be the gate service's `managedDir`) and `skill_roots` (extra absolute non-admin roots).
 import { lstat, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { isRecord } from '../../canonical-json.ts';
@@ -289,8 +289,11 @@ async function adminLinkName(link: string, f: Found): Promise<string | undefined
   if (f.adminReal === undefined || /^[a-z][a-z0-9+.-]*:\/\//iu.test(link) && !/^file:\/\//iu.test(link)) return undefined;
   try {
     const real = await realpath(path.resolve(f.cwd ?? '/', link.replace(/^file:\/\//iu, '')));
-    const rel = path.relative(f.adminReal, real).split(path.sep);
-    return rel.length === 2 && rel[1] === 'SKILL.md' && f.admin.get(rel[0]!.toLowerCase()) === rel[0] ? rel[0] : undefined;
+    // The service publishes each admin entry as a symlink to its generation (service.ts HOST-VISIBLE SKILLS), so the link
+    // is compared with the resolved `<admin>/<name>/SKILL.md` of each admin entry, not with a path under the admin root.
+    for (const name of f.admin.values())
+      if (await realpath(path.join(f.adminReal, name, 'SKILL.md')).catch(() => undefined) === real) return name;
+    return undefined;
   } catch { return undefined; }
 }
 

@@ -69,7 +69,7 @@ async function service(t: TestContext) {
     await rm(dir, { recursive: true, force: true });
   });
   const svc = createGateService({
-    stateDir: path.join(dir, 'state'), generationsDir: path.join(dir, 'gens'),
+    stateDir: path.join(dir, 'state'), generationsDir: path.join(dir, 'gens'), managedDir: path.join(dir, 'managed'),
     decisionSocketDir: path.join(dir, 'dec'), adminSocketDir: path.join(dir, 'adm'),
     rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: process.getuid!(),
   });
@@ -311,7 +311,7 @@ test('claude hook: a broken stdout exits 2 with a stderr reason instead of the i
   assert.match(err, /could not deliver/u);
 });
 
-test('claude hook: the production entry ignores a uid passed in argv (config and socket must be root-owned)', { skip: LINUX_ONLY }, async (t) => {
+test('claude hook: the production entry ignores a uid passed in argv (config and socket must be root-owned)', { skip: LINUX_ONLY || (process.getuid?.() === 0 && 'as root the test files are root-owned, which the production entry rightly accepts') }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const cfg = await configFile(t, svc.sockets.decision);

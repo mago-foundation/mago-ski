@@ -59,7 +59,7 @@ async function service(t: TestContext) {
     await rm(dir, { recursive: true, force: true });
   });
   const svc = createGateService({
-    stateDir: path.join(dir, 'state'), generationsDir: path.join(dir, 'gens'),
+    stateDir: path.join(dir, 'state'), generationsDir: path.join(dir, 'gens'), managedDir: path.join(dir, 'managed'),
     decisionSocketDir: path.join(dir, 'dec'), adminSocketDir: path.join(dir, 'adm'),
     rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: process.getuid!(),
   });
@@ -80,7 +80,7 @@ async function service(t: TestContext) {
     await updateRevocations({ rootKeyPath: org.rootKey, revocationsPath: org.revocations, out, now: new Date(), revokeDigest: digest, reason: 'test' });
     assert.equal((await svc.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(org.trustRoot), revocations_b64: await b64(out) })).ok, true);
   };
-  return { svc, install, revoke };
+  return { svc, install, revoke, managed: path.join(dir, 'managed') };
 }
 
 /** A socket server that answers each request line with `reply(line)`; undefined = say nothing. */
@@ -230,7 +230,7 @@ test('codex hook: malformed input denies (exit 2) in enforce, is silent in shado
   denied(await host.hook([bad, 'enforce', UID], submit('hi')), MSG_UNVERIFIED);
 });
 
-test('codex hook: the production entry ignores a uid in argv', { skip: LINUX_ONLY }, async (t) => {
+test('codex hook: the production entry ignores a uid in argv', { skip: LINUX_ONLY || (process.getuid?.() === 0 && 'as root the test files are root-owned, which the production entry rightly accepts') }, async (t) => {
   const { svc, install } = await service(t);
   await install('alpha');
   const r = await roots(t, ['alpha'], []);
@@ -561,4 +561,17 @@ test('codex hook: a repo Skill named like a just-revoked admin Skill is not reac
   silent(await host.hook([cfg, 'enforce', UID], START));
   await revoke(alpha);
   denied(await host.hook([cfg, 'enforce', UID], submit('$alpha', { cwd: repo })), MSG_APPROVED);
+});
+
+test('codex hook: admin Skills the service publishes (links to generations) are checked by their linked mention', { skip: LINUX_ONLY }, async (t) => {
+  const { svc, install, revoke, managed } = await service(t);
+  const digest = await install('alpha');
+  const r = { ...(await roots(t, [], ['rogue'])), admin: managed }; // a user Skill exists, so plain mentions are masked
+  const cfg = await configFile(t, svc.sockets.decision, r);
+  const host = fakeHost(t);
+  silent(await host.hook([cfg, 'enforce', UID], START));
+  silent(await host.hook([cfg, 'enforce', UID], submit(`use [$alpha](${managed}/alpha/SKILL.md)`)));
+  denied(await host.hook([cfg, 'enforce', UID], submit('use $alpha')), MSG_MASKED);
+  await revoke(digest); // enforce: the service removes the link, so the Skill is gone from the admin root
+  assert.deepEqual(await readdir(managed), []);
 });

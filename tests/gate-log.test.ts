@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { openDecisionLog, type LogInput } from '../src/gate/decision-log.ts';
+import { processInfo } from '../src/gate/proc.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
 import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 
@@ -151,7 +153,7 @@ async function fixture(t: TestContext, extra: Partial<GateServiceConfig> = {}) {
   const org = await setupOrg(t, { now: new Date() });
   const base = await dir(t);
   const cfg: GateServiceConfig = {
-    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), decisionSocketDir: path.join(base, 'dec'),
+    stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'), decisionSocketDir: path.join(base, 'dec'),
     adminSocketDir: path.join(base, 'adm'), rootFingerprint: org.rootKeyId, mode: 'enforce', hostExes: [NODE], rootUid: uid, buildId: 'test/9', ...extra,
   };
   const svc = createGateService(cfg);
@@ -301,4 +303,30 @@ test('service: unattributed requests are counted, not logged, and cannot evict r
   assert.deepEqual(await all(f.log), before);
   const st = await f.svc.handleAdmin({ v: 1, cmd: 'status' }) as { log?: { unattributed: Record<string, number>; lastSeq: number } };
   assert.deepEqual([st.log?.unattributed, st.log?.lastSeq], [{ 'no-session-record': 1000 }, 2]);
+});
+
+test('service: a flooding uid is rate-limited; refused requests are counted, not logged, and cannot evict real records', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t, { logMaxSegmentBytes: 64 * 1024, logMaxSegments: 2, maxRequestsPerSecPerUid: 2 }); // the flood unthrottled: ~400 KiB
+  await ask(f.svc, 'session-start');
+  assert.equal((await ask(f.svc, 'skill-invoke', 'alpha')).verdict, 'VERIFIED');
+  let refused = 0;
+  for (let i = 0; i < 1000; i++) if ((await ask(f.svc, 'skill-invoke', 'alpha')).code === 'internal') refused++;
+  const recs = await all(f.log);
+  assert.equal(recs[0]!['seq'], 1); // the first segment was not rotated away
+  assert.ok(recs.length <= 12, `logged ${recs.length}`); // burst (6) plus refill during the loop, never the flood
+  const st = await f.svc.handleAdmin({ v: 1, cmd: 'status' }) as { log?: { rateLimited: number } };
+  assert.equal(st.log?.rateLimited, refused);
+  assert.ok(refused >= 990);
+});
+
+test('service: a connection destroyed at its processing deadline cancels the remaining work on the real socket', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t, { processingMs: 100, processInfo: async (pid) => { await new Promise((r) => setTimeout(r, 300)); return processInfo(pid); } });
+  const c = net.connect(f.svc.sockets.decision);
+  await new Promise((r) => c.once('connect', r));
+  c.write(`${JSON.stringify({ v: 1, request_id: 'gone', event: 'skill-invoke', session: HOST, skill: 'alpha' })}\n`);
+  const reply = await new Promise<string>((r) => { let out = ''; c.on('data', (d) => { out += d; }); c.on('close', () => r(out)); });
+  assert.equal(reply, ''); // the deadline (100 ms) destroyed it while the service was still reading /proc (300 ms)
+  await new Promise((r) => setTimeout(r, 500));
+  // Not cancelled, it would have gone on to the admission check and logged no-session-record.
+  assert.equal((await all(f.log)).at(-1)!['result'], 'internal');
 });

@@ -69,11 +69,22 @@
 // needs only the admission store (so a session started while trust is stale is still recorded); skill events also
 // need a ready trust store at decision time. A Skill that is not installed answers NO_CERTIFICATE.
 //
-// ORDERING (admission.ts caller contract): install = stage+verify+publish generation, store certificate, THEN read
-// bootMs and publish to admission, so the stamp is never earlier than the generation's visibility. All admin
-// operations run through one queue. Uninstall leaves immutable generations on disk; hiding them is packet 9's job.
+// ORDERING (admission.ts caller contract): install = stage+verify+publish generation, store certificate, point the
+// host-visible link at it, THEN read bootMs and publish to admission, so the stamp is never earlier than the
+// generation's visibility. All admin operations run through one queue.
+// HOST-VISIBLE SKILLS. Hosts load Skills from `managedDir` (Claude Code's managed Skill folder, Codex's admin root), never
+// from the generation store. `<managedDir>/<name>` is a symlink to the current generation, replaced atomically (rename of
+// a fresh link) on install and removed BEFORE the admission uninstall (admin uninstall and auto-uninstall on revoke), so
+// the bytes a host can load are always a published, verified generation, and a removed Skill is hidden first. Anything
+// else at `<managedDir>/<name>` (a real directory, a file) is refused, never replaced. Immutable generations stay on disk.
+// UNVERIFIED: that Claude Code follows a symlinked Skill directory in its managed folder (live check pending; Codex
+// follows directory symlinks for admin scope, codex.ts).
+// RATE LIMIT. Each uid (the owner of the named pid, as for WORK LIMITS) may make `maxRequestsPerSecPerUid` decision
+// requests per second (burst 3x). Refused requests get gate-error `internal`, are counted in `status` (`log.rateLimited`)
+// and are NOT logged, so a local user flooding the world-accessible socket cannot rotate older records out of the decision
+// log faster than that rate allows for each uid it can name (default 10/s: about 4 KiB/s of records per named uid).
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, readdir, readFile, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, symlink, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { isRecord, MAX_CANONICAL_JSON_BYTES } from '../canonical-json.ts';
@@ -95,6 +106,8 @@ export interface GateServiceConfig {
   /** Holds trust/, admission/, certs/ and staging/. */
   stateDir: string;
   generationsDir: string;
+  /** Host-visible Skill folder (root-owned, not writable by employees): `<managedDir>/<name>` links to the current generation. */
+  managedDir: string;
   /** Directory of the decision socket (`decision.sock`, mode 0666) and of the admin socket (`admin.sock`, 0600). */
   decisionSocketDir: string;
   adminSocketDir: string;
@@ -123,6 +136,8 @@ export interface GateServiceConfig {
   maxSessionsPerUid?: number;
   /** Decision requests in flight per uid (default 8). */
   maxInflightPerUid?: number;
+  /** Decision requests per second per uid, burst 3x (default 10); see RATE LIMIT. */
+  maxRequestsPerSecPerUid?: number;
   /** Tests: replaces the /proc reader for a request's session pid. */
   processInfo?: typeof processInfo;
   /** Tests: replaces the reader of net.core.somaxconn (default /proc/sys/net/core/somaxconn; unreadable = no limit). */
@@ -244,6 +259,8 @@ export function createGateService(config: GateServiceConfig): GateService {
   const stateDir = path.resolve(config.stateDir);
   const certsDir = path.join(stateDir, 'certs');
   const stagingDir = path.join(stateDir, 'staging');
+  const generationsDir = path.resolve(config.generationsDir);
+  const managedDir = path.resolve(config.managedDir);
   let decisionCap = 0;
   const readFacts = config.processFacts ?? processFacts;
   const sweepMinMs = config.sweepMinIntervalMs ?? 1000;
@@ -344,6 +361,20 @@ export function createGateService(config: GateServiceConfig): GateService {
 
   const inflight = new Map<number, number>();
   const inflightCap = config.maxInflightPerUid ?? 8;
+  const ratePerSec = config.maxRequestsPerSecPerUid ?? 10;
+  const buckets = new Map<number, { tokens: number; at: number }>();
+  let rateLimited = 0;
+  /** Token bucket per uid: capacity 3x the rate, refilled continuously. */
+  function takeToken(uid: number): boolean {
+    const t = performance.now();
+    const b = buckets.get(uid) ?? { tokens: ratePerSec * 3, at: t };
+    b.tokens = Math.min(ratePerSec * 3, b.tokens + ((t - b.at) / 1000) * ratePerSec);
+    b.at = t;
+    buckets.set(uid, b);
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+  }
   const readInfo = config.processInfo ?? processInfo;
 
   const salt = randomBytes(32); // per service instance, never stored: logs from different boots cannot be joined by pid
@@ -360,7 +391,7 @@ export function createGateService(config: GateServiceConfig): GateService {
     ...(config.logFault ? { fault: config.logFault } : {}),
   }).then((l) => (dlog = l), (e) => { opening = undefined; throw e; }));
 
-  interface Meta { ref: string | null; digests: string[]; versions: { trustRootVersion: number; revocationsVersion: number } | null }
+  interface Meta { ref: string | null; digests: string[]; versions: { trustRootVersion: number; revocationsVersion: number } | null; limited?: boolean }
 
   async function handleDecision(request: GateRequest, ctx: { cancelled: boolean } = { cancelled: false }): Promise<GateResult> {
     const t0 = performance.now();
@@ -369,6 +400,7 @@ export function createGateService(config: GateServiceConfig): GateService {
     const enforce = mode !== 'shadow';
     const action = result.kind === 'ack' ? 'ack' : result.kind === 'verdict' && result.verdict === 'VERIFIED' ? 'allow' : enforce ? 'deny' : 'observe';
     const durable = action === 'allow' && enforce;
+    if (meta.limited) { rateLimited++; return result; } // counted, never logged (see RATE LIMIT)
     if (meta.ref === null) {
       // Never an unlogged allow: verdicts only exist after a session was derived; refuse if that ever changes.
       if (action === 'allow') return { v: 1, request_id: request.request_id, kind: 'gate-error', code: 'internal', mode };
@@ -412,6 +444,7 @@ export function createGateService(config: GateServiceConfig): GateService {
       } catch { return fail('no-session-record'); }
 
       if (ctx.cancelled) return fail('internal'); // the client is gone; nothing will be written
+      if (!takeToken(uid)) { meta.limited = true; return fail('internal'); }
       if ((inflight.get(uid) ?? 0) >= inflightCap) return fail('internal'); // cheap refusal: this uid already has its share in flight
       inflight.set(uid, (inflight.get(uid) ?? 0) + 1);
       try {
@@ -451,6 +484,22 @@ export function createGateService(config: GateServiceConfig): GateService {
     verdictCache.clear();
   }
 
+  /** Points `<managedDir>/<name>` at generation `digest` (atomic rename of a fresh symlink), or removes it (`null`). */
+  async function hostLink(name: string, digest: string | null): Promise<void> {
+    const file = path.join(managedDir, name);
+    if (digest === null) {
+      const info = await lstat(file).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return undefined; throw e; });
+      if (!info) return;
+      if (!info.isSymbolicLink()) throw new Error(`${file} is not a link made by the gate; refusing to remove it`);
+      await unlink(file);
+      return;
+    }
+    const tmp = path.join(managedDir, `.${name}.${randomBytes(8).toString('hex')}.tmp`);
+    await symlink(path.join(generationsDir, name, hex(digest)), tmp);
+    // rename over a symlink replaces it atomically; over a real directory it fails (EISDIR), which refuses the install.
+    try { await rename(tmp, file); } catch (e) { await unlink(tmp).catch(() => {}); throw e; }
+  }
+
   // REFRESH + RECONCILE (admin queue only). The inbox is offered to the trust store; a rejected or unreadable inbox changes
   // nothing and extends nothing. Reconcile then re-checks the CURRENT generation of every installed Skill (cache bypassed):
   // enforce uninstalls a non-VERIFIED one (no fallback to an older generation), shadow only records would-uninstall.
@@ -475,6 +524,7 @@ export function createGateService(config: GateServiceConfig): GateService {
       try { verdict = await check(name, digest, undefined, true); } catch { continue; } // unreadable evidence: leave as is
       if (verdict === 'VERIFIED') continue;
       if (mode === 'shadow') { wouldUninstall.push({ name, digest, verdict }); continue; }
+      await hostLink(name, null); // hide it from hosts first; a failure stops here and is reported as reconcileError
       const ms = await bootMs();
       if ((await admission.uninstall(name, ms)).ok) {
         gone.push({ name, digest, verdict });
@@ -511,7 +561,7 @@ export function createGateService(config: GateServiceConfig): GateService {
         return {
           ok: true, ready: ready && health === 'ready', mode, trust: c.ready ? 'ready' : c.reason, admission: health,
           revocationsExpiresAt: c.ready ? formatTimestamp(c.context.revocations.expiresAt) : null, // the remaining offline window
-          log: { state: dlog && logHealthy ? 'ready' : 'degraded', degradedCount, unattributed: { ...unattributed }, ...(dlog?.status() ?? { segment: null, lastSeq: 0, chainBreaks: 0 }) },
+          log: { state: dlog && logHealthy ? 'ready' : 'degraded', degradedCount, unattributed: { ...unattributed }, rateLimited, ...(dlog?.status() ?? { segment: null, lastSeq: 0, chainBreaks: 0 }) },
           lastRefresh: { ...refreshStatus }, reconcileError, autoUninstalled, wouldUninstall,
         };
       }
@@ -534,18 +584,23 @@ export function createGateService(config: GateServiceConfig): GateService {
         const current = await trust.current(now());
         if (!current.ready) return { ok: false, error: `trust not ready: ${current.reason}` };
         const r = await installSkill(source, stagingDir, {
-          generationsRoot: path.resolve(config.generationsDir), skillName: name,
+          generationsRoot: generationsDir, skillName: name,
           certificates: [{ source: 'admin', bytes: cert }], context: current.context, now: now(), buildProfile: 'gate-service/v1',
         });
         if (!r.ok) return { ok: false, error: `${r.reason}: ${r.detail}` };
         const digest = r.manifest.treeDigest;
         await storeCertificate(name, digest, cert);
+        await hostLink(name, digest); // hosts can load it from here on
         const p = await stamped((ms) => admission!.publish(name, digest, ms)); // after the generation is visible
-        return p.ok ? { ok: true, digest, created: r.created } : { ok: false, error: `publish refused: ${p.reason}` };
+        if (p.ok) return { ok: true, digest, created: r.created };
+        await hostLink(name, null).catch(() => {}); // not recorded: hide it rather than serve unrecorded bytes
+        return { ok: false, error: `publish refused: ${p.reason}` };
       }
       case 'uninstall': {
         onlyKeys(raw, ['skill_name']);
-        const u = await admission.uninstall(validateSkillName(raw['skill_name']), await bootMs());
+        const name = validateSkillName(raw['skill_name']);
+        await hostLink(name, null); // hidden from hosts before the record changes
+        const u = await admission.uninstall(name, await bootMs());
         return u.ok ? { ok: true } : { ok: false, error: `uninstall refused: ${u.reason}` };
       }
       case 'refresh': {
@@ -573,6 +628,7 @@ export function createGateService(config: GateServiceConfig): GateService {
       try {
         await ownedDir(stateDir, config.rootUid, 0o700, true);
         for (const d of [stagingDir, certsDir]) await ownedDir(d, config.rootUid, d === certsDir ? 0o755 : 0o700, d !== certsDir);
+        await ownedDir(managedDir, config.rootUid, 0o755, false);
         trust = await openTrustStore(path.join(stateDir, 'trust'), { rootFingerprint: config.rootFingerprint, now: now(), ...(config.maxListAgeMs !== undefined ? { maxListAgeMs: config.maxListAgeMs } : {}) });
         admission = await openAdmissionStore(path.join(stateDir, 'admission'), { bootId: await bootId(), ...(config.admissionFault ? { fault: config.admissionFault } : {}) });
         ready = true;
@@ -591,8 +647,8 @@ export function createGateService(config: GateServiceConfig): GateService {
       decisionCap = Math.min(config.maxConnections ?? 1024, soft - 260, somax);
       await ownedDir(config.decisionSocketDir, config.rootUid, 0o755, false);
       await ownedDir(config.adminSocketDir, config.rootUid, 0o700, true);
-      const decision = serveOnce(live, DEFAULT_STRICT_JSON_LIMITS.maxBytes, config.deadlineMs ?? 300, config.processingMs ?? 5000, decisionCap, async (line) => {
-        try { return serializeGateResult(await handleDecision(parseGateRequest(line))); } catch { return undefined; }
+      const decision = serveOnce(live, DEFAULT_STRICT_JSON_LIMITS.maxBytes, config.deadlineMs ?? 300, config.processingMs ?? 5000, decisionCap, async (line, ctx) => {
+        try { return serializeGateResult(await handleDecision(parseGateRequest(line), ctx)); } catch { return undefined; }
       });
       const adminServer = serveOnce(live, ADMIN_LIMITS.maxBytes, config.deadlineMs ?? 2000, config.processingMs ?? 60_000, 4, async (line) => {
         let result: AdminResult;
