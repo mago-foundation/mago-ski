@@ -47,7 +47,7 @@ Anyone can install this version for free. It runs on Linux and macOS.
 
 ## Built, not released yet (the company gate)
 
-This part is finished and tested on its own, on Linux only. It is not yet packaged, not yet part of the mago-ski command, and not yet tried with the real Claude Code and Codex.
+This part is finished and tested on Linux only. It is not yet packaged and not yet part of the mago-ski command. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions.
 
 **Installing Skills**
 
@@ -64,6 +64,7 @@ This part is finished and tested on its own, on Linux only. It is not yet packag
 - If it cannot check, it blocks rather than lets the Skill through.
 - A Skill whose approval is taken back is blocked at its next use, even in a session that is already open. The session itself keeps running.
 - It writes the administrator settings files that switch this on for Claude Code and Codex.
+- In Claude Code, Skills the administrator did not install are hidden from the AI as well as blocked. In Codex they stay visible in its list of Skills and are only blocked when used, and users have to call an installed Skill by its full link (`[$name](/etc/codex/skills/name/SKILL.md)`), not just `$name`.
 
 **Control and records**
 

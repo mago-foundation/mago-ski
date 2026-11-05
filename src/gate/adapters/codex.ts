@@ -22,7 +22,9 @@
 //     non-admin Skill exists or the walk is incomplete, a bare `$name` that equals an admin Skill name is BLOCKED; only a
 //     linked mention `[$alpha](<admin_root>/alpha/SKILL.md)` whose path resolves (realpath) to exactly that file is checked
 //     with the service. USABILITY COST: in a repo that ships its own Skills, admin Skills must be invoked by link (or the
-//     repo Skills removed). The exact selector behaviour is UNVERIFIED until the live test.
+//     repo Skills removed). LIVE TEST (0.163.0 and 0.166.0, docs/spikes/codex-gate-live.md): Codex writes its bundled
+//     Skills to <codex_home>/skills/.system at startup, so a non-admin Skill always exists and EVERY bare mention of an
+//     admin Skill is blocked; in practice only the linked form works.
 //   * PreToolUse (Bash): matching command text is BYPASSABLE (globs, variables, scripts) = defence in depth only.
 //   * Non-admin roots are walked like Codex (depth 6, hidden dirs skipped, directory symlinks followed with loop
 //     detection, cap 2000 dirs). A linked mention whose path is inside a non-admin root is blocked. A Skill created after
@@ -48,8 +50,8 @@
 //   (b) Codex scans each text item separately while the hook sees them joined, so a token split across items can differ
 //       (needs a multi-text client).
 //   (c) The PreToolUse shell check is best-effort.
-//   (d) In enforce mode Codex coverage is weaker than Claude Code. Treat the repo and user routes as audit-level until the
-//       live test.
+//   (d) In enforce mode Codex coverage is weaker than Claude Code. The live test showed that deny_read does not hide user
+//       Skills from Codex's catalog, so the repo and user routes are both hook-only: audit-level.
 //   (e) Startup state (founder decision 2026-11-03, accepted limit): Codex fixes HOME, CODEX_HOME (canonicalised) and
 //       `<codex_home>/.env` once at startup; the hook only sees their state now. An employee can start Codex pointed at
 //       unapproved Skills (via .env HOME, or a CODEX_HOME symlink) and undo it before prompting. Needs an endpoint control
