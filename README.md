@@ -102,7 +102,7 @@ mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 o
 | **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
 | **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect`, plus key, root, revoke and approve commands. Run `mago-ski --help` | |
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
-| **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Read-only toward policy and host state; it never approves | [gui/README.md](gui/README.md) |
+| **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Never writes host state. Its administration rack lets an approver sign certificates, with the role proven by the approver's key against an admin-owned organisation pin ([spec](docs/spec/gui-admin-rack-v1.md)) | [gui/README.md](gui/README.md) |
 
 ## Verdicts
 

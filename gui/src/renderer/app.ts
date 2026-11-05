@@ -4,38 +4,15 @@ import type {
   ActionResult, ChangeView, DiffLine, FileChangeView, HistoryEvent, InstanceDetail, InstanceView,
   ObservationState, PkiResultView, Prefs, RendererApi, ServiceView,
 } from '../service/types.ts';
+import { renderAdmin } from './admin.ts';
 import { actionDigest, detailMatches } from './binding.ts';
+import { $, h } from './dom.ts';
 
 declare global {
   interface Window { magoSki: RendererApi }
 }
 
 const api = window.magoSki;
-
-type Child = Node | string | null | undefined | false;
-type Props = Record<string, string | number | boolean | null | undefined | ((event: Event) => void)>;
-
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = {}, ...children: Child[]): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (value === null || value === undefined || value === false) continue;
-    if (typeof value === 'function') el.addEventListener(key.slice(2).toLowerCase(), value);
-    else if (key === 'class') el.className = String(value);
-    else if (key === 'style') el.style.cssText = String(value);
-    else el.setAttribute(key, value === true ? '' : String(value));
-  }
-  for (const child of children) {
-    if (child === null || child === undefined || child === false) continue;
-    el.append(typeof child === 'string' ? document.createTextNode(child) : child);
-  }
-  return el;
-}
-
-function $(id: string): HTMLElement {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`missing #${id}`);
-  return el;
-}
 
 // ------------------------------------------------------------------ vocabulary
 
@@ -90,7 +67,7 @@ function pkiBadge(pki: PkiResultView | null, view: ServiceView, current = true):
 
 type Device = 'monitor' | 'gate' | 'eq' | 'limiter' | 'clear';
 let view: ServiceView | null = null;
-let tab: 'skills' | 'activity' | 'settings' = 'skills';
+let tab: 'skills' | 'activity' | 'settings' | 'admin' = 'skills';
 let device: Device = 'monitor';
 let selectedId: string | null = null;
 let detail: InstanceDetail | null = null;
@@ -615,12 +592,13 @@ function apply(next: ServiceView): void {
   if (tab === 'skills') { renderChain(next); renderDetail(); }
   if (tab === 'activity') renderActivity(next);
   if (tab === 'settings') renderSettings(next);
+  if (tab === 'admin') renderAdmin($('tab-admin'), next, api);
 }
 
 function showTab(next: typeof tab): void {
   tab = next;
   document.querySelectorAll<HTMLElement>('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === next)));
-  for (const name of ['skills', 'activity', 'settings'] as const) ($(`tab-${name}`) as HTMLElement).hidden = name !== next;
+  for (const name of ['skills', 'activity', 'settings', 'admin'] as const) ($(`tab-${name}`) as HTMLElement).hidden = name !== next;
   if (view) apply(view);
 }
 

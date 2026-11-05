@@ -48,3 +48,19 @@ test('approve --expect-digest rejects a malformed digest', async (t) => {
     /expected digest/,
   );
 });
+
+test('approveSkill accepts an approver key that is already loaded, and exactly one key source', async (t) => {
+  const { loadPrivateKey } = await import('../src/keys.ts');
+  const { parseCertificate } = await import('../src/certificate.ts');
+  const { readFile } = await import('node:fs/promises');
+  const org = await setupOrg(t, { scopes: ['docs-*'] });
+  const skill = await writeSkill(path.join(org.dir, 'skills'), 'docs-helper');
+  const reviewed = (await collectSkillTree(skill)).digest;
+  const key = await loadPrivateKey(org.approverKey);
+
+  const issued = await approveSkill({ skillDir: skill, approverKey: key, now: T0, expires: '30d', reason: 'reviewed', expectDigest: reviewed });
+  assert.equal(parseCertificate(await readFile(issued.path)).approverKeyId, key.keyId);
+
+  await assert.rejects(approveSkill({ skillDir: skill, now: T0, expires: '30d', reason: 'r' }), /exactly one of approverKeyPath and approverKey/u);
+  await assert.rejects(approveSkill({ skillDir: skill, approverKeyPath: org.approverKey, approverKey: key, now: T0, expires: '30d', reason: 'r' }), /exactly one/u);
+});

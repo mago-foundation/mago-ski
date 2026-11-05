@@ -3,7 +3,7 @@ import path from 'node:path';
 import { requireString } from './canonical-json.ts';
 import { issueCertificate, parseCertificate } from './certificate.ts';
 import { readRegularFile, realpathAllowingMissing, resolveOutside, writeFileAtomic, writeNewFile } from './fs-safe.ts';
-import { loadPrivateKey, loadPublicKey, validateKeyId } from './keys.ts';
+import { loadPrivateKey, loadPublicKey, validateKeyId, type PrivateKeyInfo } from './keys.ts';
 import { validateDigest, validateScope } from './names.ts';
 import { readRevocationsForUpdate, signRevocations, type Revocations } from './revocations.ts';
 import { addDuration, truncateToSecond } from './time.ts';
@@ -289,7 +289,9 @@ export async function updateRevocations(options: {
 
 export async function approveSkill(options: {
   skillDir: string;
-  approverKeyPath: string;
+  /** The approver's private key file; or pass `approverKey`, already loaded (exactly one of the two). */
+  approverKeyPath?: string;
+  approverKey?: PrivateKeyInfo;
   now: Date;
   expires: string;
   reason: string;
@@ -302,10 +304,19 @@ export async function approveSkill(options: {
   const skillDir = path.resolve(options.skillDir);
   const expected = options.expectDigest === undefined ? null : validateDigest(options.expectDigest, 'expected digest');
 
+  if ((options.approverKeyPath === undefined) === (options.approverKey === undefined)) {
+    throw new Error('Pass exactly one of approverKeyPath and approverKey');
+  }
+
   await requireSkillRoot(skillDir);
-  // Verify the key path is outside the Skill directory before reading the private key.
-  await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
-  const approver  = await loadPrivateKey(options.approverKeyPath);
+  let approver: PrivateKeyInfo;
+  if (options.approverKeyPath !== undefined) {
+    // Verify the key path is outside the Skill directory before reading the private key.
+    await resolveOutside(options.approverKeyPath, skillDir, 'Approver private key');
+    approver = await loadPrivateKey(options.approverKeyPath);
+  } else {
+    approver = options.approverKey!;
+  }
   const tree      = await collectSkillTree(skillDir, { includeContents: true });
   // Taken from the same SKILL.md bytes that are hashed and signed, so the name cannot differ from the reviewed version.
   const skillName = skillNameFromSkillFile(skillDir, tree.contents!.get(SKILL_FILENAME), options.name);

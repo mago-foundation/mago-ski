@@ -1,6 +1,6 @@
 # GUI administration rack v1
 
-Status: **draft.** Phases 1 to 3 are specified here; none is implemented yet. Phase 1 is the organisation pin, identity, the template framework and the *Approve a Skill version* template. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
+Status: **draft.** Phase 1 (the organisation pin, identity, the template framework and the *Approve a Skill version* template) is implemented in the GUI proof of concept (`gui/src/service/admin.ts`, `gui/src/renderer/admin.ts`, tests in `gui/tests/admin.test.ts`). Phases 2 and 3 are specified here and not yet implemented. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
 
 The [GUI](../../gui/README.md) began as a read-only companion: it showed how installed Skills change and what the host policy decides, and never signed anything. This document adds an **administration rack**, so approvers and administrators can do in the GUI everything they can do with the CLI, in fixed chains of devices (templates), next to the observation rack.
 

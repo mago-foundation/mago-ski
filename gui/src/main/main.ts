@@ -3,6 +3,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, session, type IpcMainInvokeEvent } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { AdminSession, LIFETIMES, MAX_REASON } from '../service/admin.ts';
 import { ObservationService } from '../service/service.ts';
 import type { InstanceView, Prefs } from '../service/types.ts';
 
@@ -19,6 +20,7 @@ if (process.env.MAGO_SKI_GUI_DATA) app.setPath('userData', path.resolve(process.
 
 let window: BrowserWindow | null = null;
 let service: ObservationService | null = null;
+let admin: AdminSession | null = null;
 
 function requireString(value: unknown, pattern: RegExp, label: string): string {
   if (typeof value !== 'string' || !pattern.test(value)) throw new Error(`invalid ${label}`);
@@ -71,10 +73,42 @@ function registerIpc(svc: ObservationService): void {
     return svc.view();
   });
   handle('history:dismiss-reset', async () => { await svc.dismissHistoryReset(); return svc.view(); });
+  registerAdminIpc(svc);
   handle('clipboard:write', (text) => {
     if (typeof text !== 'string' || text.length > 4096) throw new Error('invalid text');
     clipboard.writeText(text);
   });
+}
+
+/**
+ * Administration rack (docs/spec/gui-admin-rack-v1.md). The renderer never names a file or sees key material: the key is
+ * chosen in a dialog owned by this process and stays in the AdminSession.
+ */
+function registerAdminIpc(svc: ObservationService): void {
+  const session = new AdminSession({
+    instance: (id) => {
+      const found = svc.view().instances.find((i) => i.id === id);
+      return found ? { path: found.path, name: found.name } : null;
+    },
+    hostPolicyPath: () => svc.view().host.policy.path,
+  });
+  admin = session;
+  handle('admin:status', () => session.status());
+  handle('admin:arm', async () => {
+    const options: Electron.OpenDialogOptions = { title: '서명 키 불러오기 (개인 키 PEM)', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'PEM', extensions: ['pem'] }, { name: '모든 파일', extensions: ['*'] }] };
+    const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, reason: 'cancelled' };
+    return await session.arm(picked.filePaths[0]);
+  });
+  handle('admin:disarm', () => { session.disarm(); return session.status(); });
+  handle('admin:inspect', (id) => session.inspect(requireString(id, ID, 'instance id')));
+  handle('admin:confirm-inspected', (id, digest) => session.confirmInspected(requireString(id, ID, 'instance id'), requireString(digest, DIGEST, 'digest')));
+  handle('admin:approve', (id, digest, lifetime, reason) => {
+    if (typeof lifetime !== 'string' || !(LIFETIMES as readonly string[]).includes(lifetime)) throw new Error('invalid lifetime');
+    if (typeof reason !== 'string' || reason.length > MAX_REASON) throw new Error('invalid reason');
+    return session.approve(requireString(id, ID, 'instance id'), requireString(digest, DIGEST, 'digest'), lifetime as (typeof LIFETIMES)[number], reason);
+  });
+  handle('admin:check', (id) => session.check(requireString(id, ID, 'instance id')));
 }
 
 function createWindow(): BrowserWindow {
@@ -112,7 +146,7 @@ async function main(): Promise<void> {
   app.on('second-instance', () => { window?.show(); window?.focus(); });
   // Closing the window stops observation; the window footer says so.
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { void service?.stop(); });
+  app.on('before-quit', () => { admin?.disarm(); void service?.stop(); });
   await service.start();
 }
 
