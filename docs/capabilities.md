@@ -47,7 +47,7 @@ Anyone can install this version for free. It runs on Linux and macOS.
 
 ## Built, not released yet (the company gate)
 
-This part is finished and tested on its own, on Linux only. It is not yet packaged, not yet part of the mago-ski command, and not yet tried with the real Claude Code and Codex.
+This part is finished and tested on Linux only. It is not yet packaged and not yet part of the mago-ski command. It has been tried with the real Claude Code (version 2.1.318, non-interactive sessions), where it worked as described below; it has not yet been tried with the real Codex.
 
 **Installing Skills**
 

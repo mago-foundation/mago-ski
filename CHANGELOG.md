@@ -11,6 +11,7 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 - **Freshness** (optional, in `mago.policy/v2`): a separate timestamp key signs a short-lived statement of the exact root event log, trust root and revocation list. A host fed old files stops trusting anything once the newest timestamp expires (24 hours by default, at most 7 days).
 - Commands: `recovery init`, `root-events init | prepare-revoke | prepare-rotate | show | sign | append` (`show` and `sign` print what the event does; with `--policy` they check it is the next event of the published log), `timestamp sign`, `root adopt` (re-sign the trust documents with the new root after a rotate) and `policy check` (check a policy the way a host does, without writing host state).
 - Host state `mago.host-state/v2`: root event progress per pinned root (rollback and fork detection, and whether the root was left revoked) and timestamp versions per timestamp key. Hosts keep writing v1 until they apply a root event or timestamp. Before writing, a host re-reads the state file and merges it, so processes sharing one state file cannot erase each other's progress.
+- Live test of the E3 gate with the real Claude Code (`npm run test:live:claude-code`, root, Linux; [results](docs/spikes/claude-code-gate-live.md)): on 2.1.318 the gate's symlinked managed Skills load, the managed-settings locks hide project, user and bundled Skills, and the hooks deny planted, revoked and unverifiable Skills on both the Skill tool and `/name`.
 
 ### Changed
 

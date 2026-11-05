@@ -37,6 +37,7 @@
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check && npm run build",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "test:live:claude-code": "node tests/live/claude-code-gate.live.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {

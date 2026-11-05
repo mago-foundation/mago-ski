@@ -77,8 +77,8 @@
 // a fresh link) on install and removed BEFORE the admission uninstall (admin uninstall and auto-uninstall on revoke), so
 // the bytes a host can load are always a published, verified generation, and a removed Skill is hidden first. Anything
 // else at `<managedDir>/<name>` (a real directory, a file) is refused, never replaced. Immutable generations stay on disk.
-// UNVERIFIED: that Claude Code follows a symlinked Skill directory in its managed folder (live check pending; Codex
-// follows directory symlinks for admin scope, codex.ts).
+// Claude Code follows a symlinked Skill directory in its managed folder (/etc/claude-code/.claude/skills): verified live on
+// 2.1.318 (-p mode), docs/spikes/claude-code-gate-live.md. Codex follows directory symlinks for admin scope (codex.ts).
 // RATE LIMIT. Each uid (the owner of the named pid, as for WORK LIMITS) may make `maxRequestsPerSecPerUid` decision
 // requests per second (burst 3x). Refused requests get gate-error `internal`, are counted in `status` (`log.rateLimited`)
 // and are NOT logged, so a local user flooding the world-accessible socket cannot rotate older records out of the decision

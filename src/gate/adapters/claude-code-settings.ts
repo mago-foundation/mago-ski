@@ -1,6 +1,8 @@
 // Managed-settings generator for the Claude Code hook adapter. Pure: no file access.
 // EVIDENCE: every field marked [cc0.4] is copied from .agent/reviews/cc0.4-fixtures/setup.sh as tested on Claude Code CLI
-// 2.1.296 / Linux (cc0.3-b2b-enforcement-check.md, cc0.4-enforcement-verification.md). Unverified for any other version;
+// 2.1.296 / Linux (cc0.3-b2b-enforcement-check.md, cc0.4-enforcement-verification.md). The generated settings were also
+// run live on 2.1.318 (-p mode) with the real service and hook: the locks hid every project, user and bundled Skill
+// (tests/live/claude-code-gate.live.ts, docs/spikes/claude-code-gate-live.md). Unverified for any other version;
 // the native locks are bounded spike observations, not a broad host-level guarantee.
 // ENDPOINT REQUIREMENTS (founder-accepted deployment requirements, NOT enforced by this file): the hook command is
 // started with `env -i`, which scrubs NODE_OPTIONS/NODE_PATH/PYTHONPATH etc. for the interpreter, but loader-time
