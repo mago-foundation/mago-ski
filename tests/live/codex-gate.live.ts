@@ -13,7 +13,7 @@
 // private mount namespace and bind-mounts a temporary folder over /etc/codex, so the machine's own is never touched.
 // Not part of `npm test`; prints one JSON report on stdout and exits 1 if any expectation failed.
 import { execFileSync, spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -224,7 +224,24 @@ const SCENARIOS: Record<string, Scenario> = {
   },
 };
 
+/**
+ * Codex's workspace-write sandbox creates empty `.git`, `.agents` and `.codex` mount targets in its writable roots,
+ * /tmp included. A /tmp/.git makes the Pi host tests treat /tmp as a project, so remove the ones this run created.
+ */
+const PLACEHOLDERS = ['.git', '.agents', '.codex'].map((name) => path.join('/tmp', name));
+function removeCodexPlaceholders(existedBefore: Set<string>): void {
+  for (const dir of PLACEHOLDERS) {
+    if (existedBefore.has(dir) || !existsSync(dir)) continue;
+    try {
+      if (readdirSync(dir).length === 0) rmdirSync(dir);
+    } catch {
+      // Not ours to judge: leave anything that is not an empty directory.
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  const placeholdersBefore = new Set(PLACEHOLDERS.filter((dir) => existsSync(dir)));
   if (!CODEX) {
     console.log(JSON.stringify({ skipped: 'set CODEX_BIN to the native codex binary' }));
     return;
@@ -258,6 +275,7 @@ async function main(): Promise<void> {
     await w.stop();
     api.close();
     await w.unmount();
+    removeCodexPlaceholders(placeholdersBefore);
     if (process.env.MAGO_LIVE_KEEP !== '1') await rm(w.root, { recursive: true, force: true });
     console.log(JSON.stringify({
       codex: execFileSync(CODEX, ['--version'], { encoding: 'utf8' }).trim(), node: process.version, adminSkills: ADMIN_SKILLS, hostUser: HOST_USER ?? 'root',
