@@ -10,7 +10,7 @@ import {
   parseRootEventLog, parseRootEventPayload, recoverySetJson, requireDisplaySafeText, requiredSigners, ROOT_EVENT_PAYLOAD_TYPE,
   rootEventLogBytes, unsignedEventEnvelope, walkRootEvents, type MultiEnvelope, type RecoverySet, type RootEvent, type RootWalk,
 } from './root-events.ts';
-import { addDuration, parseDuration, truncateToSecond } from './time.ts';
+import { addDuration, formatTimestamp, parseDuration, truncateToSecond } from './time.ts';
 import { MAX_TIMESTAMP_BYTES, readTimestampForUpdate, signTimestamp, type Timestamp } from './timestamp.ts';
 import { sha256Hex } from './tree-digest.ts';
 import { readTrustRootForUpdate, signTrustRoot, type TrustRoot } from './trust-root.ts';
@@ -148,9 +148,45 @@ async function readProposal(file: string): Promise<{ envelope: MultiEnvelope; ev
   return { envelope: { payloadType: parsed.payloadType, payload: parsed.payload, signatures: parsed.signatures }, event };
 }
 
-/** Adds one signature to a proposal. Refuses a key the event does not name as a signer, new root or new timestamp key. */
-export async function signRootEvent(options: { proposalPath: string; keyPath: string }): Promise<{ keyId: string; signed: string[]; missing: string[] }> {
+/** What a trustee should compare with what was agreed before signing. */
+export function describeRootEvent(event: RootEvent): Record<string, unknown> {
+  return {
+    sequence:      event.sequence,
+    action:        event.action,
+    root_key_id:   event.rootKeyId,
+    issued_at:     formatTimestamp(event.issuedAt),
+    reason:        event.reason,
+    signers:       event.signers.map((key) => key.keyId),
+    ...(event.newRoot ? { new_root: event.newRoot.keyId } : {}),
+    ...(event.newRecovery ? { new_recovery: recoverySetJson(event.newRecovery) } : {}),
+    ...(event.newTimestamp ? { new_timestamp: event.newTimestamp.keyId } : {}),
+  };
+}
+
+/** Refuses a proposal that does not extend the policy's log as it is now (wrong number or root key). */
+async function checkExtendsLog(policy: Policy, event: RootEvent, now: Date): Promise<void> {
+  const state = await currentRootState(policy, now);
+  if (event.sequence !== state.count + 1)
+    throw new Error(`The proposal is event ${event.sequence}, but the log has ${state.count} event(s); prepare it again against the published log`);
+  if (event.rootKeyId !== state.activeRootKeyId)
+    throw new Error(`The proposal names root key ${event.rootKeyId}, but the active root key is ${state.activeRootKeyId}`);
+}
+
+/** Reads a proposal and, with a policy, checks that it extends the published log. Signs nothing. */
+export async function showRootEvent(options: { proposalPath: string; policy?: Policy | undefined; now: Date }): Promise<{ event: RootEvent; signed: string[]; missing: string[] }> {
   const { envelope, event } = await readProposal(options.proposalPath);
+  if (options.policy) await checkExtendsLog(options.policy, event, options.now);
+  const signed = envelope.signatures.map((item) => item.keyid);
+  return { event, signed, missing: requiredSigners(event).map((key) => key.keyId).filter((keyId) => !signed.includes(keyId)) };
+}
+
+/**
+ * Adds one signature to a proposal. Refuses a key the event does not name as a signer, new root or new timestamp key,
+ * and, with a policy, a proposal that does not extend the published log. Returns the event so it can be shown.
+ */
+export async function signRootEvent(options: { proposalPath: string; keyPath: string; policy?: Policy | undefined; now?: Date | undefined }): Promise<{ keyId: string; event: RootEvent; signed: string[]; missing: string[] }> {
+  const { envelope, event } = await readProposal(options.proposalPath);
+  if (options.policy) await checkExtendsLog(options.policy, event, options.now ?? new Date());
   const key      = await loadPrivateKey(options.keyPath);
   const required = requiredSigners(event).map((item) => item.keyId);
   if (!required.includes(key.keyId))
@@ -158,7 +194,7 @@ export async function signRootEvent(options: { proposalPath: string; keyPath: st
   const next = addEnvelopeSignature(envelope, key.keyId, key.privateKey);
   await writeFileAtomic(options.proposalPath, canonicalBytes(next));
   const signed = next.signatures.map((item) => item.keyid);
-  return { keyId: key.keyId, signed, missing: required.filter((keyId) => !signed.includes(keyId)) };
+  return { keyId: key.keyId, event, signed, missing: required.filter((keyId) => !signed.includes(keyId)) };
 }
 
 /**

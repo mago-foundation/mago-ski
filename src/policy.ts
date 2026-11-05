@@ -38,9 +38,10 @@ interface RootState {
 }
 
 /** Host state: versions per root key (v1), plus root event progress per pinned root and timestamp versions per key (v2). */
-interface HostState {
+export interface HostState {
   roots:      Record<string, RootState>;
-  rootEvents: Record<string, { sequence: number; event_digest: string }>;
+  /** `revoked` is set when the last applied event left the root revoked (written only when true). */
+  rootEvents: Record<string, { sequence: number; event_digest: string; revoked?: true }>;
   timestamps: Record<string, { version: number }>;
   /** The state was read as v2; it is never written back as v1. */
   v2:         boolean;
@@ -265,10 +266,14 @@ async function readState(statePath: string): Promise<HostState> {
     if (!isRecord(value.root_events) || !isRecord(value.timestamps))
       throw new Error('host state file has an unsupported format');
     for (const [rootKeyId, entry] of Object.entries(value.root_events)) {
-      const fields = exactKeys(entry, ['sequence', 'event_digest'], 'host state root_events');
+      const withRevoked = isRecord(entry) && 'revoked' in entry;
+      const fields = exactKeys(entry, withRevoked ? ['sequence', 'event_digest', 'revoked'] : ['sequence', 'event_digest'], 'host state root_events');
+      if (withRevoked && fields.revoked !== true)
+        throw new Error('host state root_events revoked must be true when present');
       state.rootEvents[validateKeyId(rootKeyId, 'host state root_events key')] = {
         sequence:     stateCount(fields.sequence, 'host state root_events sequence'),
         event_digest: validateKeyId(fields.event_digest, 'host state root_events event_digest'),
+        ...(withRevoked ? { revoked: true as const } : {}),
       };
     }
     for (const [keyId, entry] of Object.entries(value.timestamps)) {
@@ -277,6 +282,32 @@ async function readState(statePath: string): Promise<HostState> {
     }
   }
   return state;
+}
+
+/**
+ * Combines this load's state with the state file as it is now, so two hosts sharing one state file (two Pi sessions,
+ * Pi and the CLI) cannot erase each other's progress: every counter keeps its highest value, the root event entry
+ * with the higher sequence wins (on a tie with different digests, the one already on disk stays, so the fork is
+ * reported on the next load), and v2 is never written back as v1.
+ */
+export function mergeHostState(ours: HostState, disk: HostState): HostState {
+  const merged: HostState = { roots: { ...disk.roots }, rootEvents: { ...disk.rootEvents }, timestamps: { ...disk.timestamps }, v2: ours.v2 || disk.v2 };
+  for (const [keyId, entry] of Object.entries(ours.roots)) {
+    const other = merged.roots[keyId];
+    merged.roots[keyId] = other ? {
+      trust_root_version:  Math.max(entry.trust_root_version, other.trust_root_version),
+      revocations_version: Math.max(entry.revocations_version, other.revocations_version),
+    } : entry;
+  }
+  for (const [keyId, entry] of Object.entries(ours.rootEvents)) {
+    const other = merged.rootEvents[keyId];
+    if (!other || entry.sequence > other.sequence) merged.rootEvents[keyId] = entry;
+  }
+  for (const [keyId, entry] of Object.entries(ours.timestamps)) {
+    const other = merged.timestamps[keyId];
+    if (!other || entry.version > other.version) merged.timestamps[keyId] = entry;
+  }
+  return merged;
 }
 
 function stateBytes(state: HostState): Buffer {
@@ -317,42 +348,66 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
     return failure((error as Error).message);
   }
   const recovery = policy.recovery;
-  let activeRootKeyId = policy.rootKeyId;
+  const pinned = policy.rootKeyId;
+  let activeRootKeyId = pinned;
   let walk: RootWalk | null = null;
   let logBytes: Buffer | null = null;
+
+  /*
+   * A revoke this host has applied stays in force while the log cannot be checked: making the log missing, malformed,
+   * shorter or forked must not turn root-revoked into trust-unavailable, which shadow mode would let through.
+   */
+  const blocked = (problem: string, entry = state.rootEvents[pinned]): TrustContextResult => entry?.revoked
+    ? failure(`root key was revoked by root event ${entry.sequence}, and the root event log cannot be checked now (${problem}); waiting for a valid log with a rotation`, { rootRevoked: true })
+    : failure(problem);
+
   // Root event progress is recorded as soon as the log is accepted, even if a later step fails: the events are signed
   // by recovery keys, and remembering them is what stops a host being moved back to a log without a revoke.
   let stateChanged = false;
-  const saveState = async (): Promise<string | null> => {
+  const saveState = async (): Promise<TrustContextResult | null> => {
     if (!record || !stateChanged) return null;
     try {
+      let disk: HostState | null = null;
+      try {
+        disk = await readState(policy.statePath!);
+      } catch {
+        disk = null; // unreadable now: this load's state replaces it, as before
+      }
+      if (disk) state = mergeHostState(state, disk);
       await writeFileAtomic(policy.statePath!, stateBytes(state), 0o600);
       stateChanged = false;
-      return null;
     } catch (error) {
-      return `cannot record trust versions in ${policy.statePath}: ${(error as Error).message}`;
+      return failure(`cannot record trust versions in ${policy.statePath}: ${(error as Error).message}`);
     }
+    // Another load on this host may have applied later root events meanwhile; this load's log is then a rollback.
+    const merged = state.rootEvents[pinned];
+    if (walk && merged && merged.sequence > walk.count)
+      return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${merged.sequence} (rollback)`, merged);
+    return null;
   };
 
   if (recovery) {
+    const seen = state.rootEvents[pinned];
     try {
       logBytes = await readTrustFile(recovery.rootEventsPath, 'Root event log', MAX_ROOT_EVENTS_BYTES);
       walk = walkRootEventsCached(logBytes, {
-        rootKeyId: policy.rootKeyId, recovery: recovery.set, timestampKeyId: recovery.freshness?.keyId ?? null, eventsAfter: recovery.eventsAfter,
+        rootKeyId: pinned, recovery: recovery.set, timestampKeyId: recovery.freshness?.keyId ?? null, eventsAfter: recovery.eventsAfter,
       }, now);
     } catch (error) {
-      return failure(`root event log: ${(error as Error).message}`);
+      return blocked(`root event log: ${(error as Error).message}`);
     }
-    const seen = state.rootEvents[policy.rootKeyId];
     if (seen) {
       if (walk.count < seen.sequence)
-        return failure(`root event log has ${walk.count} event(s), but this host has already applied ${seen.sequence} (rollback)`);
+        return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${seen.sequence} (rollback)`);
       if (walk.eventDigests[seen.sequence - 1] !== seen.event_digest)
-        return failure(`root event ${seen.sequence} differs from the one this host already applied (fork); the organization must resolve it`);
+        return blocked(`root event ${seen.sequence} differs from the one this host already applied (fork); the organization must resolve it`);
     }
-    if (walk.count > 0 && (!seen || walk.count > seen.sequence)) {
+    // Only events this host checked are recorded: those before root_events_after were never verified here.
+    if (walk.count > recovery.eventsAfter && (!seen || walk.count > seen.sequence)) {
       state.v2 = true;
-      state.rootEvents[policy.rootKeyId] = { sequence: walk.count, event_digest: walk.eventDigests[walk.count - 1]! };
+      state.rootEvents[pinned] = {
+        sequence: walk.count, event_digest: walk.eventDigests[walk.count - 1]!, ...(walk.revoked ? { revoked: true as const } : {}),
+      };
       stateChanged = true;
     }
     if (walk.revoked) {
@@ -373,13 +428,15 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
     revocationsBytes = await readTrustFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
     if (recovery?.freshness) timestampBytes = await readTrustFile(recovery.freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
   } catch (error) {
-    const problem = await saveState();
-    return failure(problem ?? (error as Error).message);
+    return await saveState() ?? failure((error as Error).message);
   }
 
   let timestamp: ReturnType<typeof verifyTimestamp> | null = null;
-  if (recovery?.freshness && walk && logBytes && timestampBytes) {
-    const timestampKeyId = walk.timestampKeyId!;
+  if (recovery?.freshness) {
+    // Freshness is configured, so a missing input fails closed instead of skipping the check.
+    if (!walk || !logBytes || !timestampBytes || walk.timestampKeyId === null)
+      return await saveState() ?? failure('freshness: the timestamp could not be checked');
+    const timestampKeyId = walk.timestampKeyId;
     try {
       timestamp = verifyTimestamp(timestampBytes, {
         keyId: timestampKeyId, now, maxLifetimeMs: recovery.freshness.maxLifetimeMs,
@@ -391,31 +448,24 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
         },
       });
     } catch (error) {
-      const problem = await saveState();
-      return failure(problem ?? `freshness: ${(error as Error).message}`);
+      return await saveState() ?? failure(`freshness: ${(error as Error).message}`);
     }
   }
 
   const seen = state.roots[activeRootKeyId];
   const minimum: MinimumVersions | undefined = seen ? { trustRootVersion: seen.trust_root_version, revocationsVersion: seen.revocations_version } : undefined;
   const result = loadTrustContext({ trustRootBytes, revocationsBytes, rootKeyId: activeRootKeyId, now, minimum });
-  if (!result.ok) {
-    const problem = await saveState();
-    return problem ? failure(problem) : result;
-  }
+  if (!result.ok)
+    return await saveState() ?? result;
 
   const { trustRoot, revocations } = result.context;
   if (walk) {
     const collision = trustRoot.approvers.find((approver) => walk.recovery.keyIds.includes(approver.keyId) || approver.keyId === walk.timestampKeyId);
-    if (collision) {
-      const problem = await saveState();
-      return failure(problem ?? `trust root lists approver ${collision.keyId}, which is a recovery or timestamp key; no key may hold two roles`);
-    }
+    if (collision)
+      return await saveState() ?? failure(`trust root lists approver ${collision.keyId}, which is a recovery or timestamp key; no key may hold two roles`);
   }
-  if (timestamp && (timestamp.trustRoot.version !== trustRoot.version || timestamp.revocations.version !== revocations.version)) {
-    const problem = await saveState();
-    return failure(problem ?? 'freshness: the trust root or revocation list version does not match the timestamp');
-  }
+  if (timestamp && (timestamp.trustRoot.version !== trustRoot.version || timestamp.revocations.version !== revocations.version))
+    return await saveState() ?? failure('freshness: the trust root or revocation list version does not match the timestamp');
 
   const next = { trust_root_version: trustRoot.version, revocations_version: revocations.version };
   if (!seen || next.trust_root_version > seen.trust_root_version || next.revocations_version > seen.revocations_version) {
@@ -434,7 +484,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
     }
   }
   const problem = await saveState();
-  if (problem) return failure(problem);
+  if (problem) return problem;
 
   if (walk) {
     result.context.root = {

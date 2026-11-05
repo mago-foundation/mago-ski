@@ -250,7 +250,8 @@ test('rollback to a shorter log and a fork at the same number are both UNVERIFIA
   await second.append();
   const forked = await loadPolicyTrust(await org.policy(), NOW);
   assert.match(!forked.ok ? forked.reason : '', /differs from the one this host already applied \(fork\)/u);
-  assert.notEqual(!forked.ok && forked.rootRevoked, true);
+  // The host had applied a revoke, so a broken log keeps the root revoked (blocked in every mode).
+  assert.equal(!forked.ok && forked.rootRevoked, true);
 });
 
 test('a key that left the root role never returns, in any role', async (t) => {
@@ -521,4 +522,127 @@ test('the walk cache returns copies, so callers cannot change a cached walk', as
   assert.ok(parseCanonicalJsonBytes(canonicalBytes(unsignedEventEnvelope({
     sequence: 1, action: 'revoke', rootKeyId: org.root.keyId, issuedAt: NOW, reason: 'r', signers: [],
   }))));
+});
+
+// Regression tests for the review of the first version (PR #11).
+
+test('Pi: /skill: before the first agent run is not expanded while the root is revoked, in shadow mode', async (t) => {
+  const org = await setupRecoveryOrg(t, { mode: 'shadow' });
+  const skills = await tempDir(t, 'mago-ski-skills-');
+  await approve({ approverKey: org.approver.priv } as never, await writeSkill(skills, 'one'));
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!] })).append();
+  const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  createMagoSkiExtension({ policyPath: org.policyPath, now: () => later(1) })({ on: (name: string, fn: any) => { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as never);
+  const ctx = { cwd: skills, hasUI: false, ui: { notify() {}, setStatus() {} } };
+  let result;
+  for (const fn of handlers.get('input') ?? []) result = await fn({ text: '/skill:one go' }, ctx);
+  assert.notEqual((result as { action: string }).action, 'continue');
+});
+
+test('GitHub Action: a PR cannot dodge a revoked root by exceeding the discovery budget', async (t) => {
+  const org = await setupRecoveryOrg(t, { mode: 'shadow' });
+  const skills = path.join(org.dir, 'skills');
+  for (let index = 0; index < 4; index += 1) await writeSkill(skills, `s${index}`);
+  await org.writePolicy({ skill_dirs: ['../skills'], state_file: undefined, decision_log: undefined });
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!] })).append();
+  const { findSkillDirs } = await import('../src/policy.ts');
+  await assert.rejects(findSkillDirs([skills], 16, { maxSkills: 2 }), /more than 2 Skills/u);
+  // Trust is loaded before discovery, so the budget path is never reached while the root is revoked.
+  const result = await runGitHubCheck({ policyRoot: org.dir, workspace: org.dir, policy: 'policy/policy.json', now: later(1) });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.trustFailure, 'root-revoked');
+  assert.equal(result.budgetExceeded, undefined);
+});
+
+test('events before root_events_after are not recorded, so an unchecked event cannot cause a permanent fork', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  const r1 = await org.key('r1');
+  const real = await event(org, { action: 'rotate', signers: [org.recovery[0]!, org.recovery[1]!], newRoot: r1 });
+  const garbage = JSON.parse(await readFile(real.out, 'utf8'));
+  await real.append();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(1) });
+  const realLog = await readFile(org.eventsPath);
+  await org.writePolicy({ root_fingerprint: r1.keyId, root_events_after: 1 });
+  // First contact: a log whose only (unchecked) event is not the real one.
+  await writeFile(org.eventsPath, rootEventLogBytes([{ ...garbage, signatures: [{ keyid: garbage.signatures[0].keyid, sig: Buffer.alloc(64, 1).toString('base64') }] }]));
+  assert.equal((await loadPolicyTrust(await org.policy(), later(2))).ok, true);
+  await writeFile(org.eventsPath, realLog);
+  assert.equal((await loadPolicyTrust(await org.policy(), later(3))).ok, true, 'the real log is not reported as a fork');
+});
+
+test('two loads sharing one state file keep the recorded revoke (state is merged before it is written)', async (t) => {
+  const org = await setupRecoveryOrg(t, { mode: 'enforce' });
+  const oldLog = path.join(org.policyDir, 'old-events.json');
+  await writeFile(oldLog, await readFile(org.eventsPath));
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!] })).append();
+  const raw = JSON.parse(await readFile(org.policyPath, 'utf8'));
+  const stalePath = path.join(org.policyDir, 'policy-stale.json');
+  await writeFile(stalePath, JSON.stringify({ ...raw, root_events: 'old-events.json' }));
+  await Promise.all([loadPolicyTrust(await loadPolicy(stalePath), later(1)), loadPolicyTrust(await org.policy(), later(1))]);
+  const state = JSON.parse(await readFile(org.statePath, 'utf8'));
+  assert.equal(state.type, 'mago.host-state/v2');
+  assert.equal(state.root_events[org.root.keyId].sequence, 1);
+  await writeFile(org.eventsPath, await readFile(oldLog));
+  const rolled = await loadPolicyTrust(await org.policy(), later(2));
+  assert.equal(!rolled.ok && rolled.rootRevoked, true);
+});
+
+test('merging host state keeps the highest counters, the later root event and v2', async () => {
+  const { mergeHostState } = await import('../src/policy.ts');
+  const root = `sha256:${'a'.repeat(64)}`;
+  const other = `sha256:${'b'.repeat(64)}`;
+  const digest = `sha256:${'c'.repeat(64)}`;
+  // A stale load (v1, no root events) writes after a load that recorded a revoke.
+  const stale = { roots: { [root]: { trust_root_version: 3, revocations_version: 1 } }, rootEvents: {}, timestamps: {}, v2: false };
+  const disk = {
+    roots: { [root]: { trust_root_version: 2, revocations_version: 5 } }, rootEvents: { [root]: { sequence: 1, event_digest: digest, revoked: true as const } },
+    timestamps: { [other]: { version: 9 } }, v2: true,
+  };
+  const merged = mergeHostState(stale, disk);
+  assert.equal(merged.v2, true);
+  assert.deepEqual(merged.roots[root], { trust_root_version: 3, revocations_version: 5 });
+  assert.deepEqual(merged.rootEvents[root], disk.rootEvents[root]);
+  assert.equal(merged.timestamps[other]!.version, 9);
+  // On a tie with a different digest, the entry already on disk stays (the next load reports the fork).
+  const tie = mergeHostState({ ...stale, rootEvents: { [root]: { sequence: 1, event_digest: `sha256:${'d'.repeat(64)}` } } }, disk);
+  assert.equal(tie.rootEvents[root]!.event_digest, digest);
+});
+
+test('once a revoke is applied, damaging the log keeps every Skill blocked, in shadow mode too', async (t) => {
+  const org = await setupRecoveryOrg(t, { mode: 'shadow' });
+  const empty = await readFile(org.eventsPath);
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!], reason: 'leak' })).append();
+  assert.equal((await loadPolicyTrust(await org.policy(), later(1)) as { rootRevoked?: boolean }).rootRevoked, true);
+  assert.equal(JSON.parse(await readFile(org.statePath, 'utf8')).root_events[org.root.keyId].revoked, true);
+  const revokedLog = await readFile(org.eventsPath);
+  for (const damage of [async () => await rm(org.eventsPath), async () => await writeFile(org.eventsPath, 'not json\n'), async () => await writeFile(org.eventsPath, empty)]) {
+    await damage();
+    const trust = await loadPolicyTrust(await org.policy(), later(2));
+    assert.equal(!trust.ok && trust.rootRevoked, true);
+    assert.match(!trust.ok ? trust.reason : '', /revoked by root event 1, and the root event log cannot be checked now/u);
+  }
+  // Only a valid log with a rotation clears it.
+  await writeFile(org.eventsPath, revokedLog);
+  const r1 = await org.key('r1');
+  await (await event(org, { action: 'rotate', signers: [org.recovery[0]!, org.recovery[1]!], newRoot: r1, now: later(3) })).append();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(3) });
+  assert.equal((await loadPolicyTrust(await org.policy(), later(4))).ok, true);
+  assert.equal(JSON.parse(await readFile(org.statePath, 'utf8')).root_events[org.root.keyId].revoked, undefined);
+});
+
+test('reasons with tag characters, soft hyphens, variation selectors or lone surrogates are refused', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  for (const reason of ['hidden \u{E0041}\u{E0042}', 'soft­hyphen', 'arabic ؜ mark', 'emoji ️', 'lone \ud800']) {
+    await assert.rejects(event(org, { action: 'revoke', signers: [org.recovery[0]!], reason }), /must not contain/u, JSON.stringify(reason));
+  }
+});
+
+test('root-events sign shows the event and, with --policy, refuses a proposal that does not extend the log', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  const stale = await event(org, { action: 'revoke', signers: [org.recovery[0]!], signWith: [] });
+  await (await event(org, { action: 'revoke', signers: [org.recovery[1]!] })).append();
+  await assert.rejects(signRootEvent({ proposalPath: stale.out, keyPath: org.recovery[0]!.priv, policy: await org.policy(), now: later(1) }), /is event 1, but the log has 1 event/u);
+  const { showRootEvent, describeRootEvent } = await import('../src/recovery-admin.ts');
+  const shown = await showRootEvent({ proposalPath: stale.out, now: later(1) });
+  assert.deepEqual([describeRootEvent(shown.event).action, shown.missing], ['revoke', [org.recovery[0]!.keyId]]);
 });

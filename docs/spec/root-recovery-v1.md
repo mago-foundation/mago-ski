@@ -146,7 +146,7 @@ Envelopes are DSSE, as for [certificates](skill-certificate-v1.md), with one dif
 | `action` | `revoke` or `rotate` |
 | `root_key_id` | The root key the host trusts just before this event (see [Host processing](#host-processing)). A revoke names the key it revokes; a rotate names the key it replaces |
 | `issued_at` | UTC timestamp. Not more than 5 minutes in the future, and not earlier than the previous event's `issued_at` |
-| `reason` | Non-empty text, at most 1024 characters, no control characters. Shown in verdict reasons |
+| `reason` | Non-empty text, at most 1024 characters. Shown in verdict reasons, notifications and block messages the model reads, so it must be plain text: no control, format (bidirectional marks, zero-width and tag characters, soft hyphens), surrogate, private-use or unassigned code points, no line or paragraph separators and no variation selectors |
 | `signers` | The recovery keys that sign: sorted by `key_id`, unique. Each `public_key` must hash to its `key_id` |
 | `new_root` | Rotate only. The new root key; `public_key` must hash to `key_id` |
 | `new_recovery` | Rotate only. The recovery set trusted after this event, with the same rules as the policy's `recovery`. It may equal the current set |
@@ -268,6 +268,8 @@ When the active root is revoked:
 - Every Skill is blocked, in **both `enforce` and `shadow` mode**. No policy setting changes this.
 - The reason names the event, for example `root key sha256:... was revoked by root event 1 (root.pem appeared in a public CI log); waiting for a rotation`.
 - The only way back is a rotate event. Switching the policy to shadow mode does not help.
+- **A revoke the host has applied stays in force while the log cannot be checked.** The host state records that the last applied event left the root revoked. If the log later goes missing, becomes malformed, shorter (rollback) or forked, the host still reports `root-revoked`, not `trust-unavailable`, so damaging the log cannot lift a revoke on a shadow-mode host. Only a valid log that ends in a rotate clears it.
+- Hosts load trust before anything the checked content can influence: the Pi host before expanding a `/skill:` command it has not seen yet, the GitHub Action before Skill discovery (whose budget a pull request controls).
 
 Shadow mode means "approvals may be incomplete, so observe instead of blocking". It assumes the trust anchor is sound. A revoke is a signed statement by the organization's trustees that the anchor is not, so observing is no longer a safe choice. Making the block independent of the mode also removes the tempting shortcut during the outage, "switch to shadow so people can work", which would let through anything the leaked key signed.
 
@@ -304,7 +306,10 @@ Host state version 2:
 }
 ```
 
-(Written as canonical JSON; shown indented here.)
+(Written as canonical JSON; shown indented here.) A `root_events` entry also carries `"revoked": true` when the last applied event left the root revoked (see [Revoked root](#revoked-root-blocked-in-every-mode)); the field is absent otherwise.
+
+- **When progress is recorded.** Root event progress is recorded as soon as the log passes the walk and the rollback and fork checks (step 2 of [Order of checks](#order-of-checks)), even if a later step fails or the root is revoked: the events are signed by recovery keys, and remembering a revoke is what stops a host being moved back to a log without it. Trust root, revocation list and timestamp versions are recorded only when every step passes. Only events the host checked are recorded: with `root_events_after` = N, nothing is recorded until the log has more than N events, so an unchecked event cannot be pinned and later reported as a fork.
+- **Shared state files.** Several processes on one host may share a state file (two Pi sessions, Pi and the CLI). Before writing, a host re-reads the file and merges: every version keeps its highest value, the `root_events` entry with the higher `sequence` wins (on a tie with a different digest, the entry already in the file stays, so the fork is reported on the next load), and a v2 file is never written back as v1. If the merged state has applied more events than the log this load read, the load fails as a rollback.
 
 - `root_events` has one entry per pinned `root_fingerprint`. `event_digest` is `sha256:` + the hex SHA-256 of the last applied event's envelope, serialized as canonical JSON with its trailing LF.
 - **Rollback:** if the log has fewer events than the recorded `sequence`, it is `UNVERIFIABLE`. This stops a host from being moved back to a log without the revoke.
@@ -385,7 +390,7 @@ mago-ski root adopt --root-key r1.pem --from-root-fingerprint sha256:<R0> \
 mago-ski timestamp sign --policy policy.json --key timestamp.pem --expires 24h
 ```
 
-`sign` refuses a key the event does not list. `append` checks every rule a host would check, on the whole new log, so a log that `append` accepts is a log hosts accept; it refuses an event with a missing signature. `timestamp sign` reads the files the policy names, checks that the trust root and revocation list are signed by the active root, signs their digests with the next `version`, and writes the policy's `freshness.timestamp` file. `root adopt` keeps every approver of the old trust root: review them before publishing, because a leaked root key may have been used to add some.
+Before signing, each trustee runs `mago-ski root-events show PROPOSAL --policy policy.json`, which prints what the event does (action, number, root key, new keys, thresholds, reason) and checks that it is the next event of the published log, and compares it with what was agreed through a channel other than the one that delivered the proposal. `sign` prints the event it signed, refuses a key the event does not list, and with `--policy` refuses a proposal that is not the next event of the published log. `append` checks every rule a host would check, on the whole new log, so a log that `append` accepts is a log hosts accept; it refuses an event with a missing signature. `timestamp sign` reads the files the policy names, checks that the trust root and revocation list are signed by the active root, signs their digests with the next `version`, and writes the policy's `freshness.timestamp` file. `root adopt` keeps every approver of the old trust root: review them before publishing, because a leaked root key may have been used to add some.
 
 Before rolling a v2 policy out to hosts, or after appending an event, the organization checks it the way a host would:
 
@@ -397,7 +402,7 @@ mago-ski policy check --policy policy.json
 
 ## Not covered yet
 
-- **E3 gate service** (`src/gate/`): its trust store pins one root fingerprint and accepts trust roots and revocation lists from its inbox, without root events or timestamps. A follow-up adds both to the inbox and the trust-state manifest.
+- **E3 gate service** (`src/gate/`): its trust store pins one root fingerprint and accepts trust roots and revocation lists from its inbox, without root events or timestamps. A follow-up adds both to the inbox and the trust-state manifest. Its verifier worker (`src/gate/verifier-worker.ts`, not yet wired into the service) already loads v2 policies through `loadPolicyTrust`, but turns `rootRevoked` into a per-Skill `UNVERIFIABLE`; the follow-up must make it block in every mode.
 - **Early warning** before a timestamp expires (open question 2) is not implemented.
 
 ## Changes to other documents

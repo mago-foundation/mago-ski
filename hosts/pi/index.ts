@@ -519,6 +519,8 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!known) {
         // Not seen yet (first prompt of a session). Never let Pi expand it unchecked: turn it into a
         // plain request; the model can only use the Skill if it is advertised, and reads are checked.
+        // Load trust first: a revoked root blocks in shadow mode too, even before the first agent run.
+        if (!enforcing()) await trustContext();
         if (!enforcing()) return { action: 'continue' };
         return { action: 'transform', text: `Use the "${name}" skill.${args ? ` ${args}` : ''}` };
       }

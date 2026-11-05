@@ -12,8 +12,8 @@ import {
   trustFailureEvent, trustFailureRecord, verifyWithPolicy, type Policy,
 } from './policy.ts';
 import {
-  adoptTrustDocuments, appendRootEvent, buildRecoverySet, currentRootState, initRootEventLog, prepareRootEvent,
-  recoverySetJson, signPolicyTimestamp, signRootEvent,
+  adoptTrustDocuments, appendRootEvent, buildRecoverySet, currentRootState, describeRootEvent, initRootEventLog, prepareRootEvent,
+  recoverySetJson, showRootEvent, signPolicyTimestamp, signRootEvent,
 } from './recovery-admin.ts';
 import { isMainModule } from './main-module.ts';
 import { formatTimestamp } from './time.ts';
@@ -41,8 +41,8 @@ KEYS AND TRUST  (root key holder)
 
 ROOT RECOVERY  (recovery key holders, timestamp job)
   recovery init          Build the policy's recovery set
-  root-events init|prepare-revoke|prepare-rotate|sign|append
-                         Propose, sign and append root events
+  root-events init|prepare-revoke|prepare-rotate|show|sign|append
+                         Propose, check, sign and append root events
   timestamp sign         Sign the freshness timestamp
 
 APPROVING SKILLS  (reviewer)
@@ -278,7 +278,7 @@ Prints the "recovery" block for a mago.policy/v2 policy: the recovery keys' fing
 Recovery keys only sign root events. Keep each one offline, with a different person, never next to the root key.
 1 <= revoke-threshold <= rotate-threshold <= number of keys; 3 keys, rotate 2, revoke 1 is a good default.`,
 
-  'root-events': `Usage: mago-ski root-events <init | prepare-revoke | prepare-rotate | sign | append> [options]
+  'root-events': `Usage: mago-ski root-events <init | prepare-revoke | prepare-rotate | show | sign | append> [options]
 
 Manages the root event log: signed, numbered events that revoke or replace the root key.
 Run "mago-ski root-events <subcommand> --help" for details.`,
@@ -313,9 +313,17 @@ the new root key, and the new timestamp key if one is given.
   --reason TEXT                  why (at most 1024 characters)
   --out FILE                     the proposal file (must not exist yet)`,
 
-  'root-events sign': `Usage: mago-ski root-events sign PROPOSAL --key FILE
+  'root-events show': `Usage: mago-ski root-events show PROPOSAL [--policy FILE]
 
-Adds your signature to a proposal, in place. Refuses a key the event does not list. Prints who still has to sign.`,
+Prints what a proposal does (action, number, root key, new keys, reason), who has signed and who still must.
+With --policy, also checks that it is the next event of the published log. Run it before you sign, and compare
+the output with what was agreed through a channel other than the one that delivered the proposal.`,
+
+  'root-events sign': `Usage: mago-ski root-events sign PROPOSAL --key FILE [--policy FILE]
+
+Adds your signature to a proposal, in place, and prints the event you signed and who still has to sign. Refuses a
+key the event does not list. With --policy, refuses a proposal that is not the next event of the published log.
+Check the event with "mago-ski root-events show" first: your signature covers everything in it.`,
 
   'root-events append': `Usage: mago-ski root-events append PROPOSAL --policy FILE
 
@@ -726,10 +734,18 @@ async function runRootEvents(sub: string | undefined, parsed: Parsed, now: Date)
     });
     return 0;
   }
+  if (sub === 'show') {
+    allow(parsed, ['--policy'], 1);
+    const policy = optional(parsed, '--policy') ? await loadCliPolicy(parsed) : undefined;
+    const result = await showRootEvent({ proposalPath: parsed.positional[0]!, policy, now });
+    print({ event: describeRootEvent(result.event), signatures: result.signed, still_missing: result.missing, ...(policy ? { extends_log: true } : {}) });
+    return 0;
+  }
   if (sub === 'sign') {
-    allow(parsed, ['--key'], 1);
-    const result = await signRootEvent({ proposalPath: parsed.positional[0]!, keyPath: one(parsed, '--key') });
-    print({ status: 'ROOT_EVENT_SIGNED', signed_by: result.keyId, signatures: result.signed, still_missing: result.missing });
+    allow(parsed, ['--key', '--policy'], 1);
+    const policy = optional(parsed, '--policy') ? await loadCliPolicy(parsed) : undefined;
+    const result = await signRootEvent({ proposalPath: parsed.positional[0]!, keyPath: one(parsed, '--key'), policy, now });
+    print({ status: 'ROOT_EVENT_SIGNED', signed_by: result.keyId, event: describeRootEvent(result.event), signatures: result.signed, still_missing: result.missing });
     return 0;
   }
   if (sub === 'append') {
@@ -745,7 +761,7 @@ async function runRootEvents(sub: string | undefined, parsed: Parsed, now: Date)
     });
     return 0;
   }
-  throw new UsageError('Unknown root-events command; use init, prepare-revoke, prepare-rotate, sign or append');
+  throw new UsageError('Unknown root-events command; use init, prepare-revoke, prepare-rotate, show, sign or append');
 }
 
 async function runTimestamp(sub: string | undefined, parsed: Parsed, now: Date): Promise<number> {

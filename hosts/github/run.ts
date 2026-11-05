@@ -93,6 +93,26 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
     decisionLogPath: null,
   };
   if (policy.skillDirs.length === 0) throw new Error('Policy has no skill_dirs; list the directories that hold Skills');
+  // Trust first: a pull request controls the Skill tree, so it must not be able to skip the trust check
+  // (and a revoked root, which fails the check in every mode) by making discovery fail.
+  const trust = await loadPolicyTrust(policy, now);
+  if (!trust.ok) {
+    // One summary line and no per-Skill rows. A revoked root fails the check in shadow mode too.
+    const event = trustFailureEvent(trust);
+    const fails = trust.rootRevoked || policy.mode === 'enforce';
+    return {
+      mode: policy.mode, trustFailure: event, results: [unverifiable(workspace, event, trust.reason, now, trust.verdict)],
+      exitCode: fails ? 1 : 0,
+      summary: [
+        `### mago-ski: ${trust.rootRevoked ? 'root key revoked, every Skill blocked' : 'trust documents unavailable'} (${policy.mode} mode)`,
+        '',
+        `${markdownCell(trust.reason)}. No Skills were checked.`,
+        '',
+        trust.rootRevoked ? '_A revoked root key blocks in shadow mode too, until a rotate root event._'
+          : policy.mode === 'shadow' ? '_Shadow mode: failures are reported but do not fail the check._' : '',
+      ].join('\n'),
+    };
+  }
   let discovery;
   try {
     discovery = await findSkillDirs(policy.skillDirs);
@@ -113,24 +133,6 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
     };
   }
   const { skillDirs: found, tooDeep } = discovery;
-  const trust = await loadPolicyTrust(policy, now);
-  if (!trust.ok) {
-    // One summary line and no per-Skill rows. A revoked root fails the check in shadow mode too.
-    const event = trustFailureEvent(trust);
-    const fails = trust.rootRevoked || policy.mode === 'enforce';
-    return {
-      mode: policy.mode, trustFailure: event, results: [unverifiable(workspace, event, trust.reason, now, trust.verdict)],
-      exitCode: fails ? 1 : 0,
-      summary: [
-        `### mago-ski: ${trust.rootRevoked ? 'root key revoked, every Skill blocked' : 'trust documents unavailable'} (${policy.mode} mode)`,
-        '',
-        `${markdownCell(trust.reason)}. No Skills were checked (${found.length + tooDeep.length} found).`,
-        '',
-        trust.rootRevoked ? '_A revoked root key blocks in shadow mode too, until a rotate root event._'
-          : policy.mode === 'shadow' ? '_Shadow mode: failures are reported but do not fail the check._' : '',
-      ].join('\n'),
-    };
-  }
   const results: VerificationResult[] = [];
   for (const skillDir of found) results.push(await verifyWithPolicy(policy, skillDir, { now, context: trust.context }));
   for (const directory of tooDeep) results.push(tooDeepResult(directory, now));

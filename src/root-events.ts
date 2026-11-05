@@ -20,11 +20,13 @@ export const MAX_ROOT_EVENT_REASON   = 1024;
 const MAX_EVENT_PAYLOAD_BYTES        = 64 * 1024;
 const BASE64_PATTERN                 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 /**
- * Reasons are shown in verdicts, terminals, notifications and annotations. Besides the C0 controls that
- * requireString refuses, refuse C1 controls, Unicode line separators and bidirectional or invisible formatting
- * characters, so a reason cannot reorder or hide text where it is displayed.
+ * Reasons are shown in verdicts, terminals, notifications, annotations and Pi block messages the model reads.
+ * Besides the C0 controls that requireString refuses, refuse every other control (Cc), format (Cf: bidirectional
+ * marks, zero-width characters, soft hyphens, tag characters), surrogate (Cs), private-use (Co) and unassigned (Cn)
+ * code point, line and paragraph separators, and variation selectors, so a reason cannot hide, reorder or smuggle
+ * text where it is displayed. One stolen recovery key can sign a revoke, so its reason must stay plain text.
  */
-const UNSAFE_DISPLAY_PATTERN         = /[\u0080-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/u;
+const UNSAFE_DISPLAY_PATTERN         = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{180B}-\u{180F}]/u;
 
 export interface RecoverySet {
   /** Sorted, unique fingerprints. */
