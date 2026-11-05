@@ -13,27 +13,18 @@
 // folder there, so the machine's own /etc/claude-code is never touched. Needs root and util-linux `unshare`.
 // Not part of `npm test`; prints one JSON report on stdout and exits 1 if any expectation failed.
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { addApprover, approveSkill, initRoot, updateRevocations } from '../../src/admin.ts';
 import { claudeCodeManagedSettings } from '../../src/gate/adapters/claude-code-settings.ts';
-import { createGateService, type GateService } from '../../src/gate/service.ts';
-import { generateKeyPair } from '../../src/keys.ts';
 import type { Mode } from '../../src/policy.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
 
-const SELF = fileURLToPath(import.meta.url);
-const REPO = path.resolve(path.dirname(SELF), '..', '..');
 const CLAUDE = realpathSync(process.env.CLAUDE_BIN ?? execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim());
-const NODE = realpathSync(process.execPath);
 const HOOK_ENTRY = path.join(REPO, 'src/gate/adapters/claude-code-hook.ts');
 const MANAGED_ROOT = '/etc/claude-code';
 const MANAGED_SKILLS = path.join(MANAGED_ROOT, '.claude', 'skills');
-const MARK = (name: string) => `SECRET-BODY-${name}`;
-let createdMountPoint = false;
 
 // ---------- faux Messages API ----------
 type Block = Record<string, unknown>;
@@ -109,97 +100,24 @@ function toolResults(body: any): Array<{ is_error: boolean; text: string }> {
   return out;
 }
 
-// ---------- organisation, gate service, managed settings ----------
-interface World {
-  root: string;
-  base: string;
-  service: GateService | null;
-  mode: Mode;
-  org: { rootKey: string; trustRoot: string; revocations: string; approverKey: string };
-  certs: Map<string, { path: string; digest: string }>;
-  start: (mode: Mode) => Promise<void>;
-  stop: () => Promise<void>;
-  install: (name: string) => Promise<string>;
-  revoke: (name: string) => Promise<unknown>;
-  status: () => Promise<unknown>;
-}
-
-async function writeSkill(dir: string, name: string): Promise<string> {
-  const skill = path.join(dir, name);
-  await mkdir(skill, { recursive: true });
-  await writeFile(path.join(skill, 'SKILL.md'), `---\nname: ${name}\ndescription: Live-test Skill ${name}.\n---\n# ${name}\n${MARK(name)}\n`);
-  return skill;
-}
+// ---------- the host's managed configuration ----------
+type World = GateWorld & { base: string; unmount: () => Promise<void> };
 
 async function world(base: string): Promise<World> {
-  const root = realpathSync(await mkdtemp(path.join(os.tmpdir(), 'mago-live-cc-')));
-  await chmod(root, 0o755);
-  // The managed folder: a private copy bind-mounted over /etc/claude-code (this process's mount namespace only).
-  const managedHost = path.join(root, 'etc-claude-code');
-  await mkdir(managedHost, { recursive: true, mode: 0o755 });
-  createdMountPoint = !existsSync(MANAGED_ROOT);
-  await mkdir(MANAGED_ROOT, { recursive: true });
-  execFileSync('mount', ['--bind', managedHost, MANAGED_ROOT]);
+  const root = await liveRoot('mago-live-cc-');
+  const unmount = await overlay(MANAGED_ROOT, path.join(root, 'etc-claude-code'));
   await mkdir(path.join(MANAGED_ROOT, '.claude'), { mode: 0o755 });
-
-  const keys = path.join(root, 'keys');
-  await mkdir(keys, { mode: 0o700 });
-  const rootPair = await generateKeyPair(path.join(keys, 'root.pem'), path.join(keys, 'root.pub'));
-  const approver = await generateKeyPair(path.join(keys, 'approver.pem'), path.join(keys, 'approver.pub'));
-  const org = { rootKey: rootPair.privatePath, trustRoot: path.join(root, 'trust-root.json'), revocations: path.join(root, 'revocations.json'), approverKey: approver.privatePath };
-  const now = new Date();
-  await initRoot({ rootKeyPath: org.rootKey, trustRootOut: org.trustRoot, revocationsOut: org.revocations, now });
-  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now, publicKeyPath: approver.publicPath, name: 'Live reviewer', scopes: ['*'], expires: '30d' });
-
-  const sources = path.join(root, 'sources');
-  const certs = new Map<string, { path: string; digest: string }>();
-  const b64 = async (f: string) => (await readFile(f)).toString('base64');
-  let generation = 0;
-
-  const w: World = {
-    root, base, service: null, mode: 'enforce', org, certs,
-    async start(mode) {
-      generation += 1;
-      const state = path.join(root, `gate-${generation}`);
-      await mkdir(state, { mode: 0o755 });
-      w.mode = mode;
-      w.service = createGateService({
-        stateDir: path.join(state, 'state'), generationsDir: path.join(state, 'gens'), managedDir: MANAGED_SKILLS,
-        decisionSocketDir: path.join(state, 'dec'), adminSocketDir: path.join(state, 'adm'),
-        rootFingerprint: rootPair.keyId, mode, hostExes: [CLAUDE], rootUid: 0,
-      });
-      await w.service.start();
-      const accepted = await w.service.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(org.trustRoot), revocations_b64: await b64(org.revocations) });
-      if (!accepted.ok) throw new Error(`accept-trust: ${accepted.error}`);
+  const w = await gateWorld(root, {
+    hostExe: CLAUDE, managedDir: MANAGED_SKILLS,
+    async configure(service, mode, state) {
       // The hook's config and the managed settings, as an administrator would install them.
       const config = path.join(state, 'claude-code-hook.json');
-      await writeFile(config, JSON.stringify({ v: 1, socket: w.service.sockets.decision, mode, host_exes: [CLAUDE], client_deadline_ms: 1500, self_deadline_ms: 3000 }), { mode: 0o644 });
+      await writeFile(config, JSON.stringify({ v: 1, socket: service.sockets.decision, mode, host_exes: [CLAUDE], client_deadline_ms: 1500, self_deadline_ms: 3000 }), { mode: 0o644 });
       const settings = claudeCodeManagedSettings({ mode, nodePath: NODE, hookEntry: HOOK_ENTRY, configPath: config, hookTimeoutSec: 5, selfDeadlineMs: 3000 });
       await writeFile(path.join(MANAGED_ROOT, 'managed-settings.json'), JSON.stringify(settings, null, 2), { mode: 0o644 });
     },
-    async stop() {
-      await w.service?.stop();
-      w.service = null;
-    },
-    async install(name) {
-      const dir = await writeSkill(sources, name);
-      const out = path.join(root, `${name}.cert.json`);
-      const issued = await approveSkill({ skillDir: dir, approverKeyPath: org.approverKey, now: new Date(), expires: '7d', reason: 'live test', out });
-      certs.set(name, { path: out, digest: issued.digest });
-      const r = await w.service!.handleAdmin({ v: 1, cmd: 'install', skill_name: name, source_dir: dir, certificate_b64: await b64(out) });
-      if (!r.ok) throw new Error(`install ${name}: ${r.error}`);
-      return issued.digest;
-    },
-    async revoke(name) {
-      const digest = certs.get(name)!.digest;
-      await updateRevocations({ rootKeyPath: org.rootKey, revocationsPath: org.revocations, now: new Date(), revokeDigest: digest, reason: 'live test revoke' });
-      return await w.service!.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(org.trustRoot), revocations_b64: await b64(org.revocations) });
-    },
-    async status() {
-      return await w.service?.handleAdmin({ v: 1, cmd: 'status' });
-    },
-  };
-  return w;
+  });
+  return Object.assign(w, { base, unmount });
 }
 
 // ---------- one claude -p run ----------
@@ -218,6 +136,7 @@ async function runClaude(w: World, name: string, run: Run) {
   // Skills the organisation never approved: one in the project, one in the user's own folder.
   await writeSkill(path.join(proj, '.claude', 'skills'), 'project-skill');
   await writeSkill(path.join(cfg, 'skills'), 'user-skill');
+  handOver(dir);
   current = { steps: run.steps ?? [], requests: [] };
   const env = {
     PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, CLAUDE_CONFIG_DIR: cfg,
@@ -225,7 +144,8 @@ async function runClaude(w: World, name: string, run: Run) {
   };
   const argv = ['-p', run.prompt ?? 'hello', '--debug-file', path.join(dir, 'debug.log'), '--output-format', 'stream-json', '--verbose',
     '--include-hook-events', '--no-session-persistence', ...(run.args ?? [])];
-  const child = spawn(CLAUDE, argv, { cwd: proj, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [cmd, args] = asHostUser(CLAUDE, argv);
+  const child = spawn(cmd, args, { cwd: proj, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (d) => (stdout += d));
@@ -372,27 +292,14 @@ async function main(): Promise<void> {
     const status = await w.status().catch(() => null);
     await w.stop();
     api.close();
-    execFileSync('umount', [MANAGED_ROOT]);
-    if (createdMountPoint) await rmdir(MANAGED_ROOT).catch(() => {}); // the empty mount point this run created
+    await w.unmount();
     if (process.env.MAGO_LIVE_KEEP !== '1') await rm(w.root, { recursive: true, force: true });
     console.log(JSON.stringify({
-      claude: execFileSync(CLAUDE, ['--version'], { encoding: 'utf8' }).trim(), node: process.version, managedSkills: MANAGED_SKILLS,
+      claude: execFileSync(CLAUDE, ['--version'], { encoding: 'utf8' }).trim(), node: process.version, managedSkills: MANAGED_SKILLS, hostUser: HOST_USER ?? 'root',
       failed, scenarios: report, lastServiceStatus: status, keptAt: process.env.MAGO_LIVE_KEEP === '1' ? w.root : undefined,
     }, null, 2));
   }
   process.exitCode = failed ? 1 : 0;
 }
 
-// ---------- run inside a private mount namespace ----------
-if (process.env.MAGO_LIVE_NS !== '1') {
-  if (process.getuid?.() !== 0) {
-    console.log(JSON.stringify({ skipped: 'needs root (managed settings live in /etc/claude-code)' }));
-    process.exit(0);
-  }
-  const child = spawn('unshare', ['--mount', '--propagation', 'private', NODE, SELF, ...process.argv.slice(2)], {
-    stdio: 'inherit', env: { ...process.env, MAGO_LIVE_NS: '1' },
-  });
-  child.on('close', (code) => process.exit(code ?? 1));
-} else {
-  await main();
-}
+await inPrivateMountNamespace(import.meta.url, main);

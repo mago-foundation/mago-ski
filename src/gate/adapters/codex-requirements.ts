@@ -7,6 +7,9 @@
 //  * Repo-scope Skills (<repo>/.codex/skills, .agents/skills) cannot be hidden natively: hook-only, best-effort,
 //    audit-level. Codex hooks also fail OPEN on crash/timeout, so the hook is not a lock; the lock is deny_read plus
 //    uninstall-on-revoke.
+//  * deny_read does NOT hide the user roots from Codex's Skill catalog: in the live test (codex-cli 0.163.0 and 0.166.0,
+//    as root and as an unprivileged user with bwrap; docs/spikes/codex-gate-live.md) a Skill under a denied root was
+//    still listed with its path. Using it is blocked by the hook only, so the user route is hook-only like the repo route.
 //  * deny_read works only for the fixed absolute roots listed in `userSkillRoots` (not for ** or /home/* globs, cx0.2).
 //  * Codex's sandbox needs unprivileged user namespaces, so the max_user_namespaces=0 hardening used for Claude Code
 //    breaks Codex (cx0.2: bwrap ENOSPC). Packet 10 resolves this.
@@ -15,8 +18,8 @@
 //  * Not gateable by the UserPromptSubmit hook: structured Skill selection (UserInput::Skill, skill:// mentions from
 //    non-TUI clients or the app-server API) and app-server `skills/extraRoots/set`. Endpoint requirement: restrict
 //    app-server and non-TUI Codex clients. A token split across text items can differ from what the hook sees; the
-//    PreToolUse shell check is best-effort. In enforce, Codex coverage is weaker than Claude Code; treat the repo and
-//    user routes as audit-level until the live test.
+//    PreToolUse shell check is best-effort. In enforce, Codex coverage is weaker than Claude Code; the live test confirmed
+//    that the repo and user routes are audit-level.
 //  * Startup state: Codex fixes HOME, CODEX_HOME and ~/.codex/.env at startup; the hook sees only the current state, so
 //    an employee can start Codex pointed at other Skills and undo it (accepted limit; needs an admin-owned CODEX_HOME).
 import path from 'node:path';
@@ -70,7 +73,7 @@ export function codexRequirementsToml(input: CodexRequirementsInput): string {
       '[features]', 'hooks = true', 'plugins = false', 'remote_plugin = false', 'apps = false',
     );
     if (userSkillRoots.length > 0)
-      lines.push('', '# [cx0.2] blocks reads and hides these fixed user roots from the Skill catalog.', '[permissions.filesystem]',
+      lines.push('', '# [cx0.2] meant to block sandboxed reads of these fixed user roots. It does NOT hide them from the Skill catalog', '# (live test, codex-cli 0.163.0 and 0.166.0); their use is blocked by the hooks only.', '[permissions.filesystem]',
         `deny_read = [${userSkillRoots.map((r) => q(`${r}/**`)).join(', ')}]`);
   }
   lines.push('', '# [cx0.1] managed hooks; Codex needs managed_dir (without it the hooks are ignored).', '[hooks]', `managed_dir = ${q(path.dirname(hookEntry))}`);

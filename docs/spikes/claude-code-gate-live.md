@@ -9,9 +9,10 @@ Date: 2026-11-05. Claude Code 2.1.318 (Linux, root), Node 22.23.4.
 ```bash
 sudo node tests/live/claude-code-gate.live.ts                    # all scenarios, JSON report on stdout
 sudo node tests/live/claude-code-gate.live.ts listing service-down
+sudo MAGO_LIVE_USER=mago-live node tests/live/claude-code-gate.live.ts   # Claude Code as an unprivileged user
 ```
 
-It needs root and util-linux `unshare`, is not part of `npm test`, and exits 1 if any expectation fails.
+It needs root and util-linux `unshare`, is not part of `npm test`, and exits 1 if any expectation fails. With `MAGO_LIVE_USER`, Claude Code and its hooks run as that user, as in a real deployment; the gate service stays root.
 
 **Where Claude Code looks.** This version reads managed settings from `/etc/claude-code/managed-settings.json` and managed Skills from `/etc/claude-code/.claude/skills` (from the binary: the `policySettings` Skill source is `<managed dir>/.claude/skills`). That folder is the gate's `managedDir`.
 
@@ -34,7 +35,7 @@ Every scenario starts a fresh `claude -p` with a fresh `HOME`, `CLAUDE_CONFIG_DI
 | Gate service stopped, `/approved-skill go` | enforce | Blocked by the hook; the model was never called | Hook (fail closed) |
 | Project Skill | shadow | Listed (with the user and bundled Skills) and runs; nothing blocked | — |
 
-All 12 scenarios passed.
+All 12 scenarios passed, both with Claude Code running as root and as an unprivileged user (`MAGO_LIVE_USER`).
 
 ## Findings
 
@@ -50,4 +51,4 @@ All 12 scenarios passed.
 - **Subagents.** Whether their Skill calls reach the managed `PreToolUse` hook.
 - **The exit-2 block.** The hook exits 2 only when it cannot tell the event (unparseable input), which Claude Code does not produce in normal use. That Claude Code treats exit 2 as a block is still unverified.
 - **Other platforms and versions.** macOS, and Claude Code versions other than 2.1.318 (the settings still require at least 2.1.296).
-- **Codex.** It needs its own live run.
+- **Codex** has its own live test: [codex-gate-live.md](codex-gate-live.md).
