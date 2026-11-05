@@ -4,14 +4,22 @@ import path from 'node:path';
 import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
 import { appendToRegularFile, isInside, readRegularFile, realpathAllowingMissing, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
 import { validateKeyId } from './keys.ts';
-import { CERTIFICATE_FILENAME } from './tree-digest.ts';
+import {
+  MAX_ROOT_EVENTS_BYTES, parseRecoverySet, walkRootEventsCached, type RecoverySet, type RootWalk,
+} from './root-events.ts';
+import { formatTimestamp, parseDuration } from './time.ts';
+import { DEFAULT_MAX_TIMESTAMP_LIFETIME, MAX_TIMESTAMP_BYTES, MAX_TIMESTAMP_LIFETIME_MS, verifyTimestamp } from './timestamp.ts';
+import { CERTIFICATE_FILENAME, sha256Hex } from './tree-digest.ts';
 import {
   loadTrustContext, unverifiable, verifySkill, type CertificateSource, type MinimumVersions,
   type TrustContext, type TrustContextResult, type VerificationResult,
 } from './verify.ts';
 
-export const POLICY_VERSION   = 'mago.policy/v1';
-export const STATE_TYPE       = 'mago.host-state/v1';
+export const POLICY_VERSION    = 'mago.policy/v1';
+/** Adds root recovery and freshness; a v2 host reads v1 policies unchanged. */
+export const POLICY_VERSION_V2 = 'mago.policy/v2';
+export const STATE_TYPE        = 'mago.host-state/v1';
+export const STATE_TYPE_V2     = 'mago.host-state/v2';
 
 const MAX_CERTIFICATE_BYTES               = 8 * 1024 * 1024;
 /** Per-Skill budget across all certificate candidates (explicit file, policy directories, in-Skill file). */
@@ -20,11 +28,23 @@ export const MAX_CERTIFICATE_TOTAL_BYTES  = 32 * 1024 * 1024;
 export type Mode = 'shadow' | 'enforce';
 
 const POLICY_KEYS          = ['policy_version', 'mode', 'root_fingerprint', 'trust_root', 'revocations', 'certificate_dirs', 'skill_dirs', 'state_file', 'decision_log'];
+const POLICY_V2_KEYS       = ['recovery', 'root_events', 'root_events_after', 'freshness'];
 const REQUIRED_POLICY_KEYS = ['policy_version', 'mode', 'root_fingerprint', 'trust_root', 'revocations'];
+const FRESHNESS_KEYS       = ['timestamp', 'key_id', 'max_lifetime'];
 
 interface RootState {
   trust_root_version: number;
   revocations_version: number;
+}
+
+/** Host state: versions per root key (v1), plus root event progress per pinned root and timestamp versions per key (v2). */
+export interface HostState {
+  roots:      Record<string, RootState>;
+  /** `revoked` is set when the last applied event left the root revoked (written only when true). */
+  rootEvents: Record<string, { sequence: number; event_digest: string; revoked?: true }>;
+  timestamps: Record<string, { version: number }>;
+  /** The state was read as v2; it is never written back as v1. */
+  v2:         boolean;
 }
 
 /*
@@ -48,9 +68,26 @@ export function defaultPolicyPath(
   return configured;
 }
 
+export interface FreshnessPolicy {
+  timestampPath:  string;
+  /** The timestamp key trusted before any root event. */
+  keyId:          string;
+  maxLifetimeMs:  number;
+}
+
+export interface RecoveryPolicy {
+  /** The recovery set trusted before any root event. */
+  set:            RecoverySet;
+  rootEventsPath: string;
+  /** How many events root_fingerprint, recovery and freshness.key_id already reflect. */
+  eventsAfter:    number;
+  freshness:      FreshnessPolicy | null;
+}
+
 export interface Policy {
   path:             string;
   mode:             Mode;
+  /** The pinned root key: the one trusted before any root event (it does not change after a rotation). */
   rootKeyId:        string;
   trustRootPath:    string;
   revocationsPath:  string;
@@ -58,6 +95,8 @@ export interface Policy {
   skillDirs:        string[];
   statePath:        string | null;
   decisionLogPath:  string | null;
+  /** Root recovery (policy v2 with a "recovery" block); null behaves exactly as a v1 policy. */
+  recovery:         RecoveryPolicy | null;
 }
 
 /** Policy files are hand-edited JSON; paths are relative to the policy file's directory. */
@@ -74,16 +113,17 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
   if (!isRecord(value)) 
     throw new Error('Policy file must contain a JSON object');
 
+  if (value.policy_version !== POLICY_VERSION && value.policy_version !== POLICY_VERSION_V2)
+    throw new Error(`Policy file must declare policy_version "${POLICY_VERSION}" or "${POLICY_VERSION_V2}"`);
+  const v2 = value.policy_version === POLICY_VERSION_V2;
+
   for (const key of Object.keys(value)) 
-    if (!POLICY_KEYS.includes(key)) 
-      throw new Error(`Policy file has unsupported field "${key}"`);
+    if (!POLICY_KEYS.includes(key) && !(v2 && POLICY_V2_KEYS.includes(key)))
+      throw new Error(`Policy file has unsupported field "${key}"${POLICY_V2_KEYS.includes(key) ? ` (it needs policy_version "${POLICY_VERSION_V2}")` : ''}`);
   
   for (const key of REQUIRED_POLICY_KEYS) 
     if (!(key in value)) 
       throw new Error(`Policy file is missing "${key}"`);
-  
-  if (value.policy_version !== POLICY_VERSION) 
-    throw new Error(`Policy file must declare policy_version "${POLICY_VERSION}"`);
 
   if (value.mode !== 'shadow' && value.mode !== 'enforce') 
     throw new Error('Policy mode must be "shadow" or "enforce"');
@@ -95,20 +135,62 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
   const writablePath = async (item: unknown, label: string) =>
     item === undefined || item === null ? null : await resolveInsideDirectory(base, requireString(item, `Policy ${label}`, 4096), `Policy ${label}`);
   const optionalList = (item: unknown, label: string) => item === undefined ? [] : requireArray(item, `Policy ${label}`, 256).map((entry, index) => resolvePath(entry, `${label}[${index}]`));
+  const rootKeyId = validateKeyId(value.root_fingerprint, 'Policy root_fingerprint');
   const policy: Policy = {
     path:             absolute,
     mode:             value.mode,
-    rootKeyId:        validateKeyId(value.root_fingerprint, 'Policy root_fingerprint'),
+    rootKeyId,
     trustRootPath:    resolvePath(value.trust_root, 'trust_root'),
     revocationsPath:  resolvePath(value.revocations, 'revocations'),
     certificateDirs:  optionalList(value.certificate_dirs, 'certificate_dirs'),
     skillDirs:        optionalList(value.skill_dirs, 'skill_dirs'),
     statePath:        await writablePath(value.state_file, 'state_file'),
     decisionLogPath:  await writablePath(value.decision_log, 'decision_log'),
+    recovery:         parseRecoveryPolicy(value, rootKeyId, resolvePath),
   };
   await rejectWriteTargetsThatOverlapInputs(policy);
   
   return policy;
+}
+
+/** The v2 fields. A policy without "recovery" must not use the other recovery fields: it behaves as v1. */
+function parseRecoveryPolicy(
+  value: Record<string, unknown>,
+  rootKeyId: string,
+  resolvePath: (item: unknown, label: string) => string,
+): RecoveryPolicy | null {
+  if (value.recovery === undefined) {
+    for (const key of ['root_events', 'root_events_after', 'freshness'])
+      if (value[key] !== undefined)
+        throw new Error(`Policy "${key}" requires "recovery"`);
+    return null;
+  }
+  const set = parseRecoverySet(value.recovery, 'Policy recovery');
+  if (set.keyIds.includes(rootKeyId))
+    throw new Error('Policy recovery key_ids must not include root_fingerprint');
+  if (value.root_events === undefined)
+    throw new Error('Policy "recovery" requires "root_events" (publish an empty log with "mago-ski root-events init")');
+  const eventsAfter = value.root_events_after === undefined ? 0 : value.root_events_after;
+  if (typeof eventsAfter !== 'number' || !Number.isSafeInteger(eventsAfter) || eventsAfter < 0)
+    throw new Error('Policy root_events_after must be a non-negative integer');
+
+  let freshness: FreshnessPolicy | null = null;
+  if (value.freshness !== undefined) {
+    if (!isRecord(value.freshness))
+      throw new Error('Policy freshness must be a JSON object');
+    for (const key of Object.keys(value.freshness))
+      if (!FRESHNESS_KEYS.includes(key))
+        throw new Error(`Policy freshness has unsupported field "${key}"`);
+    const keyId = validateKeyId(value.freshness.key_id, 'Policy freshness key_id');
+    if (keyId === rootKeyId || set.keyIds.includes(keyId))
+      throw new Error('Policy freshness key_id must not be root_fingerprint or a recovery key');
+    const lifetime = value.freshness.max_lifetime === undefined ? DEFAULT_MAX_TIMESTAMP_LIFETIME : requireString(value.freshness.max_lifetime, 'Policy freshness max_lifetime', 16);
+    const maxLifetimeMs = parseDuration(lifetime, 'Policy freshness max_lifetime');
+    if (maxLifetimeMs > MAX_TIMESTAMP_LIFETIME_MS)
+      throw new Error('Policy freshness max_lifetime must be at most 7d');
+    freshness = { timestampPath: resolvePath(value.freshness.timestamp, 'freshness timestamp'), keyId, maxLifetimeMs };
+  }
+  return { set, rootEventsPath: resolvePath(value.root_events, 'root_events'), eventsAfter, freshness };
 }
 
 /** A path with symlinks resolved where possible; falls back to the lexical path (the read itself will fail later). */
@@ -124,6 +206,8 @@ async function canonicalOrLexical(target: string): Promise<string> {
 async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void> {
   const inputs: Array<[string, string]>         = [
     ['the policy file', policy.path], ['trust_root', policy.trustRootPath], ['revocations', policy.revocationsPath],
+    ...(policy.recovery ? [['root_events', policy.recovery.rootEventsPath] as [string, string]] : []),
+    ...(policy.recovery?.freshness ? [['freshness timestamp', policy.recovery.freshness.timestampPath] as [string, string]] : []),
   ];
   const directories                             = await Promise.all(policy.certificateDirs.map(canonicalOrLexical));
   const targets: Array<[string, string | null]> = [['state_file', policy.statePath], ['decision_log', policy.decisionLogPath]];
@@ -150,62 +234,267 @@ async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void
   }
 }
 
-async function readState(statePath: string): Promise<Record<string, RootState>> {
+function stateCount(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1)
+    throw new Error(`${label} must be a positive integer`);
+  return value;
+}
+
+async function readState(statePath: string): Promise<HostState> {
   let bytes: Buffer;
   try {
     bytes = await readRegularFile(statePath, 'Host state file', 1024 * 1024);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return {};
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
     throw error;
   }
-  const value = exactKeys(parseCanonicalJsonBytes(bytes, 'host state'), ['type', 'roots'], 'host state');
-  if (value.type !== STATE_TYPE || !isRecord(value.roots)) 
+  const parsed = parseCanonicalJsonBytes(bytes, 'host state');
+  const v2     = isRecord(parsed) && parsed.type === STATE_TYPE_V2;
+  const value  = exactKeys(parsed, v2 ? ['type', 'roots', 'root_events', 'timestamps'] : ['type', 'roots'], 'host state');
+  if ((value.type !== STATE_TYPE && !v2) || !isRecord(value.roots))
     throw new Error('host state file has an unsupported format');
   
-  const roots: Record<string, RootState> = {};
+  const state: HostState = { roots: {}, rootEvents: {}, timestamps: {}, v2 };
   for (const [rootKeyId, entry] of Object.entries(value.roots)) {
     const fields = exactKeys(entry, ['trust_root_version', 'revocations_version'], 'host state root');
-    roots[validateKeyId(rootKeyId, 'host state root key')] = {
-      trust_root_version: Number(fields.trust_root_version), revocations_version: Number(fields.revocations_version),
+    state.roots[validateKeyId(rootKeyId, 'host state root key')] = {
+      trust_root_version:  stateCount(fields.trust_root_version, 'host state trust_root_version'),
+      revocations_version: stateCount(fields.revocations_version, 'host state revocations_version'),
     };
   }
-  return roots;
+  if (v2) {
+    if (!isRecord(value.root_events) || !isRecord(value.timestamps))
+      throw new Error('host state file has an unsupported format');
+    for (const [rootKeyId, entry] of Object.entries(value.root_events)) {
+      const withRevoked = isRecord(entry) && 'revoked' in entry;
+      const fields = exactKeys(entry, withRevoked ? ['sequence', 'event_digest', 'revoked'] : ['sequence', 'event_digest'], 'host state root_events');
+      if (withRevoked && fields.revoked !== true)
+        throw new Error('host state root_events revoked must be true when present');
+      state.rootEvents[validateKeyId(rootKeyId, 'host state root_events key')] = {
+        sequence:     stateCount(fields.sequence, 'host state root_events sequence'),
+        event_digest: validateKeyId(fields.event_digest, 'host state root_events event_digest'),
+        ...(withRevoked ? { revoked: true as const } : {}),
+      };
+    }
+    for (const [keyId, entry] of Object.entries(value.timestamps)) {
+      const fields = exactKeys(entry, ['version'], 'host state timestamps');
+      state.timestamps[validateKeyId(keyId, 'host state timestamps key')] = { version: stateCount(fields.version, 'host state timestamp version') };
+    }
+  }
+  return state;
 }
+
+/**
+ * Combines this load's state with the state file as it is now, so two hosts sharing one state file (two Pi sessions,
+ * Pi and the CLI) cannot erase each other's progress: every counter keeps its highest value, the root event entry
+ * with the higher sequence wins (on a tie with different digests, the one already on disk stays, so the fork is
+ * reported on the next load), and v2 is never written back as v1.
+ */
+export function mergeHostState(ours: HostState, disk: HostState): HostState {
+  const merged: HostState = { roots: { ...disk.roots }, rootEvents: { ...disk.rootEvents }, timestamps: { ...disk.timestamps }, v2: ours.v2 || disk.v2 };
+  for (const [keyId, entry] of Object.entries(ours.roots)) {
+    const other = merged.roots[keyId];
+    merged.roots[keyId] = other ? {
+      trust_root_version:  Math.max(entry.trust_root_version, other.trust_root_version),
+      revocations_version: Math.max(entry.revocations_version, other.revocations_version),
+    } : entry;
+  }
+  for (const [keyId, entry] of Object.entries(ours.rootEvents)) {
+    const other = merged.rootEvents[keyId];
+    if (!other || entry.sequence > other.sequence) merged.rootEvents[keyId] = entry;
+  }
+  for (const [keyId, entry] of Object.entries(ours.timestamps)) {
+    const other = merged.timestamps[keyId];
+    if (!other || entry.version > other.version) merged.timestamps[keyId] = entry;
+  }
+  return merged;
+}
+
+function stateBytes(state: HostState): Buffer {
+  if (!state.v2)
+    return canonicalBytes({ type: STATE_TYPE, roots: state.roots });
+  return canonicalBytes({ type: STATE_TYPE_V2, roots: state.roots, root_events: state.rootEvents, timestamps: state.timestamps });
+}
+
+/** Reads a file once, so the bytes that are hashed for freshness are the bytes that are parsed. */
+async function readTrustFile(filePath: string, label: string, maxBytes: number): Promise<Buffer> {
+  try {
+    return await readRegularFile(filePath, label, maxBytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' && (label === 'Root event log' || label === 'Timestamp'))
+      throw new Error(`${label} not found: ${filePath}`);
+    throw error;
+  }
+}
+
+const failure = (reason: string, extra: { rootRevoked?: boolean } = {}): TrustContextResult =>
+  ({ ok: false, verdict: 'UNVERIFIABLE', reason, ...extra });
 
 /**
  * Loads trust documents for a policy, enforcing rollback protection through the state file.
  * With `recordVersions: false` the state file is still read (the same rollback minimums apply) but never written:
  * for observers such as the GUI, which must not move a host's rollback memory.
+ *
+ * With root recovery (policy v2), the order is: walk the root event log, check rollback and forks, stop if the active
+ * root is revoked (`rootRevoked`, which blocks in every mode), check the timestamp, then the trust root and revocation
+ * list against the active root, then record the new state.
  */
 export async function loadPolicyTrust(policy: Policy, now: Date, options: { recordVersions?: boolean } = {}): Promise<TrustContextResult> {
+  const record = options.recordVersions !== false && policy.statePath !== null;
+  let state: HostState = { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
+  try {
+    if (policy.statePath) state = await readState(policy.statePath);
+  } catch (error) {
+    return failure((error as Error).message);
+  }
+  const recovery = policy.recovery;
+  const pinned = policy.rootKeyId;
+  let activeRootKeyId = pinned;
+  let walk: RootWalk | null = null;
+  let logBytes: Buffer | null = null;
+
+  /*
+   * A revoke this host has applied stays in force while the log cannot be checked: making the log missing, malformed,
+   * shorter or forked must not turn root-revoked into trust-unavailable, which shadow mode would let through.
+   */
+  const blocked = (problem: string, entry = state.rootEvents[pinned]): TrustContextResult => entry?.revoked
+    ? failure(`root key was revoked by root event ${entry.sequence}, and the root event log cannot be checked now (${problem}); waiting for a valid log with a rotation`, { rootRevoked: true })
+    : failure(problem);
+
+  // Root event progress is recorded as soon as the log is accepted, even if a later step fails: the events are signed
+  // by recovery keys, and remembering them is what stops a host being moved back to a log without a revoke.
+  let stateChanged = false;
+  const saveState = async (): Promise<TrustContextResult | null> => {
+    if (!record || !stateChanged) return null;
+    try {
+      let disk: HostState | null = null;
+      try {
+        disk = await readState(policy.statePath!);
+      } catch {
+        disk = null; // unreadable now: this load's state replaces it, as before
+      }
+      if (disk) state = mergeHostState(state, disk);
+      await writeFileAtomic(policy.statePath!, stateBytes(state), 0o600);
+      stateChanged = false;
+    } catch (error) {
+      return failure(`cannot record trust versions in ${policy.statePath}: ${(error as Error).message}`);
+    }
+    // Another load on this host may have applied later root events meanwhile; this load's log is then a rollback.
+    const merged = state.rootEvents[pinned];
+    if (walk && merged && merged.sequence > walk.count)
+      return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${merged.sequence} (rollback)`, merged);
+    return null;
+  };
+
+  if (recovery) {
+    const seen = state.rootEvents[pinned];
+    try {
+      logBytes = await readTrustFile(recovery.rootEventsPath, 'Root event log', MAX_ROOT_EVENTS_BYTES);
+      walk = walkRootEventsCached(logBytes, {
+        rootKeyId: pinned, recovery: recovery.set, timestampKeyId: recovery.freshness?.keyId ?? null, eventsAfter: recovery.eventsAfter,
+      }, now);
+    } catch (error) {
+      return blocked(`root event log: ${(error as Error).message}`);
+    }
+    if (seen) {
+      if (walk.count < seen.sequence)
+        return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${seen.sequence} (rollback)`);
+      if (walk.eventDigests[seen.sequence - 1] !== seen.event_digest)
+        return blocked(`root event ${seen.sequence} differs from the one this host already applied (fork); the organization must resolve it`);
+    }
+    // Only events this host checked are recorded: those before root_events_after were never verified here.
+    if (walk.count > recovery.eventsAfter && (!seen || walk.count > seen.sequence)) {
+      state.v2 = true;
+      state.rootEvents[pinned] = {
+        sequence: walk.count, event_digest: walk.eventDigests[walk.count - 1]!, ...(walk.revoked ? { revoked: true as const } : {}),
+      };
+      stateChanged = true;
+    }
+    if (walk.revoked) {
+      await saveState();
+      return failure(
+        `root key ${walk.activeRootKeyId} was revoked by root event ${walk.revoked.sequence} (${walk.revoked.reason}); waiting for a rotation`,
+        { rootRevoked: true },
+      );
+    }
+    activeRootKeyId = walk.activeRootKeyId;
+  }
+
   let trustRootBytes: Buffer;
   let revocationsBytes: Buffer;
-  let roots: Record<string, RootState> = {};
+  let timestampBytes: Buffer | null = null;
   try {
-    trustRootBytes              = await readRegularFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
-    revocationsBytes            = await readRegularFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
-    if (policy.statePath) roots = await readState(policy.statePath);
+    trustRootBytes   = await readTrustFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
+    revocationsBytes = await readTrustFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
+    if (recovery?.freshness) timestampBytes = await readTrustFile(recovery.freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
   } catch (error) {
-    return { ok: false, verdict: 'UNVERIFIABLE', reason: (error as Error).message };
+    return await saveState() ?? failure((error as Error).message);
   }
-  
-  const seen = roots[policy.rootKeyId];
-  const minimum: MinimumVersions | undefined = seen ? { trustRootVersion: seen.trust_root_version, revocationsVersion: seen.revocations_version } : undefined;
-  const result = loadTrustContext({ trustRootBytes, revocationsBytes, rootKeyId: policy.rootKeyId, now, minimum });
-  
-  if (result.ok && policy.statePath && options.recordVersions !== false) {
-    const next = { trust_root_version: result.context.trustRoot.version, revocations_version: result.context.revocations.version };
-    if (!seen || next.trust_root_version > seen.trust_root_version || next.revocations_version > seen.revocations_version) {
-      roots[policy.rootKeyId] = {
-        trust_root_version:   Math.max(next.trust_root_version, seen?.trust_root_version ?? 0),
-        revocations_version:  Math.max(next.revocations_version, seen?.revocations_version ?? 0),
-      };
-      try {
-        await writeFileAtomic(policy.statePath, canonicalBytes({ type: STATE_TYPE, roots }), 0o600);
-      } catch (error) {
-        return { ok: false, verdict: 'UNVERIFIABLE', reason: `cannot record trust versions in ${policy.statePath}: ${(error as Error).message}` };
-      }
+
+  let timestamp: ReturnType<typeof verifyTimestamp> | null = null;
+  if (recovery?.freshness) {
+    // Freshness is configured, so a missing input fails closed instead of skipping the check.
+    if (!walk || !logBytes || !timestampBytes || walk.timestampKeyId === null)
+      return await saveState() ?? failure('freshness: the timestamp could not be checked');
+    const timestampKeyId = walk.timestampKeyId;
+    try {
+      timestamp = verifyTimestamp(timestampBytes, {
+        keyId: timestampKeyId, now, maxLifetimeMs: recovery.freshness.maxLifetimeMs,
+        minimumVersion: state.timestamps[timestampKeyId]?.version,
+        inputs: {
+          rootEvents:  { sha256: walk.logSha256, count: walk.count },
+          trustRoot:   { sha256: sha256Hex(trustRootBytes) },
+          revocations: { sha256: sha256Hex(revocationsBytes) },
+        },
+      });
+    } catch (error) {
+      return await saveState() ?? failure(`freshness: ${(error as Error).message}`);
     }
+  }
+
+  const seen = state.roots[activeRootKeyId];
+  const minimum: MinimumVersions | undefined = seen ? { trustRootVersion: seen.trust_root_version, revocationsVersion: seen.revocations_version } : undefined;
+  const result = loadTrustContext({ trustRootBytes, revocationsBytes, rootKeyId: activeRootKeyId, now, minimum });
+  if (!result.ok)
+    return await saveState() ?? result;
+
+  const { trustRoot, revocations } = result.context;
+  if (walk) {
+    const collision = trustRoot.approvers.find((approver) => walk.recovery.keyIds.includes(approver.keyId) || approver.keyId === walk.timestampKeyId);
+    if (collision)
+      return await saveState() ?? failure(`trust root lists approver ${collision.keyId}, which is a recovery or timestamp key; no key may hold two roles`);
+  }
+  if (timestamp && (timestamp.trustRoot.version !== trustRoot.version || timestamp.revocations.version !== revocations.version))
+    return await saveState() ?? failure('freshness: the trust root or revocation list version does not match the timestamp');
+
+  const next = { trust_root_version: trustRoot.version, revocations_version: revocations.version };
+  if (!seen || next.trust_root_version > seen.trust_root_version || next.revocations_version > seen.revocations_version) {
+    state.roots[activeRootKeyId] = {
+      trust_root_version:   Math.max(next.trust_root_version, seen?.trust_root_version ?? 0),
+      revocations_version:  Math.max(next.revocations_version, seen?.revocations_version ?? 0),
+    };
+    stateChanged = true;
+  }
+  if (timestamp && walk?.timestampKeyId) {
+    const previous = state.timestamps[walk.timestampKeyId]?.version ?? 0;
+    if (timestamp.version > previous) {
+      state.v2 = true;
+      state.timestamps[walk.timestampKeyId] = { version: timestamp.version };
+      stateChanged = true;
+    }
+  }
+  const problem = await saveState();
+  if (problem) return problem;
+
+  if (walk) {
+    result.context.root = {
+      pinnedRootKeyId: policy.rootKeyId,
+      activeRootKeyId,
+      sequence:        walk.count,
+      recovery:        walk.recovery,
+      timestampKeyId:  walk.timestampKeyId,
+      timestamp:       timestamp ? { version: timestamp.version, expiresAt: timestamp.expiresAt } : null,
+    };
   }
   return result;
 }
@@ -403,6 +692,43 @@ export interface DecisionRecord {
   certificate_id:   string | null;
   verdict:          string;
   reason:           string;
+}
+
+/** Event names for a failure of the trust documents, reported once per host instead of once per Skill. */
+export type TrustFailureEvent = 'root-revoked' | 'trust-unavailable';
+
+export function trustFailureEvent(failure: { rootRevoked?: boolean | undefined }): TrustFailureEvent {
+  return failure.rootRevoked ? 'root-revoked' : 'trust-unavailable';
+}
+
+/**
+ * The mode a host acts in for this trust state. A revoked root is a signed statement that the trust anchor is not
+ * sound, so it blocks in shadow mode too; no policy setting changes that. Every other failure follows the policy.
+ */
+export function effectiveMode(mode: Mode, trust: TrustContextResult | { ok: false; rootRevoked?: boolean | undefined } | null | undefined): Mode {
+  return trust && !trust.ok && trust.rootRevoked ? 'enforce' : mode;
+}
+
+/** The single decision-log record for a trust failure: empty skill and skill_dir, null digest and certificate_id. */
+export function trustFailureRecord(
+  failure: { reason: string; rootRevoked?: boolean | undefined },
+  mode: Mode,
+  now: Date,
+  host = `${hostname()}`,
+): DecisionRecord {
+  return {
+    timestamp:      formatTimestamp(now),
+    host,
+    mode,
+    action:         failure.rootRevoked ? 'block' : actionFor(mode, false),
+    event:          trustFailureEvent(failure),
+    skill:          '',
+    skill_dir:      '',
+    digest:         null,
+    certificate_id: null,
+    verdict:        'UNVERIFIABLE',
+    reason:         failure.reason,
+  };
 }
 
 export function actionFor(mode: Mode, verified: boolean): DecisionRecord['action'] {

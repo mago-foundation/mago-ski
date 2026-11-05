@@ -19,6 +19,7 @@ Host (Pi, CI)       pins the root fingerprint and checks that a certificate chai
 
 - **Approval binds an exact digest.** Every byte of every covered file is included, plus its executable bit on Linux and macOS; files excluded from the digest are not approved. A one-sentence change needs a new certificate, even if no capability changed.
 - **Hosts trust the root, not individual keys.** Approvers are delegated by the root, limited to Skill-name scopes, and expire.
+- **A leaked root key is recoverable.** With a v2 policy, a few offline recovery keys can revoke the root key (any one trustee, by default) and replace it (two of three, by default) with signed root events, without editing any host's policy. An optional timestamp key stops hosts from being kept on old files. See [root recovery](docs/spec/root-recovery-v1.md).
 - **Revocation reaches every certificate at once.** Revoke a key and every certificate it signed stops verifying as soon as a host has the updated revocation list; revoke a digest to pull one version. Lists expire (30 days by default), which bounds how long a host can keep using an old one.
 - **The model never holds a credential.** The host verifies; in Pi enforce mode, only Skills that passed are advertised to the model.
 - **No maliciousness judgment.** A certificate records who approved what. It does not certify that a Skill is safe.
@@ -114,7 +115,7 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 ## Documentation
 
 - [Threat model](docs/threat-model.md): what is and is not protected
-- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md)
+- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md)
 - [Test vectors](tests/vectors/) for other implementations
 - [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md)
 - [Security policy](SECURITY.md): how to report a vulnerability

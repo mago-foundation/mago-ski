@@ -7,6 +7,19 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 ### Added
 
 - Claude Code interception spike (`docs/spikes/`): which hooks and settings can enforce Skill approval on Claude Code, and the resulting adapter design.
+- **Root recovery** ([spec](docs/spec/root-recovery-v1.md), now normative). Policy `mago.policy/v2` pins a recovery set (1-16 offline keys with a rotate and a revoke threshold) next to the root fingerprint. Recovery keys sign numbered root events in a root event log: `revoke` stops hosts trusting the root key, `rotate` replaces it (and optionally the recovery set or the timestamp key). A leaked root key no longer means editing every host's policy. Implemented in the CLI, the Pi host and the GitHub Action.
+- **Freshness** (optional, in `mago.policy/v2`): a separate timestamp key signs a short-lived statement of the exact root event log, trust root and revocation list. A host fed old files stops trusting anything once the newest timestamp expires (24 hours by default, at most 7 days).
+- Commands: `recovery init`, `root-events init | prepare-revoke | prepare-rotate | show | sign | append` (`show` and `sign` print what the event does; with `--policy` they check it is the next event of the published log), `timestamp sign`, `root adopt` (re-sign the trust documents with the new root after a rotate) and `policy check` (check a policy the way a host does, without writing host state).
+- Host state `mago.host-state/v2`: root event progress per pinned root (rollback and fork detection, and whether the root was left revoked) and timestamp versions per timestamp key. Hosts keep writing v1 until they apply a root event or timestamp. Before writing, a host re-reads the state file and merges it, so processes sharing one state file cannot erase each other's progress.
+
+### Changed
+
+- A failure of the trust documents is reported **once per host** instead of once per Skill: one decision record (`event` `root-revoked` or `trust-unavailable`, empty `skill`, null `digest`), one Pi notice and a status-bar message, one `verify-all` line, and one GitHub Action summary line with no per-Skill rows. Scripts that counted per-Skill `UNVERIFIABLE` lines for a broken trust root need updating.
+- A root key revoked by a root event blocks every Skill **in shadow mode too**, on every host, and keeps blocking if the log is later missing, malformed, rolled back or forked. Other trust failures still follow the mode.
+
+### Not yet covered
+
+- The E3 gate service keeps its own pinned root fingerprint; root events and timestamps in its inbox are a follow-up.
 
 ## [0.2.0] - 2026-10-30
 
