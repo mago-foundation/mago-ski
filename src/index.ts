@@ -8,6 +8,8 @@ export * from './trust-root.ts';
 export * from './revocations.ts';
 export * from './certificate.ts';
 export * from './verify.ts';
+export * from './root-events.ts';
+export * from './timestamp.ts';
 export * from './policy.ts';
 export * from './admin.ts';
 export * from './diff.ts';

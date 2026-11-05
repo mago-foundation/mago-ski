@@ -36,9 +36,23 @@ export const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
 
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
+/** Root recovery state behind a trust context (policy v2 with "recovery"). */
+export interface RootStatus {
+  /** root_fingerprint in the policy. */
+  pinnedRootKeyId: string;
+  /** The root key that signed the trust root and revocation list after walking the root event log. */
+  activeRootKeyId: string;
+  /** Events in the root event log. */
+  sequence: number;
+  recovery: { keyIds: string[]; rotateThreshold: number; revokeThreshold: number };
+  timestampKeyId: string | null;
+  timestamp: { version: number; expiresAt: Date } | null;
+}
+
 export interface TrustContext {
   trustRoot: TrustRoot;
   revocations: Revocations;
+  root?: RootStatus;
 }
 
 export interface MinimumVersions {
@@ -48,7 +62,13 @@ export interface MinimumVersions {
 
 export type TrustContextResult =
   | { ok: true; context: TrustContext }
-  | { ok: false; verdict: 'EXPIRED' | 'UNVERIFIABLE'; reason: string };
+  | {
+      ok: false;
+      verdict: 'EXPIRED' | 'UNVERIFIABLE';
+      reason: string;
+      /** The active root key is revoked by a root event: every Skill is blocked, in shadow mode too. */
+      rootRevoked?: boolean;
+    };
 
 export interface CertificateEvaluation {
   verdict: Verdict;

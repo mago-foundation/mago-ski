@@ -28,6 +28,8 @@ const current = await hashFile(absolutePath, relativePath);  // compare with res
 await appendDecision(policy.decisionLogPath, decisionRecord(result, policy.mode, 'advertise'));
 ```
 
+When `loadPolicyTrust` fails, report it once for the host (`trustFailureRecord`), not once per Skill. If the failure has `rootRevoked: true`, block every Skill **whatever the policy mode** (`effectiveMode(policy.mode, trust)` returns `enforce`): a root key revoked by a root event blocks in shadow mode too ([Root recovery](../spec/root-recovery-v1.md#revoked-root-blocked-in-every-mode)).
+
 ## Claude Code (built, not yet tested live)
 
 The [Claude Code spike](../spikes/claude-code-interception.md) found that no hook can change the Skill list (H1) and that a project's settings can turn user hooks off, so enforcement needs managed settings. Without them, only shadow mode is possible.

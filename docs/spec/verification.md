@@ -14,11 +14,18 @@ Status: draft, implemented by mago-ski 0.1 and later (`src/verify.ts`). Verdict 
 | `EXPIRED` | The certificate, the approver key, the trust root or the revocation list has expired | Renew the expired item |
 | `UNVERIFIABLE` | Something could not be checked: malformed or tampered documents, a trust root not signed by the pinned key, rollback, unreadable Skill files | Fix the input; treat as blocked |
 
-Every verdict except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead).
+Every verdict except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead). One exception: a root key revoked by a root event blocks in shadow mode too ([Revoked root](root-recovery-v1.md#revoked-root-blocked-in-every-mode)).
 
 ## Order of checks
 
-Trust documents, once per host check:
+Trust documents, once per host check. With root recovery (a v2 policy with `recovery`), these come first ([Order of checks](root-recovery-v1.md#order-of-checks)):
+
+- Walk the root event log from the policy's starting keys. A missing, malformed or invalid log is `UNVERIFIABLE`.
+- Check the log against the host state: fewer events than already applied (rollback) or a different event at the recorded number (fork) is `UNVERIFIABLE`.
+- If the active root is revoked, every Skill is blocked, **in shadow mode too**; nothing else is read.
+- With `freshness`, the timestamp must be signed by the active timestamp key, unexpired, within `max_lifetime`, not older than the host state records, and must name exactly the files read. Otherwise `UNVERIFIABLE`.
+
+The steps below then use the **active root** (the pinned root, replaced by each rotate event) instead of the pinned fingerprint, and the trust root is also `UNVERIFIABLE` if an approver is a recovery key or the active timestamp key.
 
 1. The trust root's envelope is signed by the pinned root fingerprint, names that root, and its signature is valid. Otherwise `UNVERIFIABLE`.
 2. The trust root has not expired. Otherwise `EXPIRED`.

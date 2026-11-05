@@ -6,7 +6,9 @@ import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { isInside } from '../../src/fs-safe.ts';
 import { isMainModule } from '../../src/main-module.ts';
-import { DiscoveryBudgetError, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy, type Policy } from '../../src/policy.ts';
+import {
+  DiscoveryBudgetError, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, trustFailureEvent, verifyWithPolicy, type Policy, type TrustFailureEvent,
+} from '../../src/policy.ts';
 import { unverifiable, type VerificationResult } from '../../src/verify.ts';
 
 export interface GitHubCheckOptions {
@@ -28,6 +30,8 @@ export interface GitHubCheckResult {
   mode: Policy['mode'];
   /** Set when discovery exceeded its work budget; `results` then holds a single UNVERIFIABLE entry and no Skill was checked. */
   budgetExceeded?: string;
+  /** Set when the trust documents failed (`root-revoked` or `trust-unavailable`); `results` then holds a single entry. */
+  trustFailure?: TrustFailureEvent;
   results: VerificationResult[];
   exitCode: number;
   summary: string;
@@ -74,6 +78,8 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   const base = await loadPolicy(policyPath);
   await withinReal(policyRoot, base.trustRootPath, 'trust_root');
   await withinReal(policyRoot, base.revocationsPath, 'revocations');
+  if (base.recovery) await withinReal(policyRoot, base.recovery.rootEventsPath, 'root_events');
+  if (base.recovery?.freshness) await withinReal(policyRoot, base.recovery.freshness.timestampPath, 'freshness timestamp');
   const certificateDirs: string[] = [];
   for (const dir of base.certificateDirs) certificateDirs.push(await toWorkspace(policyRoot, workspace, dir, 'certificate_dirs'));
   const skillDirs: string[] = [];
@@ -108,12 +114,25 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   }
   const { skillDirs: found, tooDeep } = discovery;
   const trust = await loadPolicyTrust(policy, now);
-  const results: VerificationResult[] = [];
-  for (const skillDir of found) {
-    results.push(trust.ok
-      ? await verifyWithPolicy(policy, skillDir, { now, context: trust.context })
-      : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict));
+  if (!trust.ok) {
+    // One summary line and no per-Skill rows. A revoked root fails the check in shadow mode too.
+    const event = trustFailureEvent(trust);
+    const fails = trust.rootRevoked || policy.mode === 'enforce';
+    return {
+      mode: policy.mode, trustFailure: event, results: [unverifiable(workspace, event, trust.reason, now, trust.verdict)],
+      exitCode: fails ? 1 : 0,
+      summary: [
+        `### mago-ski: ${trust.rootRevoked ? 'root key revoked, every Skill blocked' : 'trust documents unavailable'} (${policy.mode} mode)`,
+        '',
+        `${markdownCell(trust.reason)}. No Skills were checked (${found.length + tooDeep.length} found).`,
+        '',
+        trust.rootRevoked ? '_A revoked root key blocks in shadow mode too, until a rotate root event._'
+          : policy.mode === 'shadow' ? '_Shadow mode: failures are reported but do not fail the check._' : '',
+      ].join('\n'),
+    };
   }
+  const results: VerificationResult[] = [];
+  for (const skillDir of found) results.push(await verifyWithPolicy(policy, skillDir, { now, context: trust.context }));
   for (const directory of tooDeep) results.push(tooDeepResult(directory, now));
   const failures = results.filter((result) => result.verdict !== 'VERIFIED');
   const ordered = [...failures, ...results.filter((result) => result.verdict === 'VERIFIED')];
@@ -150,8 +169,8 @@ async function main(): Promise<void> {
       break;
     }
     annotations += 1;
-    const level = result.mode === 'enforce' ? 'error' : 'warning';
-    const location = result.budgetExceeded ? '' : `file=${escapeAnnotation(path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md')))},`;
+    const level = result.mode === 'enforce' || result.trustFailure === 'root-revoked' ? 'error' : 'warning';
+    const location = result.budgetExceeded || result.trustFailure ? '' : `file=${escapeAnnotation(path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md')))},`;
     process.stdout.write(`::${level} ${location}title=mago-ski ${entry.verdict}::${escapeAnnotation(`${entry.skillName}: ${entry.reason}`)}\n`);
   }
   process.stdout.write(`${result.summary}\n`);

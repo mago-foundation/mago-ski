@@ -1,6 +1,6 @@
 # Root recovery v1
 
-Status: **proposal, not implemented.** No released version of mago-ski reads the fields or documents described here. Once implemented, this page becomes normative and the changes listed under [Changes to other documents](#changes-to-other-documents) are applied.
+Status: **normative, implemented in mago-ski 0.3** (unreleased; `src/root-events.ts`, `src/timestamp.ts`, `src/policy.ts`, `src/recovery-admin.ts`). Hosts that read policy v2: the CLI, the Pi host and the GitHub Action. The E3 gate service keeps its own pinned root for now (see [Not covered yet](#not-covered-yet)).
 
 In v1, every host trusts one pinned root key and nothing above it. If the root private key leaks, whoever holds the copy can sign trust roots and revocation lists that every host accepts, and the only remedy is to edit the policy on every host by hand ([threat model](../threat-model.md)).
 
@@ -171,6 +171,7 @@ Let *current set* be the recovery set in force just before the event.
 - `new_root.key_id` must not be any key that an earlier event revoked or replaced. A key that has left the root role never returns.
 - `new_root.key_id` may equal `root_key_id` only if that key is not revoked. This changes the recovery set or the timestamp key without changing the root (for example, when a trustee leaves or the timestamp key leaks).
 - `new_timestamp.key_id` must not be the current or new root key, must not be in the current or new recovery set, and must not be a timestamp key that an earlier event replaced.
+- `new_root.key_id` must not be the current or new timestamp key, and `new_recovery` must not contain the current root key, the current timestamp key, or any key that an earlier event revoked or replaced. **A key that has left the root or timestamp role never takes any role again**, so a leaked key cannot come back as a recovery key. Hosts only know the keys replaced by events they walk (after `root_events_after`).
 
 ### Rules for a revoke
 
@@ -352,9 +353,9 @@ Recovery private keys never sit next to `root.pem`, never in CI, and are used on
 
 For freshness, run the timestamp job every 6 hours with a 24-hour lifetime, and keep the timestamp key in a different system from the root key.
 
-## Commands (informative)
+## Commands
 
-Proposed CLI shape; names may change during implementation. Rotations need several trustees who may be in different places, so signing is split into *prepare*, *sign* and *append*, like a TUF root signing ceremony:
+Rotations need several trustees who may be in different places, so signing is split into *prepare*, *sign* and *append*, like a TUF root signing ceremony. Every command that reads the log takes the organization's policy (`--policy`), which names the log and the starting keys. A proposal lists its signers up front, because the signatures cover that list.
 
 ```
 mago-ski recovery init --public-key a.pub --public-key b.pub --public-key c.pub \
@@ -362,24 +363,29 @@ mago-ski recovery init --public-key a.pub --public-key b.pub --public-key c.pub 
 mago-ski root-events init --out root-events.json       # empty log
 
 # Revoke: one trustee is enough with revoke_threshold 1
-mago-ski root-events prepare-revoke --events root-events.json --reason TEXT --out proposal.json
+mago-ski root-events prepare-revoke --policy policy.json --signer-public a.pub --reason TEXT --out proposal.json
 mago-ski root-events sign proposal.json --key a.pem
-mago-ski root-events append proposal.json --events root-events.json
+mago-ski root-events append proposal.json --policy policy.json
 
 # Rotate: the new root and two trustees sign the same proposal
-mago-ski root-events prepare-rotate --events root-events.json --new-root-public r1.pub \
+mago-ski root-events prepare-rotate --policy policy.json --new-root-public r1.pub \
+    --signer-public a.pub --signer-public b.pub \
     [--new-recovery-public KEY.pub ... --rotate-threshold N --revoke-threshold N] \
     [--new-timestamp-public t2.pub] --reason TEXT --out proposal.json
 mago-ski root-events sign proposal.json --key r1.pem
 mago-ski root-events sign proposal.json --key a.pem
 mago-ski root-events sign proposal.json --key b.pem
-mago-ski root-events append proposal.json --events root-events.json
+mago-ski root-events append proposal.json --policy policy.json
+
+# After a rotate: re-sign the trust root and revocation list with the new root (approvers and entries are kept)
+mago-ski root adopt --root-key r1.pem --from-root-fingerprint sha256:<R0> \
+    --trust-root trust-root.json --revocations revocations.json
 
 # Freshness: run by the timestamp job every 6 hours
 mago-ski timestamp sign --policy policy.json --key timestamp.pem --expires 24h
 ```
 
-`append` checks every rule a host would check, so a log that `append` accepts is a log hosts accept. `timestamp sign` reads the files the policy names, signs their digests with the next `version`, and writes the policy's `freshness.timestamp` file.
+`sign` refuses a key the event does not list. `append` checks every rule a host would check, on the whole new log, so a log that `append` accepts is a log hosts accept; it refuses an event with a missing signature. `timestamp sign` reads the files the policy names, checks that the trust root and revocation list are signed by the active root, signs their digests with the next `version`, and writes the policy's `freshness.timestamp` file. `root adopt` keeps every approver of the old trust root: review them before publishing, because a leaked root key may have been used to add some.
 
 Before rolling a v2 policy out to hosts, or after appending an event, the organization checks it the way a host would:
 
@@ -389,9 +395,14 @@ mago-ski policy check --policy policy.json
 
 `policy check` loads the policy, walks the root event log, checks the timestamp if `freshness` is set, verifies that the trust root and revocation list are signed by the active root and that no approver holds another role, and prints the active keys and both thresholds. It exits non-zero on any problem, so it can gate the rollout.
 
+## Not covered yet
+
+- **E3 gate service** (`src/gate/`): its trust store pins one root fingerprint and accepts trust roots and revocation lists from its inbox, without root events or timestamps. A follow-up adds both to the inbox and the trust-state manifest.
+- **Early warning** before a timestamp expires (open question 2) is not implemented.
+
 ## Changes to other documents
 
-When this is implemented:
+Applied with the implementation:
 
 - **[Trust documents](trust-documents-v1.md):** the root-key line under *Key rotation* points here. The host policy and host state sections gain the v2 fields. The decision log section gains the `root-revoked` and `trust-unavailable` records.
 - **[Verification](verification.md):** *Order of checks* starts with the steps in [Order of checks](#order-of-checks) above, and step 1 checks against the active root instead of the pinned fingerprint. The note on shadow mode gains the revoked-root exception.
