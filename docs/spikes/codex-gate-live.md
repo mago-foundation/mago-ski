@@ -13,6 +13,8 @@ sudo MAGO_LIVE_USER=mago-live CODEX_BIN=/path/to/native/codex node tests/live/co
 
 `CODEX_BIN` must be the native binary (`node_modules/@openai/codex-linux-x64/vendor/<triple>/bin/codex`), because the gate allowlists the host by `/proc/<pid>/exe`. With `MAGO_LIVE_USER`, Codex and its hooks run as that unprivileged user, as in a real deployment; the gate service stays root. Codex then needs `bwrap` (bubblewrap) for its sandbox. The script needs root, is not part of `npm test`, and exits 1 if any expectation fails.
 
+**Side effect handled by the script.** Codex's `workspace-write` sandbox creates empty `.git`, `.agents` and `.codex` mount targets in its writable roots, `/tmp` included. A `/tmp/.git` makes the Pi host tests (and any project detection that walks up from `/tmp`) treat `/tmp` as a project, so the script removes the ones it created. Earlier runs of the script did not, and left them behind.
+
 ## Results
 
 Each run has a fresh `HOME`, `CODEX_HOME` and project. Codex itself writes its bundled Skills (`imagegen`, `openai-docs`, `skill-creator`, `skill-installer`) into `~/.codex/skills/.system` at startup. Both versions gave the same results, as root and as `mago-live`.

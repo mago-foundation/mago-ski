@@ -1,6 +1,6 @@
 // Sandboxed preload: exposes exactly the RendererApi, nothing from Node or Electron itself.
 import type { IpcRendererEvent } from 'electron';
-import type { Prefs, RendererApi, ServiceView } from '../service/types.ts';
+import type { AdminLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
 
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
 
@@ -19,6 +19,15 @@ const api: RendererApi = {
     const wrapped = (_event: IpcRendererEvent, view: ServiceView) => listener(view);
     ipcRenderer.on('view:update', wrapped);
     return () => { ipcRenderer.removeListener('view:update', wrapped); };
+  },
+  admin: {
+    status:           () => ipcRenderer.invoke('admin:status'),
+    arm:              () => ipcRenderer.invoke('admin:arm'),
+    disarm:           () => ipcRenderer.invoke('admin:disarm'),
+    inspect:          (id: string) => ipcRenderer.invoke('admin:inspect', id),
+    confirmInspected: (id: string, digest: string) => ipcRenderer.invoke('admin:confirm-inspected', id, digest),
+    approve:          (id: string, digest: string, lifetime: AdminLifetime, reason: string) => ipcRenderer.invoke('admin:approve', id, digest, lifetime, reason),
+    check:            (id: string) => ipcRenderer.invoke('admin:check', id),
   },
 };
 

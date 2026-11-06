@@ -214,6 +214,73 @@ export type ActionResult =
   | { ok: true }
   | { ok: false; code: 'stale' | 'not-found' | 'unreadable'; message: string };
 
+// ------------------------------------------------------------------ administration rack (docs/spec/gui-admin-rack-v1.md)
+
+export type AdminRole = 'root' | 'approver' | 'recovery' | 'timestamp' | 'none';
+export type AdminLifetime = '30d' | '90d' | '180d';
+
+/** The organisation pin (/etc/mago-ski/policy.json) as the administration rack sees it. */
+export interface AdminPinView {
+  kind:            'missing' | 'unprotected' | 'invalid' | 'loaded';
+  path:            string;
+  /** Why the pin is not usable, or a problem with its root event log. */
+  reason:          string | null;
+  rootKeyId:       string | null;
+  /** The root key now in force after root events; null when unknown or revoked. */
+  activeRootKeyId: string | null;
+  mode:            'shadow' | 'enforce' | null;
+  trustOk:         boolean;
+  trustNote:       string | null;
+}
+
+/** What the armed key is. Never carries key material. */
+export interface AdminRoleView {
+  role:      AdminRole;
+  keyId:     string;
+  name:      string | null;
+  scopes:    string[] | null;
+  expiresAt: string | null;
+  note:      string | null;
+}
+
+export interface AdminStatusView {
+  pin:               AdminPinView;
+  /** True when the observation rack reads another policy than the pin (Pi's own). */
+  hostPolicyDiffers: boolean;
+  armed:             AdminRoleView | null;
+  idleMinutes:       number;
+}
+
+export type AdminArmResult =
+  | { ok: true; role: AdminRoleView }
+  | { ok: false; reason: string; keyId?: string }
+  | { ok: false; reason: 'cancelled' };
+
+export interface AdminInspectView {
+  instanceId:  string;
+  name:        string;
+  path:        string;
+  digest:      string;
+  totalBytes:  number;
+  files:       FileRecord[];
+  excluded:    string[];
+  certificate: { source: string; id: string; digest: string; approverKeyId: string; issuedAt: string; expiresAt: string; reason: string } | null;
+  verdict:     { verdict: Verdict; reason: string } | null;
+  /** True when the armed approver already confirmed this exact digest. */
+  inspected:   boolean;
+}
+
+export type AdminActionResult =
+  | { ok: true; certificateId?: string; certificatePath?: string; digest?: string; expiresAt?: string }
+  | { ok: false; message: string };
+
+export interface AdminCheckView {
+  verdict:   Verdict | null;
+  reason:    string;
+  trustOk:   boolean;
+  trustNote: string | null;
+}
+
 /** The narrow API the preload script exposes to the renderer as `window.magoSki`. */
 export interface RendererApi {
   getView():                                          Promise<ServiceView>;
@@ -227,4 +294,14 @@ export interface RendererApi {
   copyText(text: string):                             Promise<void>;
   dismissHistoryReset():                              Promise<ServiceView>;
   onUpdate(listener: (view: ServiceView) => void):    () => void;
+  admin: {
+    status():                                                          Promise<AdminStatusView>;
+    /** Opens the key dialog in the main process; the renderer never names a file. */
+    arm():                                                             Promise<AdminArmResult>;
+    disarm():                                                          Promise<AdminStatusView>;
+    inspect(instanceId: string):                                       Promise<AdminInspectView>;
+    confirmInspected(instanceId: string, digest: string):              Promise<AdminActionResult>;
+    approve(instanceId: string, digest: string, lifetime: AdminLifetime, reason: string): Promise<AdminActionResult>;
+    check(instanceId: string):                                         Promise<AdminCheckView>;
+  };
 }
