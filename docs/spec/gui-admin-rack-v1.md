@@ -1,6 +1,6 @@
 # GUI administration rack v1
 
-Status: **draft.** Phase 1 (the organisation pin, identity, the template framework and the *Approve a Skill version* template) is implemented in the GUI proof of concept (`gui/src/service/admin.ts`, `gui/src/renderer/admin.ts`, tests in `gui/tests/admin.test.ts`). Phases 2 and 3 are specified here and not yet implemented. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
+Status: **draft.** Phase 1 (the organisation pin, identity, the template framework and the *Approve a Skill version* template) is implemented in the GUI proof of concept (`gui/src/service/admin.ts`, `gui/src/renderer/admin.ts`, tests in `gui/tests/admin.test.ts`). Phase 2 (*Manage approvers*, *Revoke*, *Publish*) is specified in detail below and being implemented; phase 3 is specified and not yet implemented. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
 
 The [GUI](../../gui/README.md) began as a read-only companion: it showed how installed Skills change and what the host policy decides, and never signed anything. This document adds an **administration rack**, so approvers and administrators can do in the GUI everything they can do with the CLI, in fixed chains of devices (templates), next to the observation rack.
 
@@ -83,7 +83,7 @@ Changing an input (another Skill, a new digest) resets every device after it.
 | **Approve a Skill version** | IDENTITY → INSPECT → APPROVE → POLICY CHECK | Approver | `digest --explain`, `diff`, `inspect`, `approve --expect-digest`, `verify` | 1 |
 | **Manage approvers** | IDENTITY → TRUST ROOT → POLICY CHECK | Root | `root show`, `root add-approver`, `root remove-approver`, `policy check` | 2 |
 | **Revoke** | IDENTITY → INSPECT → REVOKE → POLICY CHECK | Root | `inspect`, `revoke key`, `revoke digest`, `policy check` | 2 |
-| **Publish** | IDENTITY → REVOCATION REFRESH → TIMESTAMP → POLICY CHECK | Root, then timestamp signer | `revoke refresh`, `timestamp sign`, `policy check`, `verify-all` | 2 |
+| **Publish** | IDENTITY → REVOCATION REFRESH → IDENTITY (timestamp) → TIMESTAMP → POLICY CHECK | Root, then timestamp signer | `revoke refresh`, `timestamp sign`, `policy check`, `verify-all` | 2 |
 | **Set up an organisation** | KEYS → ROOT INIT → RECOVERY SET → POLICY CHECK | none (creates the keys) | `keygen`, `root init`, `recovery init`, `root-events init`, `policy check` | 3 |
 | **Root incident** | IDENTITY → ROOT EVENT → ADOPT → POLICY CHECK | Recovery trustees, then the new root | `root-events prepare-revoke`, `prepare-rotate`, `show`, `sign`, `append`, `root adopt`, `policy check` | 3 |
 
@@ -104,6 +104,56 @@ The approver confirms *"I reviewed exactly this version"*, which records the dig
 **APPROVE** takes the inspected digest. It shows the Skill name the certificate will carry (from `SKILL.md`, as `approve` does) and refuses to run if the approver's scopes do not cover that name. The approver picks a lifetime (30, 90 or 180 days, never past the approver key's own expiry) and writes a reason (required, at most 1024 characters, plain text). The main process re-checks the role, then calls the engine's `approveSkill` with `expectDigest` set to the inspected digest, so a Skill that changed since INSPECT is refused. The certificate is written where `approve` writes it by default: `<Skill>/.mago-ski-cert.json`, or `<first certificate_dirs entry>/<name>.cert.json` when the pin's policy has `certificate_dirs`. The device shows the certificate id and path.
 
 **POLICY CHECK** verifies the Skill under the pin's policy, without recording versions, and shows the verdict. After a successful APPROVE it should be `VERIFIED`; anything else is shown with the engine's reason. It also shows the policy's trust status.
+
+### Shared rules for phases 2 and 3
+
+- **Signing with a loaded key.** Every engine operation a device runs takes the armed key object, never a file path (as `approveSkill` does since phase 1): `addApprover`, `removeApprover`, `updateRevocations`, `signPolicyTimestamp`, `adoptTrustDocuments`, `signRootEvent`.
+- **Where documents are written.** A root device writes the documents the pin names (`trust_root`, `revocations`, `freshness.timestamp`, `root_events`), atomically, as the CLI does. The pin itself is never written. If the user running the GUI cannot write a document, the device fails with the file system's error and nothing else changes.
+- **Changing key mid-chain.** A template that needs two roles (*Publish*) has a second IDENTITY step before the device that needs the other key. Arming the second key drops the first. Devices already done keep their result; every device after the new IDENTITY step resets.
+- **Freshness after a change.** With `freshness` in the pin, any new trust root or revocation list no longer matches the timestamp, so hosts stop trusting until a new timestamp is signed. Root devices that write a document say so, and POLICY CHECK shows the timestamp mismatch, until *Publish* signs a new one.
+- **Role separation.** A key added as an approver must not be the active root, a recovery key or the active timestamp key. TRUST ROOT refuses it before signing, in addition to the engine's own checks.
+
+### Manage approvers (phase 2)
+
+**IDENTITY** needs the Root administrator role.
+
+**TRUST ROOT** shows the trust root under the active root: version, issue and expiry dates, and every approver with name, key id, scopes and expiry (`root show`). It offers three actions, each re-signing the trust root with the next version:
+
+- **Add or replace an approver.** The approver's public key file is chosen in a native dialog owned by the main process. The device also takes a name (plain text, at most 128 characters), one or more scopes (each `*`, a `prefix-*` pattern or an exact name), and a key lifetime (90, 180 or 365 days). This is `root add-approver`.
+- **Remove an approver.** The device asks for confirmation and suggests revoking the key instead if it may be compromised. This is `root remove-approver`.
+- **Renew the trust root.** The lifetime is 180 or 365 days, and the approvers are unchanged. This is `root add-approver` and `root remove-approver` with `--trust-root-expires`.
+
+**POLICY CHECK** shows the pin's trust state (`policy check`): trust root and revocation list versions and expiry dates, and the timestamp state with freshness.
+
+### Revoke (phase 2)
+
+**IDENTITY** needs the Root administrator role.
+
+**INSPECT** picks the target. It is either **a Skill version**, a discovered Skill's current digest shown as in phase 1, or **an approver key**, chosen from the trust root's approvers.
+
+**REVOKE** shows exactly what stops verifying:
+
+- for a version, every certificate for that digest;
+- for a key, every certificate the key signed.
+
+It takes a reason (plain text, at most 512 characters) and a lifetime for the new revocation list (7 or 30 days). The administrator must tick a confirmation stating the consequence before the device signs. This is `revoke digest` or `revoke key`. A target that is already revoked is refused.
+
+**POLICY CHECK**:
+
+- for a version, verifies that Skill under the pin; the expected verdict is `REVOKED`;
+- for a key, lists every discovered Skill whose certificate the key signed, with its new verdict.
+
+### Publish (phase 2)
+
+**IDENTITY** needs the Root administrator role.
+
+**REVOCATION REFRESH** shows the revocation list's version, expiry and days left. It re-signs the list unchanged with the next version and a new lifetime of 7 or 30 days (`revoke refresh`).
+
+**IDENTITY (timestamp)** needs the Timestamp signer role. If the pin has no `freshness`, this step and TIMESTAMP are shown as *not used by this organisation* and count as done.
+
+**TIMESTAMP** signs the pin's timestamp over the documents as they are now (`timestamp sign`). The lifetime is 6, 12 or 24 hours, never longer than `freshness.max_lifetime`.
+
+**POLICY CHECK** checks the pin the way a host does (`policy check`, without recording state), then verifies every discovered Skill (`verify-all`). It shows the counts per verdict.
 
 ## Process boundaries
 
