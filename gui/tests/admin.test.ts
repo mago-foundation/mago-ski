@@ -884,10 +884,15 @@ test('C-F5: a memory that cannot be written (read-only file and folder) makes th
   const stateDir = path.dirname(w.stateFile);
   await chmod(w.stateFile, 0o400);
   await chmod(stateDir, 0o500);
-  t.after(() => chmod(stateDir, 0o700));
-  const status = await w.session.status();
-  assert.equal(status.pin.kind, 'invalid');
-  assert.match(status.pin.reason ?? '', /^이 컴퓨터의 기록을 저장하지 못했어요/u);
-  assert.equal(status.memoryReset, null);
-  assert.deepEqual((await readdir(stateDir)).filter((n) => n.includes('.unreadable-')), []);
+  try {
+    const status = await w.session.status();
+    assert.equal(status.pin.kind, 'invalid');
+    assert.match(status.pin.reason ?? '', /^이 컴퓨터의 기록을 저장하지 못했어요/u);
+    assert.equal(status.memoryReset, null);
+    assert.deepEqual((await readdir(stateDir)).filter((n) => n.includes('.unreadable-')), []);
+  } finally {
+    // Restore before the world's own cleanup removes the folder (after-hooks run in registration order).
+    await chmod(stateDir, 0o700);
+    await chmod(w.stateFile, 0o600);
+  }
 });
