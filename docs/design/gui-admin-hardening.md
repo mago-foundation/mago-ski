@@ -326,3 +326,33 @@ The two Goldfish code reviews of `fcc8192` found no HIGH findings. The fixes bel
     - the memory paragraph, for items 1 and 2;
     - the dialogs paragraph, for items 3 and 8;
     - D3's "concurrent writes are safe", which becomes *safe within one process; see Known limit*.
+
+### Review of v5.1 (v5.2)
+
+The review of `21b4504..7802a6c` found no HIGH findings. These changes take precedence over v5.1. The reviewer's verified candidate fixes are in `/var/tmp/review-v51-scratch/mut4`.
+
+1. **One dialog at the moment it opens (F1).**
+   - `approve` calls `this.requireNoDialog()` again immediately before it claims the review record (before the signing dialog).
+   - `review` calls it again immediately before `ask(confirmReview)`.
+
+   So the check runs when the dialog is shown, not only when the operation starts. Test: a queued approve that yields, plus a `pickFile` call, never has two dialogs open.
+2. **Key file identity after the dialog (F2).**
+   - `approve` awaits `requireSameKeyFile(armed)` before the `resolveOutside` and `keyInsideSkills` checks.
+   - `beforeSign` awaits `requireSameKeyFile(latest.armed)` again.
+
+   A key moved away or swapped then returns `키 파일이 바뀌었어요. 다시 불러오세요.` and drops the key. Test `admin.test.ts:242` expects that message, no longer `KEY_IN_SKILL`. New tests cover:
+   - a key moved into a digest-excluded folder (`.git`) during the dialog is refused and no certificate is written;
+   - a key moved away before the dialog gives the swap message and the key is dropped.
+3. **Canonical chain key (F3).** The `persistState` chain is keyed by `await canonicalOrLexical(statePath)`. Test: two spellings of the same file, through a symlinked folder, never lower a version.
+4. **Renderer (F4).** Every renderer call that sets status (disarm, reset, dismiss, fetch) goes through the request counter.
+5. **`dialogSafe` (F5).** The variation selectors U+FE00–U+FE0F and U+E0100–U+E01EF, U+034F, U+3164 and U+2800 are added to the replaced set. The rest of `\p{Mn}` is not added, so decomposed accents are kept.
+6. **Unreadable memory recovery (F7).** The `기록 초기화` button is also shown when the pin is invalid with `MEMORY_BUSY`. A rename needs no read permission.
+7. **Known limit restored (F8).** The spec's Known limit again says that an unqueued status poll that overlaps a load while the root event log grows can report a transient rollback.
+8. **Tests (F9).**
+   - `tests/root-recovery.test.ts:725` must reach the write path: corrupt the file after the first load, then load again with a newer document, and check that the corrupt bytes are unchanged.
+   - `admin.test.ts:709` adds the folder to `discoveryRoots`, through a mutable world option, and no longer to `hostSkillDirs`.
+9. **Wording (F10).**
+   - The design, spec and CHANGELOG say "the key file must be the same file, and must not be inside a Skill, both before the dialog and immediately before signing".
+   - "canonical" is now true.
+   - The spec says "mock timers" in place of "promise gate".
+   - `resetMemory`'s `ok` is documented as "not refused": a cancel is `ok: true`.
