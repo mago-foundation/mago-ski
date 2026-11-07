@@ -320,7 +320,7 @@ The two Goldfish code reviews of `fcc8192` found no HIGH findings. The fixes bel
     - a lifetime past the refreshed expiry, refused;
     - a key folder that becomes a discovery root after arm, refused.
 
-    Replace the 80 ms sleep in the idle test with a promise gate.
+    Replace the 80 ms sleep in the idle test with mock timers.
 12. **Spec.** Update the following:
     - lines 82 and 148 of `docs/spec/gui-admin-rack-v1.md` (items 1 and 7);
     - the memory paragraph, for items 1 and 2;
