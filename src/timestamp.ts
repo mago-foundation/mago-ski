@@ -15,6 +15,9 @@ export const MAX_TIMESTAMP_LIFETIME_MS      = 7 * 24 * 60 * 60 * 1000;
 
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
+/** The timestamp is older than one this host has already seen; callers match on the class, not the message. */
+export class TimestampRollbackError extends Error {}
+
 export interface Timestamp {
   version:     number;
   issuedAt:    Date;
@@ -126,7 +129,7 @@ export function verifyTimestamp(bytes: Uint8Array, options: {
   if (timestamp.expiresAt.getTime() <= now)
     throw new Error(`timestamp expired at ${formatTimestamp(timestamp.expiresAt)}; the timestamp job may have stopped`);
   if (options.minimumVersion !== undefined && timestamp.version < options.minimumVersion)
-    throw new Error(`timestamp version ${timestamp.version} is older than version ${options.minimumVersion} already seen (rollback)`);
+    throw new TimestampRollbackError(`timestamp version ${timestamp.version} is older than version ${options.minimumVersion} already seen (rollback)`);
   const { inputs } = options;
   if (timestamp.rootEvents.sha256 !== inputs.rootEvents.sha256 || timestamp.rootEvents.count !== inputs.rootEvents.count)
     throw new Error('the root event log does not match the timestamp');

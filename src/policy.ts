@@ -8,7 +8,7 @@ import {
   MAX_ROOT_EVENTS_BYTES, parseRecoverySet, walkRootEventsCached, type RecoverySet, type RootWalk,
 } from './root-events.ts';
 import { formatTimestamp, parseDuration } from './time.ts';
-import { DEFAULT_MAX_TIMESTAMP_LIFETIME, MAX_TIMESTAMP_BYTES, MAX_TIMESTAMP_LIFETIME_MS, verifyTimestamp } from './timestamp.ts';
+import { DEFAULT_MAX_TIMESTAMP_LIFETIME, MAX_TIMESTAMP_BYTES, MAX_TIMESTAMP_LIFETIME_MS, TimestampRollbackError, verifyTimestamp } from './timestamp.ts';
 import { CERTIFICATE_FILENAME, sha256Hex } from './tree-digest.ts';
 import {
   loadTrustContext, unverifiable, verifySkill, type CertificateSource, type MinimumVersions,
@@ -327,8 +327,142 @@ async function readTrustFile(filePath: string, label: string, maxBytes: number):
   }
 }
 
-const failure = (reason: string, extra: { rootRevoked?: boolean } = {}): TrustContextResult =>
+type RootProgress = NonNullable<HostState['rootEvents'][string]>;
+/** `null`: the policy has no recovery; `{ error }`: the log could not be read. */
+type RootEventLog = { bytes: Buffer } | { error: string } | null;
+
+type RootCheck =
+  | { ok: true; walk: RootWalk | null; activeRootKeyId: string; progress: RootProgress | null }
+  | { ok: false; reason: string; rootRevoked: boolean; rollback?: true; walk: RootWalk | null; progress: RootProgress | null };
+
+/*
+ * A revoke this host has applied stays in force while the log cannot be checked: making the log missing, malformed,
+ * shorter or forked must not turn root-revoked into trust-unavailable, which shadow mode would let through.
+ */
+function rootBlocked(problem: string, entry: RootProgress | undefined): { reason: string; rootRevoked: boolean } {
+  return entry?.revoked
+    ? { reason: `root key was revoked by root event ${entry.sequence}, and the root event log cannot be checked now (${problem}); waiting for a valid log with a rotation`, rootRevoked: true }
+    : { reason: problem, rootRevoked: false };
+}
+
+/**
+ * The root-event part of a load, without I/O: walks the log, compares it with what this host has applied (rollback,
+ * fork), and says which progress to record. `loadPolicyTrust` and `loadPolicyRoot` both apply `progress` to their state.
+ * Only a revoke result carries a walk on failure; a log that is old, forked or unreadable yields no walk and so no roles.
+ */
+function checkRootEvents(policy: Policy, state: HostState, log: RootEventLog, now: Date): RootCheck {
+  const recovery = policy.recovery;
+  const pinned   = policy.rootKeyId;
+  if (!recovery || log === null) return { ok: true, walk: null, activeRootKeyId: pinned, progress: null };
+
+  const seen = state.rootEvents[pinned];
+  const stop = (problem: string, rollback?: true): RootCheck =>
+    ({ ok: false, ...rootBlocked(problem, seen), ...(rollback ? { rollback } : {}), walk: null, progress: null });
+
+  if ('error' in log) return stop(`root event log: ${log.error}`);
+  let walk: RootWalk;
+  try {
+    walk = walkRootEventsCached(log.bytes, {
+      rootKeyId: pinned, recovery: recovery.set, timestampKeyId: recovery.freshness?.keyId ?? null, eventsAfter: recovery.eventsAfter,
+    }, now);
+  } catch (error) {
+    return stop(`root event log: ${(error as Error).message}`);
+  }
+  if (seen) {
+    if (walk.count < seen.sequence)
+      return stop(`root event log has ${walk.count} event(s), but this host has already applied ${seen.sequence} (rollback)`, true);
+    if (walk.eventDigests[seen.sequence - 1] !== seen.event_digest)
+      return stop(`root event ${seen.sequence} differs from the one this host already applied (fork); the organization must resolve it`);
+  }
+  // Only events this host checked are recorded: those before root_events_after were never verified here.
+  const progress: RootProgress | null = walk.count > recovery.eventsAfter && (!seen || walk.count > seen.sequence)
+    ? { sequence: walk.count, event_digest: walk.eventDigests[walk.count - 1]!, ...(walk.revoked ? { revoked: true as const } : {}) }
+    : null;
+  if (walk.revoked) {
+    return {
+      ok: false, rootRevoked: true, walk, progress,
+      reason: `root key ${walk.activeRootKeyId} was revoked by root event ${walk.revoked.sequence} (${walk.revoked.reason}); waiting for a rotation`,
+    };
+  }
+  return { ok: true, walk, activeRootKeyId: walk.activeRootKeyId, progress };
+}
+
+async function readRootEventLog(policy: Policy): Promise<RootEventLog> {
+  if (!policy.recovery) return null;
+  try {
+    return { bytes: await readTrustFile(policy.recovery.rootEventsPath, 'Root event log', MAX_ROOT_EVENTS_BYTES) };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+/** Applies a progress entry to a state, as the loads record it. */
+function applyProgress(state: HostState, pinned: string, progress: RootProgress): void {
+  state.v2 = true;
+  state.rootEvents[pinned] = progress;
+}
+
+/**
+ * Merges `state` with the state file as it is now and writes the result. An unreadable file is replaced by this
+ * load's state, as before. Returns the merged state, or the reason the write failed.
+ */
+async function persistState(statePath: string, state: HostState): Promise<{ state: HostState } | { error: string }> {
+  try {
+    let disk: HostState | null = null;
+    try {
+      disk = await readState(statePath);
+    } catch {
+      disk = null;
+    }
+    const merged = disk ? mergeHostState(state, disk) : state;
+    await writeFileAtomic(statePath, stateBytes(merged), 0o600);
+    return { state: merged };
+  } catch (error) {
+    return { error: `cannot record trust versions in ${statePath}: ${(error as Error).message}` };
+  }
+}
+
+type FailureExtra = { rootRevoked?: boolean; rollback?: true; stateError?: 'unreadable' | 'write' };
+
+const failure = (reason: string, extra: FailureExtra = {}): TrustContextResult =>
   ({ ok: false, verdict: 'UNVERIFIABLE', reason, ...extra });
+
+export type PolicyRootResult =
+  | { ok: true; walk: RootWalk | null; activeRootKeyId: string }
+  | { ok: false; reason: string; rootRevoked: boolean; walk: RootWalk | null; rollback?: true; stateError?: 'unreadable' | 'write' };
+
+/**
+ * Only the root-event part of `loadPolicyTrust`: which root key is active, whether it is revoked, and the walk. It
+ * reads the state and the log, checks rollback and forks the same way, and with `recordVersions` (the default) and a
+ * state file records the progress with the same merge-before-write. A policy without `recovery` reads nothing.
+ */
+export async function loadPolicyRoot(policy: Policy, now: Date, options: { recordVersions?: boolean } = {}): Promise<PolicyRootResult> {
+  if (!policy.recovery) return { ok: true, walk: null, activeRootKeyId: policy.rootKeyId };
+  const pinned = policy.rootKeyId;
+  let state: HostState = { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
+  try {
+    if (policy.statePath) state = await readState(policy.statePath);
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message, rootRevoked: false, walk: null, stateError: 'unreadable' };
+  }
+  const checked = checkRootEvents(policy, state, await readRootEventLog(policy), now);
+  if (checked.progress) applyProgress(state, pinned, checked.progress);
+
+  if (checked.progress && options.recordVersions !== false && policy.statePath !== null) {
+    const saved = await persistState(policy.statePath, state);
+    if ('error' in saved) {
+      // A revoke stays reported as a revoke even when it could not be recorded.
+      if (!checked.ok) return { ok: false, reason: checked.reason, rootRevoked: checked.rootRevoked, walk: checked.walk, ...(checked.rollback ? { rollback: true as const } : {}) };
+      return { ok: false, reason: saved.error, rootRevoked: false, walk: null, stateError: 'write' };
+    }
+    const merged = saved.state.rootEvents[pinned];
+    if (checked.ok && checked.walk && merged && merged.sequence > checked.walk.count)
+      return { ok: false, ...rootBlocked(`root event log has ${checked.walk.count} event(s), but this host has already applied ${merged.sequence} (rollback)`, merged), walk: null, rollback: true };
+  }
+  if (!checked.ok)
+    return { ok: false, reason: checked.reason, rootRevoked: checked.rootRevoked, walk: checked.walk, ...(checked.rollback ? { rollback: true as const } : {}) };
+  return { ok: true, walk: checked.walk, activeRootKeyId: checked.activeRootKeyId };
+}
 
 /**
  * Loads trust documents for a policy, enforcing rollback protection through the state file.
@@ -345,7 +479,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
   try {
     if (policy.statePath) state = await readState(policy.statePath);
   } catch (error) {
-    return failure((error as Error).message);
+    return failure((error as Error).message, { stateError: 'unreadable' });
   }
   const recovery = policy.recovery;
   const pinned = policy.rootKeyId;
@@ -353,71 +487,38 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
   let walk: RootWalk | null = null;
   let logBytes: Buffer | null = null;
 
-  /*
-   * A revoke this host has applied stays in force while the log cannot be checked: making the log missing, malformed,
-   * shorter or forked must not turn root-revoked into trust-unavailable, which shadow mode would let through.
-   */
-  const blocked = (problem: string, entry = state.rootEvents[pinned]): TrustContextResult => entry?.revoked
-    ? failure(`root key was revoked by root event ${entry.sequence}, and the root event log cannot be checked now (${problem}); waiting for a valid log with a rotation`, { rootRevoked: true })
-    : failure(problem);
-
   // Root event progress is recorded as soon as the log is accepted, even if a later step fails: the events are signed
   // by recovery keys, and remembering them is what stops a host being moved back to a log without a revoke.
   let stateChanged = false;
   const saveState = async (): Promise<TrustContextResult | null> => {
     if (!record || !stateChanged) return null;
-    try {
-      let disk: HostState | null = null;
-      try {
-        disk = await readState(policy.statePath!);
-      } catch {
-        disk = null; // unreadable now: this load's state replaces it, as before
-      }
-      if (disk) state = mergeHostState(state, disk);
-      await writeFileAtomic(policy.statePath!, stateBytes(state), 0o600);
-      stateChanged = false;
-    } catch (error) {
-      return failure(`cannot record trust versions in ${policy.statePath}: ${(error as Error).message}`);
-    }
+    const saved = await persistState(policy.statePath!, state);
+    if ('error' in saved) return failure(saved.error, { stateError: 'write' });
+    state = saved.state;
+    stateChanged = false;
     // Another load on this host may have applied later root events meanwhile; this load's log is then a rollback.
     const merged = state.rootEvents[pinned];
-    if (walk && merged && merged.sequence > walk.count)
-      return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${merged.sequence} (rollback)`, merged);
+    if (walk && merged && merged.sequence > walk.count) {
+      const { reason, rootRevoked } = rootBlocked(`root event log has ${walk.count} event(s), but this host has already applied ${merged.sequence} (rollback)`, merged);
+      return failure(reason, { ...(rootRevoked ? { rootRevoked } : {}), rollback: true });
+    }
     return null;
   };
 
   if (recovery) {
-    const seen = state.rootEvents[pinned];
-    try {
-      logBytes = await readTrustFile(recovery.rootEventsPath, 'Root event log', MAX_ROOT_EVENTS_BYTES);
-      walk = walkRootEventsCached(logBytes, {
-        rootKeyId: pinned, recovery: recovery.set, timestampKeyId: recovery.freshness?.keyId ?? null, eventsAfter: recovery.eventsAfter,
-      }, now);
-    } catch (error) {
-      return blocked(`root event log: ${(error as Error).message}`);
-    }
-    if (seen) {
-      if (walk.count < seen.sequence)
-        return blocked(`root event log has ${walk.count} event(s), but this host has already applied ${seen.sequence} (rollback)`);
-      if (walk.eventDigests[seen.sequence - 1] !== seen.event_digest)
-        return blocked(`root event ${seen.sequence} differs from the one this host already applied (fork); the organization must resolve it`);
-    }
-    // Only events this host checked are recorded: those before root_events_after were never verified here.
-    if (walk.count > recovery.eventsAfter && (!seen || walk.count > seen.sequence)) {
-      state.v2 = true;
-      state.rootEvents[pinned] = {
-        sequence: walk.count, event_digest: walk.eventDigests[walk.count - 1]!, ...(walk.revoked ? { revoked: true as const } : {}),
-      };
+    const log = await readRootEventLog(policy);
+    const checked = checkRootEvents(policy, state, log, now);
+    if (checked.progress) {
+      applyProgress(state, pinned, checked.progress);
       stateChanged = true;
     }
-    if (walk.revoked) {
-      await saveState();
-      return failure(
-        `root key ${walk.activeRootKeyId} was revoked by root event ${walk.revoked.sequence} (${walk.revoked.reason}); waiting for a rotation`,
-        { rootRevoked: true },
-      );
+    walk = checked.walk;
+    if (!checked.ok) {
+      if (checked.progress) await saveState();
+      return failure(checked.reason, { ...(checked.rootRevoked ? { rootRevoked: true } : {}), ...(checked.rollback ? { rollback: true as const } : {}) });
     }
-    activeRootKeyId = walk.activeRootKeyId;
+    logBytes = log !== null && 'bytes' in log ? log.bytes : null;
+    activeRootKeyId = checked.activeRootKeyId;
   }
 
   let trustRootBytes: Buffer;
@@ -448,7 +549,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
         },
       });
     } catch (error) {
-      return await saveState() ?? failure(`freshness: ${(error as Error).message}`);
+      return await saveState() ?? failure(`freshness: ${(error as Error).message}`, error instanceof TimestampRollbackError ? { rollback: true } : {});
     }
   }
 
