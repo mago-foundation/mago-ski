@@ -1,6 +1,6 @@
 # Design: hardening the administration rack (phase 1.1)
 
-Status: draft v2, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed the comprehension check and two antagonistic reviews found gaps; this version resolves them (see [Changes from v1](#changes-from-v1)).
+Status: draft v3, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed comprehension and two antagonistic reviews; v2 failed comprehension and readiness. **[Decisions and exact details (v3)](#decisions-and-exact-details-v3) settles every open point and wins over any earlier section.**
 
 ## Problem
 
@@ -40,12 +40,12 @@ Phase 2 adds root-key operations to the same mechanism, so these are fixed first
 - **Signing dialog.** `approve` shows a second native dialog with: action, Skill name, folder path, the reviewed digest, the digest about to be signed (they must be equal, else refuse before showing), lifetime and resulting expiry date, reason, and the armed key's role, name and key id. Buttons 취소 (default) and 서명.
 - **Cooldown.** After a cancel or a timeout of either dialog, `review` and `approve` are refused for 10 seconds ("잠시 후 다시 시도하세요"), so a compromised renderer cannot spam dialogs until one is clicked by accident.
 - **Timeout.** A dialog unanswered for 120 seconds is treated as a cancel (the dialog is closed by destroying its parent-less modal, or the result is ignored and the cooldown applies).
-- **Text.** Every field shown in a dialog is already display-safe (Skill names are ASCII by `validateSkillName`; the reason passes `requireDisplaySafeText`; paths are shown as they are; long text is cut at 300 characters with an ellipsis).
+- **Text.** Every field is shown in full (the reason up to its 1024-unit limit, never cut). Paths and reasons pass through `dialogSafe` (see v3 D14).
 
 ### 2. Synchronous disarm and a queue for the rest (F6, F7, F10)
 
 - `dropKey(reason)` is private and **synchronous**: `armed = null`, `generation += 1`, `reviews.clear()`, clear the idle timer. It is never queued and is safe to call from anywhere, including inside queued work and from event handlers. The public `disarm()` calls it directly.
-- `arm`, `review` and `approve` run through one promise queue (`serial`). `status` and `inspect` and `check` are **not** queued (they only read) and never wait for a dialog.
+- `arm`, `review`, `approve` and `resetMemory` run through one promise queue (`serial`). `status`, `inspect` and `check` are **not** queued and never wait for a dialog; they do write the GUI memory through `readPin` (v3 D3).
 - Every queued operation captures `const op = { keyId: armed.keyId, generation }` before its first `await`, and every later step compares `op.generation === this.generation`; a mismatch ends the operation with "키가 빠졌어요" and writes nothing.
 - **Idle.** Only `arm`, `review` and `approve` refresh `lastUsed`; `status`, `inspect` and `check` never do. The idle timer calls `dropKey('idle')`.
 - **Status re-check.** `status()` calls `recheck()`, which reads the pin and recomputes the role without throwing; on a pin hash change or a role change it calls `dropKey`. The renderer polls `admin:status` every 5 seconds while the 관리 tab is visible, so a pin change or revocation disarms within about 5 seconds even without an operation.
@@ -64,16 +64,14 @@ Phase 2 adds root-key operations to the same mechanism, so these are fixed first
 - **First run.** `stateDir` is created with mode `0700` if missing. The first load records whatever the pin's documents are; there is no floor before that.
 - **Corrupt file.** If the engine reports that the state file cannot be parsed, `readPin` renames it to `admin-state.json.unreadable-<timestamp>`, records a `memoryReset` notice (shown in the 관리 tab until dismissed) and loads again with an empty memory.
 - **Legitimate reset.** When an organisation re-initialises with the same root key (versions restart), loads fail as rollback. The 관리 tab then shows "이 컴퓨터의 기록보다 오래된 문서예요" with a 기록 초기화 button, which shows a native confirmation and on 확인 renames the file aside as above.
-- **Failed write.** A failure to write the memory makes the pin `invalid` with the reason; it does not disarm by itself (the next re-check does if the role is gone).
+- **Failed write.** A failure to write the memory makes the pin `invalid` with the reason, and any armed key is dropped (v3 D4).
 - **What it protects.** Accidental replay and replay by a third party who can change the documents but not this user's profile. It does not protect against the user, who can delete or move it (including with `MAGO_SKI_GUI_DATA`). With `freshness` in the pin, the timestamp bounds replay for everyone.
 
 ### 5. `loadPolicyRoot` and a shared pure check (F4)
 
 - In `src/policy.ts`, the root-event part of `loadPolicyTrust` (lines that walk the log, compare with `state.rootEvents`, record progress and detect a revoked root) moves into a **pure** internal function:
   ```ts
-  function checkRootEvents(policy: Policy, state: HostState, logBytes: Buffer | null, now: Date):
-    | { ok: true; walk: RootWalk | null; activeRootKeyId: string; progress: HostState['rootEvents'][string] | null }
-    | { ok: false; reason: string; rootRevoked: boolean; progress: HostState['rootEvents'][string] | null };
+  // Superseded by v3 D6 and D9 (exact signature there).
   ```
   It does no I/O. `progress` is the entry to record (or null). `loadPolicyTrust` reads the state and the log as today, calls it, applies `progress` to its `state` and keeps its save, merge and message logic unchanged.
 - New export:
@@ -90,7 +88,7 @@ Phase 2 adds root-key operations to the same mechanism, so these are fixed first
 
 - `arm` refuses a key whose canonical path (realpath) is inside any of: the GUI's discovery roots, every discovered Skill folder, the pin policy's `skill_dirs`, and the host policy's `skill_dirs`. The message is fixed text without the path.
 - `approve` passes the armed key's canonical path to `resolveOutside(keyPath, skillDir, ...)` before signing, and maps its error to fixed text.
-- **Limits stated in the spec.** A hard link to the key elsewhere, or a key moved into a Skill after arming, is not detected; the private-key scan at signing covers digest-covered files only, as in the CLI.
+- **Limits stated in the spec.** A copy or hard link of the key inside a Skill is not detected (a moved key fails the stored-path check at signing); the private-key scan at signing covers digest-covered files only, as in the CLI.
 
 ### 7. One read for the name, and the moment of signing (F6, F8, F13)
 
@@ -177,3 +175,54 @@ Phase 2 adds root-key operations to the same mechanism, so these are fixed first
 - No `sensitive` read option; zeroing is best effort (A8, comprehension 3).
 - Test seams and the edited helper are named; findings are numbered (B7, B8, comprehension 11 and 12).
 - The spec changes list covers every sentence the design overturns (B9, comprehension 10).
+
+## Decisions and exact details (v3)
+
+This section wins over every earlier section. "D" numbers answer the v2 comprehension check; "R" numbers answer the v2 readiness check.
+
+### Roles, root and memory
+
+- **D1 Revoked root.** `PolicyRootResult`'s failure variant carries `walk: RootWalk | null` (the walk up to and including the revoke, or null when the log could not be walked). `roleOf`: the root role requires `pin.root.ok` and `pin.root.activeRootKeyId === keyId`; recovery and timestamp roles use `pin.root.walk` whenever it is non-null (so trustees can sign the rotation after a revoke); `activeRoot(pin)` returns null when `!pin.root.ok`.
+- **D2 Typed failures (R3).** Engine failure results gain optional typed fields, messages unchanged: `TrustContextResult`'s failure variant and `PolicyRootResult`'s failure variant get `rollback?: true` (set wherever a version, sequence or timestamp version is lower than the state's: `loadTrustContext`'s minimum checks in `src/verify.ts`, the root-event rollback in `checkRootEvents`, the timestamp minimum in `loadPolicyTrust`) and `stateError?: 'unreadable' | 'write'` (set at the existing `readState` catch and at the save failure). The GUI matches only these fields, never message text.
+- **D3 Who writes the memory.** Every `readPin` call records (`recordVersions: true`), queued or not; concurrent writes are safe because the engine re-reads and merges before every write.
+- **D4 Memory write failure.** `stateError: 'write'` makes `readPin` return `{ kind: 'invalid', reason: '이 컴퓨터의 기록을 저장하지 못했어요: ' + reason }`; `recheck` and `current` drop the key on any non-`loaded` pin.
+- **D5 Corrupt memory.** `stateError: 'unreadable'` makes `readPin` rename the file to `admin-state.json.unreadable-<ISO time with ':' replaced by '-'>`, set `AdminSession.memoryReset = { at, backup }` and load again once. **Rollback** (`rollback: true` from either result) makes `AdminStatusView.rollback = true`; the tab shows `이 컴퓨터가 이미 본 것보다 오래된 문서예요. 조직이 문서를 다시 만들었다면 기록을 초기화하세요.` and the 기록 초기화 button.
+- **D6 `checkRootEvents` exact signature.**
+  ```ts
+  type RootEventLog = { bytes: Buffer } | { error: string } | null; // null: policy has no recovery
+  type RootProgress = { sequence: number; event_digest: string; revoked?: true };
+  function checkRootEvents(policy: Policy, state: HostState, log: RootEventLog, now: Date):
+    | { ok: true; walk: RootWalk | null; activeRootKeyId: string; progress: RootProgress | null }
+    | { ok: false; reason: string; rootRevoked: boolean; rollback?: true; walk: RootWalk | null; progress: RootProgress | null };
+  ```
+  `{ error }` reproduces today's "root event log: <error>" failure including the rule that a recorded revoke survives an unreadable log (`rootRevoked: true`). Callers that apply a non-null `progress` set `state.rootEvents[policy.rootKeyId] = progress`, `state.v2 = true` and mark the state changed, exactly as today's lines do.
+- **D7 Reset.** `resetMemory()` needs no armed key (it only discards this computer's memory), is queued, opens a native confirmation (`기록 초기화` / `이 컴퓨터가 기억하는 조직 문서 버전을 지울까요? 오래된 문서를 다시 받아들일 수 있게 돼요.`, buttons `취소`, `초기화`), and on 초기화 renames the file aside as in D5 and drops any armed key. `admin:dismiss-memory-reset` clears `memoryReset` (copy of `history:dismiss-reset`).
+
+### Dialogs, queue and approve
+
+- **D8 Dialog timeout.** `withTimeout(p, ms)` resolves `false` after `dialogTimeoutMs`; the dialog may stay on screen and a late answer is ignored. Cooldown and "dialog open" state use `Date.now()`, not `options.now`.
+- **D9 Cooldown and one dialog at a time.** `review`, `approve` and `resetMemory` are refused while any admin dialog is open (`다른 확인 창이 열려 있어요`) and for `cooldownMs` after any cancel or timeout (`잠시 후 다시 시도하세요`).
+- **D10 Review role.** `review` requires the approver role (phase 1). It records `{ digest, name, keyId, generation }` under key `` `${keyId}|${generation}|${instanceId}` ``.
+- **D11 Approve, exact order** (replaces section 8): 1. capture `op = { keyId: armed.key.keyId, generation }`; refuse with `승인자 키를 먼저 불러오세요` if no approver is armed, D9 refusals. 2. record lookup; absent or digest differs → `먼저 이 정확한 버전을 검토하세요`. 3. reason (D15) and lifetime; lifetime past key expiry → `이 기간은 승인자 키의 만료(<date>)를 넘어요. 더 짧게 고르세요.` 4. `current('approver')` re-check; scopes against `record.name` → `범위(<scopes>)가 Skill 이름 "<name>"을 포함하지 않아요`. 5. read the Skill once (`collectSkillTree` with contents, `skillNameFromSkillFile`); digest ≠ record.digest or name ≠ record.name → `검토한 뒤 Skill이 바뀌었어요. 다시 검토하세요`. 6. claim (delete) the record, open the signing dialog showing that read's digest. 7. cancel or timeout: restore the record if `op.generation === this.generation`; cooldown; `서명을 취소했어요`. 8. 서명: `approveSkill({ skillDir, approverKey, now, expires, reason, expectDigest: record.digest, expectName: record.name, outDir?, beforeSign })`. `approveSkill` checks `expectDigest` first, then `expectName` (`Refusing to approve: the Skill name is "<x>", not the reviewed "<y>"`). `beforeSign` refuses with `키가 빠졌어요` on generation mismatch and re-runs the role and scope checks. 9. failure: return the engine message unless it contains `/`, else `서명하지 못했어요. Skill을 다시 검토하세요.`
+- **D12 Status re-check.** A role "change" is any difference in role kind, key id, scopes or expiry. `hostSkillDirs` returns `[]` when the host policy is missing or invalid; arm proceeds.
+- **D13 INSPECT verdict.** `AdminInspectView` gains `verdictStale: boolean`: true when the verdict's `digest` is non-null and differs from the shown digest; the renderer then hides the verdict and shows `읽는 동안 바뀌었어요 · 다시 검토하세요`. A null verdict digest (trust failures, unverifiable) shows the verdict. INSPECT keeps the name fallback to the instance name if `SKILL.md` cannot be read.
+- **D14 `dialogSafe(text)`.** Replaces C0/C1 controls (except none), U+2028–U+202E, U+2066–U+2069, U+200B–U+200F and U+FEFF with `⟨U+XXXX⟩`. Applied to paths, names and reasons in every dialog.
+- **D15 Reason rule, in `AdminSession.approve`.** Trim; at most 1024 UTF-16 units (`이유는 1024자 이하여야 해요`); `requireDisplaySafeText`; at least 3 code points matching `/[\p{L}\p{N}]/u` other than U+115F, U+1160, U+3164, U+FFA0, U+2800 (`이유에 글자나 숫자를 3개 이상 적으세요`).
+
+### Inputs, types and text (R4, R5, R8)
+
+- `ObservationService` (`gui/src/service/service.ts`) gains `hostSkillDirs(): string[]` returning `this.host?.policy?.skillDirs ?? []`. `AdminSessionOptions` gains `skillFolders: () => string[]` (main passes `svc.view().instances.map((i) => i.path)`).
+- `readPin(options: { path: string; rootUid: number; trustedBase?: string; now: Date; memoryFile: string; platform: NodeJS.Platform; procDir: string; readlink: (p: string) => string })`.
+- `Armed` gains `keyPath: string` (canonical, never sent anywhere); key id is `armed.key.keyId`.
+- `mapPinPath` on `darwin` when `/etc` is not a link to exactly `private/etc`: returns the path unchanged (the walk then refuses it as a symbolic link).
+- `main.ts`: when `window` is null, `dialog.showMessageBox(options)` without a parent.
+- Exact dialog text. Review: title `Skill 검토 확인`, message `이 정확한 버전의 파일을 모두 검토했나요?`, detail lines `Skill: <name>`, `폴더: <path>`, `버전: <digest>`, `파일: <n>개`, buttons `취소`, `검토함`. Sign: title `인증서 서명`, message `이 Skill 버전에 인증서를 서명할까요?`, detail lines `Skill: <name>`, `폴더: <path>`, `검토한 버전: <reviewed digest>`, `서명할 버전: <digest>`, `기간: <lifetime> (만료 <date>)`, `이유: <reason>`, `키: <role> · <name> · <key id>`, buttons `취소`, `서명`.
+- Refusal text: review cancel `검토를 기록하지 않았어요`; uid map `이 실행 환경(사용자 네임스페이스)에서는 조직 고정 정책을 믿을 수 없어요`; unreadable map `실행 환경을 확인할 수 없어 조직 고정 정책을 쓰지 않아요`; key inside a Skill `Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.`; key load errors: missing or unreadable (ENOENT, EACCES, not a regular file) `키 파일을 읽을 수 없어요`, permissions `키 파일 권한이 너무 넓어요 (chmod 600)`, "not a valid PKCS#8 key" or "not Ed25519" `Ed25519 개인 키가 아니에요`; memory-reset notice `이 컴퓨터의 관리 기록을 읽을 수 없어서 따로 보관하고 새로 시작했어요 (<backup>)`.
+
+### Tests (R1, R7)
+
+- `gui/tests/admin.test.ts` is rewritten where needed: every `confirmInspected(id, digest)` becomes `review(id)` with `confirmReview` resolving `true`; `world()` and the stand-alone session pass all required options, including a `procDir` fixture (a temp dir with `self/uid_map` and `self/gid_map` containing `0 0 4294967295`), `platform: 'linux'`, `stateDir` in a temp dir, and confirm fakes that resolve `true` unless a test overrides them.
+- Seams: `AdminSessionOptions.hooks?: { afterInspectTree?: () => Promise<void>; beforeSign?: () => Promise<void> }` (test-only; called between INSPECT's tree read and its verdict, and at the start of the session's `beforeSign`). F13 uses `afterInspectTree` to change `SKILL.md`; F6 uses `hooks.beforeSign` to call `disarm()` and asserts no certificate is written, and separately disarms from inside the `confirmSign` fake.
+- `setupRecoveryOrg` moves from `tests/root-recovery.test.ts` to `tests/helpers.ts` (exported) so `gui/tests/admin.test.ts` can build a v2 organisation for F4; `tests/root-recovery.test.ts` imports it.
+- Files edited in total: `src/admin.ts`, `src/policy.ts`, `src/verify.ts`, `gui/src/service/admin.ts`, `gui/src/service/types.ts`, `gui/src/service/service.ts`, `gui/src/main/main.ts`, `gui/src/preload/preload.cts`, `gui/src/renderer/admin.ts`, `gui/src/renderer/app.ts` (start and stop the 5-second status poll when the 관리 tab is shown or hidden), `docs/spec/gui-admin-rack-v1.md`, `gui/README.md`, `CHANGELOG.md`, and the tests named above. The spec's `admin:disarm` row becomes: `Drops the armed key at once (synchronous; ends any operation in progress)`.
+
