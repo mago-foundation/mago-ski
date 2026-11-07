@@ -17,6 +17,9 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 - GUI administration rack, phase 1 ([spec](docs/spec/gui-admin-rack-v1.md); GUI PoC, not published): a 관리 (administration) tab with six fixed templates. *Approve a Skill version* works: IDENTITY → INSPECT → APPROVE → POLICY CHECK. The organisation is read only from the admin-owned pin `/etc/mago-ski/policy.json`; a role is recognised only by proof of possession of a key the pin's documents name; the key stays in the main process and is re-checked before every signature. The other five templates are shown for later phases.
 - `approveSkill` accepts an already-loaded `approverKey` instead of `approverKeyPath` (exactly one).
+- `approveSkill` options `expectName` (refuse a Skill whose signed name differs from the reviewed one), `outDir` (write `<outDir>/<signed name>.cert.json`) and `beforeSign` (awaited just before the certificate is written; a throw writes nothing).
+- Engine: `loadPolicyRoot` (the root-event part of `loadPolicyTrust`, sharing one pure check), `TimestampRollbackError`, and typed `rollback` and `stateError` fields on trust failures. Messages are unchanged.
+- GUI administration rack, phase 1.1 ([design](docs/design/gui-admin-hardening.md)): signing needs two native dialogs answered by a human (a review of the exact version, then the signature with everything it contains), with a 10 second cooldown after a cancel and a 120 second timeout. Disarm is synchronous, operations carry a key generation and run in a queue, and a pin change or a lost role disarms within about 5 seconds. A user-namespace hurdle and the macOS `/etc` mapping for the pin. The GUI keeps its own rollback memory (`admin-state.json`) so older trust roots, revocation lists and root event logs are refused. Keys inside Skill folders are refused; key errors no longer show paths; reasons need three real letters or digits.
 
 ### Changed
 
