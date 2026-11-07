@@ -3,12 +3,13 @@
 // Electron main process: key material never leaves this module and never reaches the renderer.
 import { randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 import { readlinkSync } from 'node:fs';
-import { lstat, mkdir, readFile, realpath, rename } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { approveSkill } from '../../../src/admin.ts';
 import { parseCertificate } from '../../../src/certificate.ts';
 import { isInside, readRegularFile, realpathAllowingMissing, resolveOutside } from '../../../src/fs-safe.ts';
-import { loadPrivateKey, type PrivateKeyInfo } from '../../../src/keys.ts';
+import { loadPrivateKeyBytes, type PrivateKeyInfo } from '../../../src/keys.ts';
 import { scopeMatches } from '../../../src/names.ts';
 import { loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy, type PolicyRootResult } from '../../../src/policy.ts';
 import { requireDisplaySafeText } from '../../../src/root-events.ts';
@@ -18,7 +19,7 @@ import type { TrustContextResult } from '../../../src/verify.ts';
 import { skillNameFromSkillFile } from '../../../src/verify.ts';
 import type {
   AdminActionResult, AdminArmResult, AdminCheckView, AdminInspectView, AdminLifetime, AdminPinView, AdminReviewSummary, AdminRoleView,
-  AdminSignSummary, AdminStatusView,
+  AdminResetResult, AdminSignSummary, AdminStatusView,
 } from './types.ts';
 
 /** The only place the organisation pin is read from. No environment variable or setting redirects it. */
@@ -28,12 +29,17 @@ export const LIFETIMES: readonly AdminLifetime[] = ['30d', '90d', '180d'];
 export const MAX_REASON = 1024;
 export const DIALOG_TIMEOUT_MS = 120_000;
 export const COOLDOWN_MS = 10_000;
+export const DIALOG_SLOT_GRACE_MS = 5000;
 export const MEMORY_FILE = 'admin-state.json';
 const IDENTITY_CONTEXT = 'mago-ski gui identity v1';
 
 const KEY_IN_SKILL = 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.';
 const KEY_GONE     = '키가 빠졌어요';
 const NEED_REASON  = '이유에 글자나 숫자를 3개 이상 적으세요';
+const KEY_SWAPPED = '키 파일이 바뀌었어요. 다시 불러오세요.';
+const MEMORY_BUSY  = '이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요.';
+const MAX_KEY_FILE_BYTES = 64 * 1024;
+const READ_RETRY_MS = [50, 100, 200] as const;
 const CHANGED      = '검토한 뒤 Skill이 바뀌었어요. 다시 검토하세요';
 
 export type PinState =
@@ -175,14 +181,19 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
   } catch (error) {
     return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 저장하지 못했어요: ${(error as Error).message}` };
   }
-  for (let attempt = 0; ; attempt += 1) {
+  let moved = false;
+  let retries = 0;
+  for (;;) {
     // Root first, so the root events are recorded before the trust documents are judged against them.
     const root = await loadPolicyRoot(memoryPolicy, options.now, { recordVersions: true });
     const trust = await loadPolicyTrust(memoryPolicy, options.now, { recordVersions: true });
     const writeFailed = (!root.ok && root.stateError === 'write') ? root.reason : (!trust.ok && trust.stateError === 'write') ? trust.reason : null;
     if (writeFailed !== null) return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 저장하지 못했어요: ${writeFailed}` };
+    const corrupt = (!root.ok && root.stateError === 'corrupt') || (!trust.ok && trust.stateError === 'corrupt');
     const unreadable = (!root.ok && root.stateError === 'unreadable') || (!trust.ok && trust.stateError === 'unreadable');
-    if (unreadable && attempt === 0) {
+    // A memory that was read and is wrong is moved aside once. A memory that could not be read is never moved.
+    if (corrupt && !moved) {
+      moved = true;
       try {
         const backup = await moveMemoryAside(options.memoryFile, options.now);
         options.onMemoryReset?.({ at: formatTimestamp(options.now), backup });
@@ -193,7 +204,12 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
       }
       continue;
     }
-    if (unreadable) return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 읽을 수 없어요: ${(!root.ok && root.stateError === 'unreadable') ? root.reason : (trust.ok ? '' : trust.reason)}` };
+    if (unreadable && retries < READ_RETRY_MS.length) {
+      await new Promise((resolve) => setTimeout(resolve, READ_RETRY_MS[retries]));
+      retries += 1;
+      continue;
+    }
+    if (corrupt || unreadable) return { kind: 'invalid', path: file, reason: MEMORY_BUSY };
     return { kind: 'loaded', path: file, policy, sha256, root, trust, memoryFile: options.memoryFile };
   }
 }
@@ -266,11 +282,11 @@ function pinView(pin: PinState): AdminPinView {
 
 /**
  * Text shown in a native dialog: controls, line and bidirectional marks and zero-width characters are replaced by
- * their code point, so a path, name or reason cannot rewrite or hide the lines around it.
+ * their code point (format characters, surrogates, private-use and unassigned code points included), so a path, name or reason cannot rewrite or hide the lines around it.
  */
 export function dialogSafe(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069\u200b-\u200f\ufeff]/gu,
-    (c) => `⟨U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`);
+  return text.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/gu,
+    (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
 }
 
 /** A key load error as fixed text; the raw message may carry the key file's path. */
@@ -320,6 +336,9 @@ interface Armed {
   key:      PrivateKeyInfo;
   /** Canonical path of the key file; never sent anywhere. */
   keyPath:  string;
+  /** Device and inode of the key file as opened at arm; checked again before signing. */
+  keyDev:   bigint;
+  keyIno:   bigint;
   role:     AdminRoleView;
   pinSha:   string;
   lastUsed: number;
@@ -405,19 +424,42 @@ export class AdminSession {
     return result;
   }
 
-  /** Resolves false after `ms`; the dialog may stay on screen and a late answer is ignored. */
-  private withTimeout(answer: Promise<boolean>, ms: number): Promise<boolean> {
+  /** Resolves `fallback` after `ms`; the dialog may stay on screen and a late answer is ignored. */
+  private withTimeout<T>(answer: Promise<T>, ms: number, fallback: T): Promise<T> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), ms);
+      const timer = setTimeout(() => resolve(fallback), ms);
       timer.unref?.();
-      answer.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(false); });
+      answer.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(fallback); });
     });
   }
 
-  private async ask(show: () => Promise<boolean>): Promise<boolean> {
+  /**
+   * Shows a dialog and counts it as open until it settles or `dialogTimeoutMs + 5000` ms after it opened, whichever
+   * comes first, so one stuck dialog cannot block every other for ever.
+   */
+  private async ask<T>(show: () => Promise<T>, fallback: T): Promise<T> {
     this.dialogsOpen += 1;
-    const shown = Promise.resolve().then(show).finally(() => { this.dialogsOpen -= 1; });
-    return await this.withTimeout(shown, this.dialogTimeoutMs);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this.dialogsOpen -= 1;
+    };
+    const slot = setTimeout(release, this.dialogTimeoutMs + DIALOG_SLOT_GRACE_MS);
+    slot.unref?.();
+    const shown = Promise.resolve().then(show).finally(() => { clearTimeout(slot); release(); });
+    return await this.withTimeout(shown, this.dialogTimeoutMs, fallback);
+  }
+
+  /**
+   * The key file picker: one dialog at a time like every other, counted while open, a cancel starts the cooldown.
+   * Throws the refusal text; resolves null when the person cancelled.
+   */
+  async pickFile(open: () => Promise<string | null>): Promise<string | null> {
+    this.requireNoDialog();
+    const chosen = await this.ask(open, null);
+    if (chosen === null) this.startCooldown();
+    return chosen;
   }
 
   private startCooldown(): void {
@@ -474,9 +516,9 @@ export class AdminSession {
       if (pin.kind !== 'loaded') return { ok: false, reason: pinView(pin).reason ?? `organisation pin: ${pin.kind}` } as AdminArmResult;
       let key: PrivateKeyInfo;
       let canonical: string;
+      let identity: { dev: bigint; ino: bigint };
       try {
-        key = await loadPrivateKey(keyPath);
-        canonical = await realpath(keyPath);
+        ({ key, canonical, identity } = await this.openKeyFile(keyPath));
       } catch (error) {
         return { ok: false, reason: keyLoadMessage(error) };
       }
@@ -485,10 +527,52 @@ export class AdminSession {
       if (view.role === 'none' || !publicKey) return { ok: false, reason: view.note ?? 'this key holds no role in the organisation', keyId: key.keyId };
       if (!proveIdentity(pin, key, publicKey)) return { ok: false, reason: 'the key could not prove possession: it is not the private half of the key the documents name', keyId: key.keyId };
       if (generation !== this.generation) return { ok: false, reason: KEY_GONE };
-      this.armed = { key, keyPath: canonical, role: view, pinSha: pin.sha256, lastUsed: Date.now() };
+      this.armed = { key, keyPath: canonical, keyDev: identity.dev, keyIno: identity.ino, role: view, pinSha: pin.sha256, lastUsed: Date.now() };
       this.scheduleIdle();
       return { ok: true, role: { ...view } };
     });
+  }
+
+  /** One file, one open: the real path, a no-follow handle, the checks on that handle and the bytes read from it. */
+  private async openKeyFile(keyPath: string): Promise<{ key: PrivateKeyInfo; canonical: string; identity: { dev: bigint; ino: bigint } }> {
+    const canonical = await realpath(keyPath);
+    const handle = await open(canonical, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
+    let pem: Buffer | null = null;
+    try {
+      const info = await handle.stat({ bigint: true });
+      if (!info.isFile()) throw new Error('Private key must be a regular, non-symlink file');
+      if (this.platform !== 'win32' && (info.mode & 0o077n) !== 0n)
+        throw new Error('Private key permissions must deny group and other access (chmod 600)');
+      const buffer = Buffer.alloc(MAX_KEY_FILE_BYTES + 1);
+      let total = 0;
+      while (total <= MAX_KEY_FILE_BYTES) {
+        const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null);
+        if (bytesRead === 0) break;
+        total += bytesRead;
+      }
+      pem = buffer;
+      if (total > MAX_KEY_FILE_BYTES) throw new Error('Private key is too large');
+      const key = loadPrivateKeyBytes(buffer.subarray(0, total));
+      return { key, canonical, identity: { dev: info.dev, ino: info.ino } };
+    } finally {
+      pem?.fill(0);
+      await handle.close();
+    }
+  }
+
+  /** The stored key path must still be the regular file that was opened at arm. Otherwise the key is dropped. */
+  private async requireSameKeyFile(armed: Armed): Promise<void> {
+    let same = false;
+    try {
+      const info = await lstat(armed.keyPath, { bigint: true });
+      same = info.isFile() && info.dev === armed.keyDev && info.ino === armed.keyIno;
+    } catch {
+      same = false;
+    }
+    if (!same) {
+      if (this.armed === armed) this.dropKey('key file');
+      throw new AdminError(KEY_SWAPPED);
+    }
   }
 
   /** The key must not live where Skills do: a Skill folder is shared, copied and scanned by tools. */
@@ -618,7 +702,7 @@ export class AdminSession {
           throw new AdminError(safeMessage(error, 'Skill을 읽을 수 없어요. 다시 시도하세요.'));
         }
         const summary: AdminReviewSummary = { skillName: read.name, skillPath: skill.path, digest: read.tree.digest, files: read.tree.files.length };
-        const confirmed = await this.ask(() => this.options.confirmReview(summary));
+        const confirmed = await this.ask(() => this.options.confirmReview(summary), false);
         if (!confirmed || op.generation !== this.generation) {
           this.startCooldown();
           return { ok: false, message: '검토를 기록하지 않았어요' };
@@ -653,11 +737,12 @@ export class AdminSession {
         if (!LIFETIMES.includes(lifetime)) throw new AdminError('choose a lifetime of 30, 90 or 180 days');
         const now = this.now();
         const expires = addDuration(now, lifetime, 'certificate lifetime');
-        const keyExpiry = first.role.expiresAt;
-        if (keyExpiry && expires > new Date(keyExpiry))
-          throw new AdminError(`이 기간은 승인자 키의 만료(${keyExpiry})를 넘어요. 더 짧게 고르세요.`);
 
         const { pin, armed } = await this.current('approver', op);
+        // The expiry as the re-check has just refreshed it, not the one seen when the key was armed.
+        const keyExpiry = armed.role.expiresAt;
+        if (keyExpiry && expires > new Date(keyExpiry))
+          throw new AdminError(`이 기간은 승인자 키의 만료(${keyExpiry})를 넘어요. 더 짧게 고르세요.`);
         const scopes = armed.role.scopes ?? [];
         if (!scopes.some((scope) => scopeMatches(scope, record.name)))
           throw new AdminError(`범위(${scopes.join(', ')})가 Skill 이름 "${record.name}"을 포함하지 않아요`);
@@ -667,6 +752,8 @@ export class AdminSession {
         } catch {
           throw new AdminError(KEY_IN_SKILL);
         }
+        if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(KEY_IN_SKILL);
+        await this.requireSameKeyFile(armed);
 
         let read;
         try {
@@ -682,7 +769,7 @@ export class AdminSession {
           action: 'approve', skillName: read.name, skillPath: skill.path, reviewedDigest: record.digest, digest: read.tree.digest,
           lifetime, expiresAt: formatTimestamp(expires), reason: text, role: armed.role.role, keyName: armed.role.name, keyId: op.keyId,
         };
-        const confirmed = await this.ask(() => this.options.confirmSign(summary));
+        const confirmed = await this.ask(() => this.options.confirmSign(summary), false);
         if (!confirmed) {
           if (op.generation === this.generation) this.reviews.set(recordKey, record);
           this.startCooldown();
@@ -703,6 +790,7 @@ export class AdminSession {
               if (!latestScopes.some((scope) => scopeMatches(scope, info.skillName)))
                 throw new AdminError(`범위(${latestScopes.join(', ')})가 Skill 이름 "${info.skillName}"을 포함하지 않아요`);
               if (op.generation !== this.generation) throw new AdminError(KEY_GONE);
+              if (await this.keyInsideSkills(latest.armed.keyPath, latest.pin)) throw new AdminError(KEY_IN_SKILL);
             },
           });
           return { ok: true, certificateId: issued.certificateId, certificatePath: issued.path, digest: issued.digest, expiresAt: formatTimestamp(issued.expiresAt) };
@@ -738,11 +826,12 @@ export class AdminSession {
   }
 
   /** Discards this computer's memory of the organisation's document versions, after a native confirmation. */
-  resetMemory(): Promise<AdminStatusView> {
+  resetMemory(): Promise<AdminResetResult> {
     return this.serial(async () => {
+      let refusal: string | null = null;
       try {
         this.requireNoDialog();
-        const confirmed = await this.ask(() => this.options.confirmReset());
+        const confirmed = await this.ask(() => this.options.confirmReset(), false);
         if (!confirmed) {
           this.startCooldown();
         } else {
@@ -751,10 +840,11 @@ export class AdminSession {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
           });
         }
-      } catch {
-        // A refusal (another dialog, cooldown) or a failed rename changes nothing; the status below tells the truth.
+      } catch (error) {
+        refusal = error instanceof AdminError ? error.message : '기록을 옮기지 못했어요';
       }
-      return await this.status();
+      const status = await this.status();
+      return refusal === null ? { ok: true, status } : { ok: false, message: refusal, status };
     });
   }
 

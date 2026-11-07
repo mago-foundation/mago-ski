@@ -554,10 +554,10 @@ test('F3: an older trust root after a newer one is refused; a corrupt memory is 
 
   // Reset: native confirmation, then the older documents are accepted and remembered.
   w.handlers.reset = async () => false;
-  assert.equal((await w.session.resetMemory()).rollback, true);
+  assert.equal((await w.session.resetMemory()).status.rollback, true);
   assert.equal(w.calls.reset, 1);
   w.handlers.reset = async () => true;
-  const reset = await w.session.resetMemory();
+  const reset = (await w.session.resetMemory()).status;
   assert.deepEqual([reset.pin.trustOk, reset.rollback, reset.memoryReset], [true, false, null]);
   assert.equal(w.calls.reset, 2);
   const names = await readdir(path.dirname(w.stateFile));

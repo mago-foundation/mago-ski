@@ -283,6 +283,10 @@ export type AdminArmResult =
   | { ok: false; reason: string; keyId?: string }
   | { ok: false; reason: 'cancelled' };
 
+export type AdminResetResult =
+  | { ok: true; status: AdminStatusView }
+  | { ok: false; message: string; status: AdminStatusView };
+
 export interface AdminInspectView {
   instanceId:  string;
   name:        string;
@@ -334,7 +338,7 @@ export interface RendererApi {
     approve(instanceId: string, digest: string, lifetime: AdminLifetime, reason: string): Promise<AdminActionResult>;
     check(instanceId: string):                                         Promise<AdminCheckView>;
     /** Opens a native confirmation, then moves this computer's admin memory aside. */
-    resetMemory():                                                     Promise<AdminStatusView>;
+    resetMemory():                                                     Promise<AdminResetResult>;
     dismissMemoryReset():                                              Promise<AdminStatusView>;
   };
 }

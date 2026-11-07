@@ -138,9 +138,17 @@ function registerAdminIpc(svc: ObservationService): void {
   handle('admin:status', () => session.status());
   handle('admin:arm', async () => {
     const options: Electron.OpenDialogOptions = { title: '서명 키 불러오기 (개인 키 PEM)', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'PEM', extensions: ['pem'] }, { name: '모든 파일', extensions: ['*'] }] };
-    const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
-    if (picked.canceled || !picked.filePaths[0]) return { ok: false, reason: 'cancelled' };
-    return await session.arm(picked.filePaths[0]);
+    let chosen: string | null;
+    try {
+      chosen = await session.pickFile(async () => {
+        const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+        return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+      });
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '잠시 후 다시 시도하세요' };
+    }
+    if (chosen === null) return { ok: false, reason: 'cancelled' };
+    return await session.arm(chosen);
   });
   handle('admin:disarm', () => { session.disarm(); return session.status(); });
   handle('admin:inspect', (id) => session.inspect(requireString(id, ID, 'instance id')));
