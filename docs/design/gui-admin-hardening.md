@@ -1,6 +1,6 @@
 # Design: hardening the administration rack (phase 1.1)
 
-Status: draft v4, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed comprehension and two antagonistic reviews; v2 failed comprehension and readiness. **[Decisions and exact details (v3)](#decisions-and-exact-details-v3) and [Readiness addenda (v4)](#readiness-addenda-v4) settle every open point; v4 wins over v3, and both win over earlier sections.**
+Status: v5, ready for implementation, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed comprehension and two antagonistic reviews; v2 failed comprehension and readiness. **[Decisions and exact details (v3)](#decisions-and-exact-details-v3) and [Readiness addenda (v4)](#readiness-addenda-v4) settle every open point; v4 wins over v3, and both win over earlier sections.**
 
 ## Problem
 
@@ -259,4 +259,14 @@ Further decisions:
 - `Key` and `RecoveryOrg` move to `tests/helpers.ts` together with `setupRecoveryOrg`.
 - `dialogSafe` is exported from `gui/src/service/admin.ts`.
 - Known limit, stated in the spec: an unqueued `status` poll that overlaps a load while the root event log grows can report a transient rollback; the next poll clears it.
+
+### Readiness addenda (v5)
+
+Wins over everything above. Answers the v4 readiness check; with these the design is ready for implementation.
+
+1. **Absent roots in `arm`.** `arm` checks the key against each root (`discoveryRoots()`, `skillFolders()`, the pin's `skillDirs`, `hostSkillDirs()`) with `isInside(await realpathAllowingMissing(root), keyCanonical)`, both exported by `src/fs-safe.ts`. A root whose resolution throws is skipped. `resolveOutside` is used in `approve` only (v4 item 6).
+2. **`loadPolicyRoot` equality test.** For each case compare results: on success `activeRootKeyId` (for v2 also `walk.count` against `context.root.sequence`); on failure `reason`, `rootRevoked`, `rollback`. For state, compare only the parsed `root_events` and `v2` fields of each file, an absent file reading as none.
+3. **Reasons and rollback in `checkRootEvents`.** The error, rollback and fork branches keep calling today's `blocked()` (so a recorded revoke still yields "revoked by root event N, and the root event log cannot be checked now", as `tests/root-recovery.test.ts` expects). The post-merge rollback in the save returns `rollback: true` in both `loadPolicyTrust` and `loadPolicyRoot`.
+4. **`roleOf` notes**, replacing the `walkError` branch: `if (!pin.root.ok && pin.root.walk === null) note = \`the root event log cannot be checked (${pin.root.reason}), so root and recovery roles are not recognised\`; else if (pin.root.walk?.revoked && pin.root.walk.activeRootKeyId === key.keyId) note = \`this root key was revoked by root event ${pin.root.walk.revoked.sequence}\`;` then today's trust and default branches unchanged.
+5. **Small decisions.** The `pinOwnershipProblem` assertions in `gui/tests/admin.test.ts` pass the `procDir` fixture and `platform: 'linux'`. F13 asserts `verdictStale === true`. `memoryReset.backup` is an absolute path. `resetMemory()` returns `AdminStatusView` (main returns it). On darwin, `PinState.path` and `AdminPinView.path` hold the mapped path; `hostPolicyDiffers` compares the host policy's realpath with it.
 
