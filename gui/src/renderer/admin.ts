@@ -82,6 +82,9 @@ export function renderAdmin(target: HTMLElement, next: ServiceView, renderer: Re
 /** Status requests are numbered; a response is adopted only if no newer request was sent after it. */
 let statusSent = 0;
 
+/** Must equal MEMORY_BUSY in service/admin.ts. */
+const MEMORY_BUSY_TEXT = '이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요.';
+
 async function fetchStatus(): Promise<void> {
   statusSent += 1;
   const mine = statusSent;
@@ -92,6 +95,14 @@ async function fetchStatus(): Promise<void> {
     return;
   }
   if (mine === statusSent) adoptStatus(next);
+}
+
+/** A call that returns a status goes through the same counter as a fetch, so an older response never overwrites a newer one. */
+async function statusFrom(call: () => Promise<AdminStatusView>): Promise<void> {
+  statusSent += 1;
+  const mine = statusSent;
+  const next = await call();
+  if (mine === statusSent) status = next;
 }
 
 async function refreshStatus(): Promise<void> {
@@ -194,14 +205,17 @@ function pinPanel(pin: AdminPinView | null): HTMLElement {
   if (status?.memoryReset) {
     notices.push(h('div', { class: 'banner', style: 'margin:10px 0' },
       `이 컴퓨터의 관리 기록을 읽을 수 없어서 따로 보관하고 새로 시작했어요 (${status.memoryReset.backup}) `,
-      button('닫기', () => void run(async () => { status = await api.admin.dismissMemoryReset(); }), { id: 'dismiss-memory-reset' })));
+      button('닫기', () => void run(async () => { await statusFrom(() => api.admin.dismissMemoryReset()); }), { id: 'dismiss-memory-reset' })));
   }
-  if (status?.rollback) {
+  // An unreadable memory file can only be recovered by moving it aside, which needs no read permission.
+  if (status?.rollback || (pin.kind === 'invalid' && pin.reason === MEMORY_BUSY_TEXT)) {
     notices.push(h('div', { class: 'banner', style: 'margin:10px 0' },
       '이 컴퓨터가 이미 본 것보다 오래된 문서예요. 조직이 문서를 다시 만들었다면 기록을 초기화하세요. ',
       button('기록 초기화', () => void run(async () => {
+        statusSent += 1;
+        const mine = statusSent;
         const result = await api.admin.resetMemory();
-        status = result.status;
+        if (mine === statusSent) status = result.status;
         resetFrom('inspect');
         if (!result.ok) message = { ok: false, text: result.message };
       }), { id: 'reset-memory' })));
@@ -224,7 +238,7 @@ function templateCard(t: (typeof TEMPLATES)[number]): HTMLElement {
     resetFrom('inspect');
     skillId = null;
     // Changing the template drops the armed key (spec: armed key lifetime).
-    void run(async () => { if (status?.armed) { status = await api.admin.disarm(); message = { ok: true, text: '템플릿을 바꿔서 키를 메모리에서 뺐어요.' }; } });
+    void run(async () => { if (status?.armed) { await statusFrom(() => api.admin.disarm()); message = { ok: true, text: '템플릿을 바꿔서 키를 메모리에서 뺐어요.' }; } });
   });
   return card;
 }
@@ -316,7 +330,7 @@ function identityDetail(pane: HTMLElement): void {
       resetFrom('inspect');
       await fetchStatus();
     }), { primary: !armed, disabled: status?.pin.kind !== 'loaded', id: 'arm' }),
-    armed ? button('키 꺼내기', () => void run(async () => { status = await api.admin.disarm(); resetFrom('inspect'); message = { ok: true, text: '키를 메모리에서 뺐어요.' }; }), { id: 'disarm' }) : null));
+    armed ? button('키 꺼내기', () => void run(async () => { await statusFrom(() => api.admin.disarm()); resetFrom('inspect'); message = { ok: true, text: '키를 메모리에서 뺐어요.' }; }), { id: 'disarm' }) : null));
 }
 
 async function selectSkill(id: string): Promise<void> {

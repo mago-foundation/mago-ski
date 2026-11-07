@@ -285,7 +285,7 @@ function pinView(pin: PinState): AdminPinView {
  * their code point (format characters, surrogates, private-use and unassigned code points included), so a path, name or reason cannot rewrite or hide the lines around it.
  */
 export function dialogSafe(text: string): string {
-  return text.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/gu,
+  return text.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u034F\u3164\u2800]/gu,
     (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
 }
 
@@ -702,6 +702,7 @@ export class AdminSession {
           throw new AdminError(safeMessage(error, 'Skill을 읽을 수 없어요. 다시 시도하세요.'));
         }
         const summary: AdminReviewSummary = { skillName: read.name, skillPath: skill.path, digest: read.tree.digest, files: read.tree.files.length };
+        this.requireNoDialog();
         const confirmed = await this.ask(() => this.options.confirmReview(summary), false);
         if (!confirmed || op.generation !== this.generation) {
           this.startCooldown();
@@ -746,6 +747,7 @@ export class AdminSession {
         const scopes = armed.role.scopes ?? [];
         if (!scopes.some((scope) => scopeMatches(scope, record.name)))
           throw new AdminError(`범위(${scopes.join(', ')})가 Skill 이름 "${record.name}"을 포함하지 않아요`);
+        await this.requireSameKeyFile(armed);
         const skill = this.skill(instanceId);
         try {
           await resolveOutside(armed.keyPath, skill.path, 'Approver private key');
@@ -764,6 +766,7 @@ export class AdminSession {
         if (read.tree.digest !== record.digest || read.name !== record.name) throw new AdminError(CHANGED);
 
         // Claim the record before the dialog, so a second approve cannot use it while this one waits for the human.
+        this.requireNoDialog();
         this.reviews.delete(recordKey);
         const summary: AdminSignSummary = {
           action: 'approve', skillName: read.name, skillPath: skill.path, reviewedDigest: record.digest, digest: read.tree.digest,
@@ -786,6 +789,7 @@ export class AdminSession {
               await this.options.hooks?.beforeSign?.();
               // Last look before the file is written: the key must still be this generation's and still hold its role.
               const latest = await this.current('approver', op);
+              await this.requireSameKeyFile(latest.armed);
               const latestScopes = latest.armed.role.scopes ?? [];
               if (!latestScopes.some((scope) => scopeMatches(scope, info.skillName)))
                 throw new AdminError(`범위(${latestScopes.join(', ')})가 Skill 이름 "${info.skillName}"을 포함하지 않아요`);
