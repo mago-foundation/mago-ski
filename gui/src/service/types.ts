@@ -249,6 +249,33 @@ export interface AdminStatusView {
   hostPolicyDiffers: boolean;
   armed:             AdminRoleView | null;
   idleMinutes:       number;
+  /** Set when this computer's admin memory was unreadable and was moved aside; shown until dismissed. */
+  memoryReset:       { at: string; backup: string } | null;
+  /** The organisation's documents are older than this computer's memory of them. */
+  rollback:          boolean;
+}
+
+/** What the review dialog (native, main process) shows. */
+export interface AdminReviewSummary {
+  skillName: string;
+  skillPath: string;
+  digest:    string;
+  files:     number;
+}
+
+/** What the signing dialog (native, main process) shows. */
+export interface AdminSignSummary {
+  action:         'approve';
+  skillName:      string;
+  skillPath:      string;
+  reviewedDigest: string;
+  digest:         string;
+  lifetime:       AdminLifetime;
+  expiresAt:      string;
+  reason:         string;
+  role:           AdminRole;
+  keyName:        string | null;
+  keyId:          string;
 }
 
 export type AdminArmResult =
@@ -266,8 +293,10 @@ export interface AdminInspectView {
   excluded:    string[];
   certificate: { source: string; id: string; digest: string; approverKeyId: string; issuedAt: string; expiresAt: string; reason: string } | null;
   verdict:     { verdict: Verdict; reason: string } | null;
-  /** True when the armed approver already confirmed this exact digest. */
+  /** True when the armed approver already reviewed this exact digest (a native dialog recorded it). */
   inspected:   boolean;
+  /** The verdict was computed for different bytes than the digest shown; the verdict must not be shown. */
+  verdictStale: boolean;
 }
 
 export type AdminActionResult =
@@ -300,8 +329,12 @@ export interface RendererApi {
     arm():                                                             Promise<AdminArmResult>;
     disarm():                                                          Promise<AdminStatusView>;
     inspect(instanceId: string):                                       Promise<AdminInspectView>;
-    confirmInspected(instanceId: string, digest: string):              Promise<AdminActionResult>;
+    /** Opens a native confirmation in the main process; only its 검토함 answer records the review. */
+    review(instanceId: string):                                        Promise<AdminActionResult>;
     approve(instanceId: string, digest: string, lifetime: AdminLifetime, reason: string): Promise<AdminActionResult>;
     check(instanceId: string):                                         Promise<AdminCheckView>;
+    /** Opens a native confirmation, then moves this computer's admin memory aside. */
+    resetMemory():                                                     Promise<AdminStatusView>;
+    dismissMemoryReset():                                              Promise<AdminStatusView>;
   };
 }

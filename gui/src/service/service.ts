@@ -479,6 +479,11 @@ export class ObservationService extends EventEmitter {
     };
   }
 
+  /** Skill folders the host's own policy (Pi's) names; empty when it is missing or invalid. */
+  hostSkillDirs(): string[] {
+    return this.host?.policy?.skillDirs ?? [];
+  }
+
   view(): ServiceView {
     const state = this.s;
     const order: Record<ObservationState, number> = { changed: 0, unreadable: 1, new: 2, missing: 3, reviewed: 4, unchanged: 5 };
