@@ -70,8 +70,8 @@ export type TrustContextResult =
       rootRevoked?: boolean;
       /** A version, sequence or timestamp is lower than the host state's: the documents are older than already seen. */
       rollback?: true;
-      /** The host state file could not be read (`unreadable`) or written (`write`). */
-      stateError?: 'unreadable' | 'write';
+      /** The host state file is malformed (`corrupt`), could not be read (`unreadable`) or could not be written (`write`). */
+      stateError?: 'corrupt' | 'unreadable' | 'write';
     };
 
 export interface CertificateEvaluation {

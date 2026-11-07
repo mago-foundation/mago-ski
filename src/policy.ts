@@ -240,14 +240,33 @@ function stateCount(value: unknown, label: string): number {
   return value;
 }
 
+/** The host state file exists and was read, but its content or kind is wrong. Every other read error is not this. */
+export class HostStateFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostStateFormatError';
+  }
+}
+
+const FORMAT_READ_ERROR = /(must be a regular, non-symlink file|exceeds the \d+-byte limit)$/;
+
 async function readState(statePath: string): Promise<HostState> {
   let bytes: Buffer;
   try {
     bytes = await readRegularFile(statePath, 'Host state file', 1024 * 1024);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
+    if (error instanceof Error && FORMAT_READ_ERROR.test(error.message)) throw new HostStateFormatError(error.message);
     throw error;
   }
+  try {
+    return parseState(bytes);
+  } catch (error) {
+    throw new HostStateFormatError((error as Error).message);
+  }
+}
+
+function parseState(bytes: Buffer): HostState {
   const parsed = parseCanonicalJsonBytes(bytes, 'host state');
   const v2     = isRecord(parsed) && parsed.type === STATE_TYPE_V2;
   const value  = exactKeys(parsed, v2 ? ['type', 'roots', 'root_events', 'timestamps'] : ['type', 'roots'], 'host state');
@@ -406,13 +425,28 @@ function applyProgress(state: HostState, pinned: string, progress: RootProgress)
  * Merges `state` with the state file as it is now and writes the result. An unreadable file is replaced by this
  * load's state, as before. Returns the merged state, or the reason the write failed.
  */
+const persistChains = new Map<string, Promise<unknown>>();
+
 async function persistState(statePath: string, state: HostState): Promise<{ state: HostState } | { error: string }> {
+  const key = path.resolve(statePath);
+  const previous = persistChains.get(key) ?? Promise.resolve();
+  const run = previous.then(() => persistStateNow(statePath, state));
+  const tail = run.catch(() => undefined);
+  persistChains.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (persistChains.get(key) === tail) persistChains.delete(key);
+  }
+}
+
+async function persistStateNow(statePath: string, state: HostState): Promise<{ state: HostState } | { error: string }> {
   try {
     let disk: HostState | null = null;
     try {
       disk = await readState(statePath);
-    } catch {
-      disk = null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
     }
     const merged = disk ? mergeHostState(state, disk) : state;
     await writeFileAtomic(statePath, stateBytes(merged), 0o600);
@@ -422,14 +456,18 @@ async function persistState(statePath: string, state: HostState): Promise<{ stat
   }
 }
 
-type FailureExtra = { rootRevoked?: boolean; rollback?: true; stateError?: 'unreadable' | 'write' };
+const stateErrorKind = (error: unknown): 'corrupt' | 'unreadable' => error instanceof HostStateFormatError ? 'corrupt' : 'unreadable';
+
+export type StateErrorKind = 'corrupt' | 'unreadable' | 'write';
+
+type FailureExtra = { rootRevoked?: boolean; rollback?: true; stateError?: StateErrorKind };
 
 const failure = (reason: string, extra: FailureExtra = {}): TrustContextResult =>
   ({ ok: false, verdict: 'UNVERIFIABLE', reason, ...extra });
 
 export type PolicyRootResult =
   | { ok: true; walk: RootWalk | null; activeRootKeyId: string }
-  | { ok: false; reason: string; rootRevoked: boolean; walk: RootWalk | null; rollback?: true; stateError?: 'unreadable' | 'write' };
+  | { ok: false; reason: string; rootRevoked: boolean; walk: RootWalk | null; rollback?: true; stateError?: StateErrorKind };
 
 /**
  * Only the root-event part of `loadPolicyTrust`: which root key is active, whether it is revoked, and the walk. It
@@ -443,7 +481,7 @@ export async function loadPolicyRoot(policy: Policy, now: Date, options: { recor
   try {
     if (policy.statePath) state = await readState(policy.statePath);
   } catch (error) {
-    return { ok: false, reason: (error as Error).message, rootRevoked: false, walk: null, stateError: 'unreadable' };
+    return { ok: false, reason: (error as Error).message, rootRevoked: false, walk: null, stateError: stateErrorKind(error) };
   }
   const checked = checkRootEvents(policy, state, await readRootEventLog(policy), now);
   if (checked.progress) applyProgress(state, pinned, checked.progress);
@@ -479,7 +517,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
   try {
     if (policy.statePath) state = await readState(policy.statePath);
   } catch (error) {
-    return failure((error as Error).message, { stateError: 'unreadable' });
+    return failure((error as Error).message, { stateError: stateErrorKind(error) });
   }
   const recovery = policy.recovery;
   const pinned = policy.rootKeyId;
