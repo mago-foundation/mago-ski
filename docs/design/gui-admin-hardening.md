@@ -270,3 +270,59 @@ Wins over everything above. Answers the v4 readiness check; with these the desig
 4. **`roleOf` notes**, replacing the `walkError` branch: `if (!pin.root.ok && pin.root.walk === null) note = \`the root event log cannot be checked (${pin.root.reason}), so root and recovery roles are not recognised\`; else if (pin.root.walk?.revoked && pin.root.walk.activeRootKeyId === key.keyId) note = \`this root key was revoked by root event ${pin.root.walk.revoked.sequence}\`;` then today's trust and default branches unchanged.
 5. **Small decisions.** The `pinOwnershipProblem` assertions in `gui/tests/admin.test.ts` pass the `procDir` fixture and `platform: 'linux'`. F13 asserts `verdictStale === true`. `memoryReset.backup` is an absolute path. `resetMemory()` returns `AdminStatusView` (main returns it). On darwin, `PinState.path` and `AdminPinView.path` hold the mapped path; `hostPolicyDiffers` compares the host policy's realpath with it.
 
+
+### Code review fixes (v5.1)
+
+The two Goldfish code reviews of `fcc8192` found no HIGH findings. The fixes below take precedence over v5 where they differ. **S** findings come from the security review and **C** findings from the correctness review.
+
+1. **Serialised state writes (S2, C-F1).**
+   - **Serialise per file.** `persistState` in `src/policy.ts` is serialised per canonical `statePath` with a module-level promise chain (`Map<string, Promise<unknown>>`). Each call waits for the previous one on the same path, runs its own read-merge-write, and releases the chain whether it succeeds or fails.
+   - **Read errors.** Inside `persistState`, only `ENOENT` counts as "no disk state". Any other read error fails the write, with `stateError: 'write'` and the existing message.
+   - **Cross-process residual.** Two processes sharing one state file are still not serialised. The spec says so in its "Known limit" bullet: *two processes that load at the same moment while a document changes can lower a recorded version until the newer document is loaded again.* The bullet replaces the transient-rollback sentence (C-F6).
+2. **Moving the memory aside (S1, C-F4).**
+   - **The error split.** `readState` throws `HostStateFormatError` (new, exported) for:
+     - a JSON parse error;
+     - an exact-keys or format error;
+     - a bad counter;
+     - a file over the size limit;
+     - a path that exists but is not a regular file.
+
+     Every other error, I/O errors included, is rethrown unchanged.
+   - **The failure kinds.** `stateError` becomes `'corrupt' | 'unreadable' | 'write'`. `'corrupt'` is set only for `HostStateFormatError`; `'unreadable'` is set for any other read error.
+   - **`readPin` handling.**
+     - On `'corrupt'`, `readPin` renames the memory aside, as D5 says today.
+     - On `'unreadable'`, it retries the whole read 3 times, after 50, 100 and 200 ms. If the read still fails, the pin is `invalid` with `이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요.`, and nothing is renamed.
+
+     The error `<label> changed while being read` (`fs-safe.ts`) is an `'unreadable'` error.
+3. **Key-file picker (S3).** The picker opens through `AdminSession.pickFile(open: () => Promise<string | null>): Promise<string | null>`. It applies the D9 refusal (one dialog open), counts in `dialogsOpen`, and starts the cooldown on cancel. Refusals use the existing D9 and cooldown texts, returned to the renderer as `{ ok: false, reason }`. `admin:arm` in `main.ts` calls `session.pickFile(() => dialog.showOpenDialog(...))`, then `session.arm(path)`.
+4. **`dialogSafe` (S4).** The character class becomes `/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/gu`, with the same `⟨U+XXXX⟩` replacement. A code point above U+FFFF is shown with `codePointAt`, padded to at least 4 hex digits.
+5. **One key file (S6).**
+   - **At arm.** `arm` first computes `canonical = await realpath(keyPath)`. It opens `canonical` with `O_NOFOLLOW`, checks `isFile()` on the handle, and reads at most 64 KiB from that handle. It loads the key from those bytes, and stores `canonical` together with the handle's `dev` and `ino`.
+   - **Before signing.** `approve` runs `lstat(canonical)`. If the path is not a regular file with the same `dev` and `ino`, the key is dropped and approve returns `키 파일이 바뀌었어요. 다시 불러오세요.`
+   - **Bytes loader.** The engine needs a bytes loader (`loadPrivateKeyBytes(bytes: Buffer): PrivateKeyInfo`) if one does not exist yet. The existing path loader then calls it.
+6. **Lifetime against the armed key (C-F2).** After `current()` in `approve`, the lifetime check uses `armed.role.expiresAt` as `current()` refreshed it. It refuses with the existing D11 lifetime message.
+7. **Key inside Skills at signing (C-F3).** Before the signing dialog, and in `beforeSign`, `approve` re-runs the arm-time check with the current roots: `keyInsideSkills(armed.keyPath, pin)`. If the key now lies inside a Skill, it refuses with `KEY_IN_SKILL`. That matches spec line 82.
+8. **Dialog counter liveness (C-F8).** `ask()` releases its `dialogsOpen` slot when the dialog settles or `dialogTimeoutMs + 5000` ms after it opened, whichever comes first. The spec states that a dialog stuck past that time no longer blocks other dialogs, and that its late answer is ignored.
+9. **Renderer ordering (C-F7, C-F9).**
+   - **Status responses.** `admin.ts` in the renderer numbers its status requests and adopts a response only if it is the newest one sent.
+   - **Skill selection.** `selectSkill` sets `skillId` inside `run()`, after the busy check.
+10. **Reset feedback (C-F10).** `resetMemory()` returns `{ ok: true; status: AdminStatusView } | { ok: false; message: string; status: AdminStatusView }`. A refusal carries the D9 or cooldown text, and the renderer shows the message.
+11. **Tests (C-F5).** Add these tests:
+    - a `confirmSign` fake that changes `SKILL.md`, after which approve refuses;
+    - an approver re-added with a new expiry or narrower scopes, after which `status()` shows `armed: null`;
+    - a `readPin`-level memory write failure, using a read-only memory file and not a failed `mkdir`;
+    - a reset while a key is armed, after which `armed` is `null`;
+    - the concurrent-`persistState` test: two overlapping loads with a document change never lower a version, using the reviewer's scratch recipe;
+    - an `'unreadable'` error that is retried and does not rename, and a `'corrupt'` error that renames;
+    - the picker refused while a dialog is open;
+    - the `dialogSafe` code points U+061C, U+2060, U+FFF9, U+180E and U+00AD;
+    - a key file swapped after arm, refused with the new message;
+    - a lifetime past the refreshed expiry, refused;
+    - a key folder that becomes a discovery root after arm, refused.
+
+    Replace the 80 ms sleep in the idle test with a promise gate.
+12. **Spec.** Update the following:
+    - lines 82 and 148 of `docs/spec/gui-admin-rack-v1.md` (items 1 and 7);
+    - the memory paragraph, for items 1 and 2;
+    - the dialogs paragraph, for items 3 and 8;
+    - D3's "concurrent writes are safe", which becomes *safe within one process; see Known limit*.
