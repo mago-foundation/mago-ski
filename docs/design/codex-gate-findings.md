@@ -1,6 +1,6 @@
 # Design: Codex gate live-test findings (bare mentions, bypasses, silent blocks, labels)
 
-Status: draft v2, for Goldfish review. v1 passed comprehension but was NO-GO on readiness. Its antagonistic review found two live bypasses in today's adapter (H1, H2), five ways the strict reader disagreed with Codex (H3–H6, M1), and showed that the fix did not help a stock install (H8). This version is a rewrite.
+Status: draft v3, for Goldfish review. Precedence: [Decisions (v3)](#decisions-v3) > the v2 text below. v1 passed comprehension but was NO-GO on readiness. Its antagonistic review found two live bypasses in today's adapter (H1, H2), five ways the strict reader disagreed with Codex (H3–H6, M1), and showed that the fix did not help a stock install (H8). This version is a rewrite.
 
 Sources:
 - [the Codex live test](../spikes/codex-gate-live.md), findings 2, 5 and 6;
@@ -247,3 +247,170 @@ Order: **the bypass fixes first, in their own commit** (L3, T1, §4), then §2�
 - **`CHANGELOG.md` `[Unreleased]`:**
   - **Security:** the Codex adapter no longer allows plugin-namespaced mentions, or `skill://` links that point outside the admin root.
   - **Changed:** bare mentions of approved Skills work on a stock Codex install; new block messages.
+
+## Decisions (v3)
+
+These decisions resolve the v2 reviews:
+- **Readiness:** R1–R8 and the test, live and spike notes.
+- **Antagonistic:** H1, H2, M1–M7 and L1–L6.
+
+### X1. The decision table, final (R1, R4, R5, R6, H1, M4)
+
+**Order of evaluation.**
+1. First every entry of `links` in prompt order, with rules L1–L3.
+2. Then every entry of `plain` in prompt order, with rules T1–T6.
+
+The first block stops evaluation, and its message is the one shown. Asks are collected and sent afterwards, as today. Path-derived names from links (`names` minus `plain`) decide nothing. All name comparisons use `fold(x) = x.toLowerCase()` on both sides, and `known` stores folded names.
+
+**Rules.**
+- **L1:** links starting with `app://`, `mcp://` or `plugin://` are ignored.
+- **L2:** the link is resolved, then compared with each admin entry's resolved `SKILL.md` by realpath. Resolution:
+  1. Strip a leading `skill://` or `file://`. A `file://` with a host part goes to L3.
+  2. A relative link resolves against `cwd`. Without a usable `cwd` it goes to L3.
+  3. Then `realpath`.
+
+  On a match, ask the service for the admin name. `adminLinkName` is changed to this rule (today it rejects `skill://`).
+- **L3:** every other link: **block** NOT_ADMIN.
+- **T1:** a token containing a `:` followed by a non-colon character (`/:[^:]/u`): **block** NOT_ADMIN. Tokens whose only colons are trailing (`$5:`, `$alpha:`) fall through to T2–T6 unchanged. Codex looks those up literally and no Skill name contains `:`.
+- **T2:** `fold(t)` is an admin key:
+  - with `incomplete` or `unknown`: **block** MASKED_UNKNOWN;
+  - with `known.has(fold(t))`: **block** MASKED;
+  - otherwise: ask the service for the admin name.
+- **T3:** `t` is in `removed` (exact or folded): ask the service for `t`.
+- **T4:** with `incomplete` or `unknown`: an invalid engine name gets **block** NOT_ADMIN; otherwise ask the service for `t`.
+- **T5:** `known.has(fold(t))`, or some `k` in `known` with `fold(t).startsWith(k)`: **block** NOT_ADMIN. The prefix part covers multi-text input that the hook sees joined (M4).
+- **T6:** allow.
+
+`exists` is deleted.
+
+### X2. The reader (R3, H2, L4)
+
+The reference is `reader3.mjs` from the v2 review, which is `reader2.mjs` plus the H2 quote rule. §2 changes as follows:
+
+- **Rule 1.** Decode with `new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })`, so a leading U+FEFF stays in the text and makes the file unknown.
+- **Rule 2 wording.** Scan from line 2 to the first marker or EOF.
+  - An ambiguous line seen before the marker makes the file unknown.
+  - No marker and no ambiguous line: `null`.
+- **Rule 3 additions.**
+  - A key line whose value, after `: `, starts with `"` must match `^"(?:[^"\\]|\\.)*"( #.*)?$`.
+  - A value starting with `'` must match `^'(?:[^']|'')*'( #.*)?$`.
+  - A value starting with any of `[ { ! & * ? % @` or a backtick makes the file unknown.
+- **Rule 4 addition.** A default name longer than 64 code points (`[...realDirName].length`) makes the file unknown.
+- **H6 check.** `walkDirName !== realDirName` makes the file unknown. It is kept as a conservative addition beyond the reference.
+- **Exported functions.**
+  - `readKnownName(walkDirName, realDirName, bytes)` is the wrapper.
+  - `readKnownNameCore(dirName, bytes)` is the reference port, exported for the golden test.
+- **The invariant**, as stated and tested. For every document Codex loads (oracle gives a name), `readKnownName` returns either that name exactly or `undefined`. For documents Codex rejects (oracle `ERR` or `NOT_SKILL`), any result is allowed, because a wrong known name there only over-blocks.
+
+### X3. Sources outside the walk, rewritten (M5, L1, R2, R8)
+
+§4's plugin and `config.toml` rules are **dropped**.
+- Plugin Skills are always `ns:base` (`loader/namespace.rs:176-181`), and T1 blocks those.
+- Rust-v0.166.0 has no config key that adds a Skill root.
+- A missing `config.toml` therefore needs no handling.
+
+The Skill sources the hook cannot see are listed as endpoint preconditions in the adapter header and `docs/capabilities.md`:
+- app-server `skills/extraRoots/set`;
+- executor capability roots (`provider/executor.rs:95-135`);
+- cloud Skills;
+- structured `UserInput::Skill` and `UserInput::Mention` selection.
+
+Organisations must not enable these on enforce endpoints, or must restrict the clients that can use them.
+
+### X4. Removed names (R7, M2, L2, L3)
+
+- **Order.**
+  - **Uninstall** (`uninstall`, `service.ts:599-605`) and **reconcile** (`reconcileOnce`, `:527-531`) record the name first, with an atomic write, and only then call `hostLink(name, null)`. If the write fails, the operation fails and the link stays.
+  - **Install** removes the name from the file only after `admission.publish` succeeds (`:594-595`).
+  - **Rollback** (`:596`) touches neither.
+- **Cap.** The cap is 2048 names, which at 64 bytes each is well under the 256 KiB read limit. When full, the oldest name is dropped and a warning is logged in the decision log.
+  - The revoked Skill's link is already removed, and Codex reads bodies at injection, so the dropped name loses only the message, not the block.
+  - A pure helper, `addRemoved(list: string[], name: string, cap = 2048): string[]`, is tested directly.
+- **Reading.** New helper `readRootOwnedFile(file, rootUid, maxBytes)`:
+  1. `lstat`: it must be a regular file, with uid = `rootUid` and `mode & 0o022` = 0.
+  2. `readRegularFile` with `maxBytes`.
+
+  `ENOENT` gives an empty set. Other errors set `incomplete`. The content is parsed with `parseCanonicalJsonBytes` and `exactKeys`, with `validateSkillName` on each name, at most 2048 names and no duplicates. It is not read through `loadConfig`.
+
+### X5. Install-time name rule (M3)
+
+The gate service refuses to install a Skill unless its `SKILL.md` gives `readKnownNameCore(name, bytes) === name`, where `name` is the Skill name. The refusal message is `SKILL.md must set name: <name> in plain frontmatter, so every host names it the same`. This affects all hosts, and the install docs state it.
+
+Codex then always names an admin Skill by its Skill name, and the digest-folder default name (L2 of review 1) cannot occur.
+
+### X6. Shell commands (M1, M7)
+
+- **Which tools.** `parseHookInput` treats any PreToolUse whose `tool_input.command` is a string as a shell command, whatever its `tool_name`.
+- **Path normalisation.** `inspectCommand` collapses runs of `/` to one before matching.
+- **The rogue check.** A command is rogue if it matches either of these:
+  - `/\.(agents|codex)(?![A-Za-z0-9_-])/u`;
+  - `/skill\.md/iu` at a position not inside a `<admin_root>/<name>/SKILL.md` occurrence.
+- **Over-blocking.** Editing `~/.codex/config.toml` through the agent is blocked in enforce mode. This is accepted and documented.
+- **Documentation.** The adapter header and `docs/capabilities.md` keep saying the shell check is best-effort defence in depth: globs, variables and scripts can still bypass it.
+
+### X7. Residual wording (L5, M6)
+
+- **TOCTOU.** "A Skill created, renamed or edited after the hook's walk is not seen. Codex caches its catalog per working directory and reloads it when its watcher fires, so a Skill added between that load and the hook's walk can differ from what the hook saw."
+- **Structured selection.** It is listed in X3 as an endpoint precondition.
+
+### X8. Tests, corrected (readiness notes)
+
+**`tests/gate-adapter-codex.test.ts`:**
+- Lines 143, 525 and 528 become `MSG_NOT_ADMIN`, because they are L3.
+- Line 170 becomes `MSG_NOT_ADMIN` through T5, because `repo-skill` is known.
+- Line 155 is an L2 ask answered `NO_CERTIFICATE`.
+- Line 563 stays `MSG_NOT_ADMIN` through T5.
+- Line 576 filters dot-entries from `readdir(managed)`.
+- The R2 list of 17 assertions needs no change, because X3 drops the `config.toml` rule.
+- The 300–321, 357, 458 and 477 changes are as planned in v2.
+
+**New table rows:**
+- `$Alpha`, with a user Skill named `name: Alpha`, is blocked (T5).
+- `$MixedName` is blocked.
+- Joined `$alphax`, with a known `alpha`, is blocked (T5 prefix).
+- `$alpha: step 1` falls through to T2 and is asked.
+- `$acme:search` is blocked (T1).
+- A `skill://` link to an unscanned path is blocked (L3).
+- An absolute `skill://` link to the admin file is asked (L2).
+- A relative link without a `cwd` is blocked (L3).
+- The H2 multi-line quoted description gives `unknown`, so a bare admin mention gets MASKED_UNKNOWN.
+- The PreToolUse shell check covers a `tool_name` other than `Bash`, the `//` path form, and `.agents/*/x/SKILL.md`.
+
+**`tests/codex-names.test.ts`:**
+- The v2 rows, plus BOM, a 65-character folder name, no description (any result allowed), and the H2 shapes in double and single quotes.
+- The golden corpus generator is committed under `tests/fixtures/codex-names/generator/`: the yamlprobe Rust source, its `Cargo.toml`, and the fuzz scripts. A README explains how to regenerate the corpus. It is not run in CI.
+- The corpus is at least 1000 documents and includes the quoted and flow mutation classes.
+
+**`tests/gate-service.test.ts`:**
+- `addRemoved` cap and order.
+- Uninstall writes the file before the unlink.
+- A failed write keeps the link.
+- Install with a `name:` mismatch is refused (X5).
+
+**`tests/live/codex-gate.live.ts`:**
+- `Run` gains `repoSkill?: { folder: string; name: string; mark: string }`, `json?: boolean` (default true) and `lastMessage?: boolean`.
+- Raw stdout and stderr are written to the run's folder.
+- The alpha-collision scenario runs **last**: it installs `alpha` in `before`, adds `repoSkill { folder: 'a2', name: 'alpha', mark: 'SECRET-BODY-repo-a2' }`, uses the prompt `use $alpha now`, and expects blocked with neither mark reached. The plugin scenario is dropped (X3).
+- **The spike (§5)** runs as three scenarios, `json: true`, `json: false` and `lastMessage: true`, each with the L3 prompt. Each records, for every stream (stdout, stderr and the last-message file): the exit code, whether the NOT_ADMIN text appears, and whether `/hook: UserPromptSubmit Blocked/` appears. It also records the `tool_name` of one PreToolUse shell call (M7).
+
+### X9. Docs, with the texts
+
+- **`docs/hosts/adapter-interface.md:39`** becomes: "An admin Skill can be invoked by a bare `$name` or by its linked mention. A bare mention is blocked when a Skill outside the admin root has the same name, or when the adapter cannot read every Skill's name."
+- **`docs/capabilities.md:68`** becomes: "Users call an installed Skill by `$name`. If another Skill with the same name exists, or one cannot be checked, the bare form is blocked and the linked form `[$name](/etc/codex/skills/name/SKILL.md)` works."
+- **`docs/capabilities.md:80`** adds the T1 and X6 over-blocking and the X3 endpoint preconditions.
+- **`docs/spikes/codex-gate-live.md`:**
+  - "4 bundled Skills" becomes 5, at lines 20 and 24.
+  - Row 26 becomes `Served (bare mention, no same-name Skill)`.
+  - Row 29 gets the NOT_ADMIN text.
+  - A new row is added: `Plugin-namespaced and skill:// mentions outside the admin root | enforce | Blocked (fixed in this change; earlier versions allowed them when no other Skill existed) | Hook`.
+  - Findings 2 and 6 are marked resolved. Finding 5 is marked documented, with the spike result.
+- **`CHANGELOG.md` `[Unreleased]`:**
+  - A new `### Security` heading: "Codex adapter: block plugin-namespaced mentions and links to Skills outside the admin root, which earlier versions allowed when no other Skill was present."
+  - Line 16's "never a bare `$name`" becomes the X9 adapter-interface sentence.
+
+### X10. Commit order
+
+1. **Commit 1, the security commit.** It contains L3 (with the L2 `skill://` resolution), T1, X6, and the X1 table with case folding and the prefix rule. T2–T5 keep today's `wide` behaviour, with `unknown` = true for every found file. This closes H1 and H2 of review 1 without the reader, and allows nothing today's adapter blocks.
+2. **Commit 2.** The reader (X2) and `known` / `unknown`, which enable the precise T2, T4 and T5.
+3. **Commit 3.** Removed names (X4) and the install-time name rule (X5).
+4. **Then** the live tests, spike and docs.
