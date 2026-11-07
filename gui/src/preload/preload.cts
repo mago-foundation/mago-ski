@@ -25,9 +25,11 @@ const api: RendererApi = {
     arm:              () => ipcRenderer.invoke('admin:arm'),
     disarm:           () => ipcRenderer.invoke('admin:disarm'),
     inspect:          (id: string) => ipcRenderer.invoke('admin:inspect', id),
-    confirmInspected: (id: string, digest: string) => ipcRenderer.invoke('admin:confirm-inspected', id, digest),
+    review:           (id: string) => ipcRenderer.invoke('admin:review', id),
     approve:          (id: string, digest: string, lifetime: AdminLifetime, reason: string) => ipcRenderer.invoke('admin:approve', id, digest, lifetime, reason),
     check:            (id: string) => ipcRenderer.invoke('admin:check', id),
+    resetMemory:      () => ipcRenderer.invoke('admin:reset-memory'),
+    dismissMemoryReset: () => ipcRenderer.invoke('admin:dismiss-memory-reset'),
   },
 };
 

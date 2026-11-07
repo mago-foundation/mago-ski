@@ -50,6 +50,21 @@ function scopeCovers(scope: string, name: string): boolean {
   return scope === name;
 }
 
+const POLL_MS = 5000;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Polls the status while the 관리 tab is visible, so the main process re-checks the pin and the role on its own. */
+export function setAdminPolling(on: boolean, renderer: RendererApi): void {
+  api = renderer;
+  if (!on) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    return;
+  }
+  if (pollTimer) return;
+  pollTimer = setInterval(() => { if (!statusLoading) void refreshStatus(); }, POLL_MS);
+}
+
 export function renderAdmin(target: HTMLElement, next: ServiceView, renderer: RendererApi): void {
   api = renderer;
   container = target;
@@ -66,10 +81,27 @@ export function renderAdmin(target: HTMLElement, next: ServiceView, renderer: Re
 
 async function refreshStatus(): Promise<void> {
   statusLoading = true;
+  let next: AdminStatusView;
   try {
-    status = await api.admin.status();
+    next = await api.admin.status();
+  } catch {
+    return;
   } finally {
     statusLoading = false;
+  }
+  adoptStatus(next);
+}
+
+/** Takes a status from the main process. The page redraws only when something changed, so typing is never interrupted. */
+function adoptStatus(next: AdminStatusView): void {
+  const previous = status;
+  status = next;
+  if (previous?.armed && !next.armed) {
+    // The main process dropped the key (pin or role change, idle, or a disarm): nothing recorded for it stands.
+    resetFrom('inspect');
+    message ??= { ok: false, text: '키가 빠졌어요. 다시 불러오세요.' };
+  } else if (previous && JSON.stringify(previous) === JSON.stringify(next)) {
+    return;
   }
   draw();
 }
@@ -147,10 +179,24 @@ function pinPanel(pin: AdminPinView | null): HTMLElement {
     h('dt', {}, '루트 키'), h('dd', {}, `${pin.activeRootKeyId ?? '확인할 수 없음'}${pin.activeRootKeyId && pin.activeRootKeyId !== pin.rootKeyId ? ' (루트 이벤트로 교체됨)' : ''}`),
     h('dt', {}, '모드 · 신뢰 문서'), h('dd', {}, `${pin.mode} · ${pin.trustOk ? '검증됨' : `검증 실패: ${pin.trustNote ?? ''}`}`),
   );
+  const notices: HTMLElement[] = [];
+  if (status?.memoryReset) {
+    notices.push(h('div', { class: 'banner', style: 'margin:10px 0' },
+      `이 컴퓨터의 관리 기록을 읽을 수 없어서 따로 보관하고 새로 시작했어요 (${status.memoryReset.backup}) `,
+      button('닫기', () => void run(async () => { status = await api.admin.dismissMemoryReset(); }), { id: 'dismiss-memory-reset' })));
+  }
+  if (status?.rollback) {
+    notices.push(h('div', { class: 'banner', style: 'margin:10px 0' },
+      '이 컴퓨터가 이미 본 것보다 오래된 문서예요. 조직이 문서를 다시 만들었다면 기록을 초기화하세요. ',
+      button('기록 초기화', () => void run(async () => {
+        status = await api.admin.resetMemory();
+        resetFrom('inspect');
+      }), { id: 'reset-memory' })));
+  }
   const help = pin.kind === 'missing' || pin.kind === 'unprotected'
     ? h('p', { class: 'hint' }, '관리자가 조직의 정책을 이 위치에 설치해야 해요: 파일과 위의 모든 폴더가 root 소유이고, 그룹·다른 사용자가 쓸 수 없어야 해요. 직원이 바꿀 수 있는 정책으로는 역할을 인정하지 않아요.')
     : null;
-  return h('div', {}, h('dl', { class: 'kv' }, ...rows), help);
+  return h('div', {}, h('dl', { class: 'kv' }, ...rows), ...notices, help);
 }
 
 function templateCard(t: (typeof TEMPLATES)[number]): HTMLElement {
@@ -255,7 +301,7 @@ function identityDetail(pane: HTMLElement): void {
       if (!result.ok && result.reason !== 'cancelled') message = { ok: false, text: `키를 쓸 수 없어요: ${result.reason}` };
       if (result.ok) message = { ok: true, text: `${ROLE_NAME[result.role.role]} 키를 확인했어요 (소유 증명 완료).` };
       resetFrom('inspect');
-      status = await api.admin.status();
+      adoptStatus(await api.admin.status());
     }), { primary: !armed, disabled: status?.pin.kind !== 'loaded', id: 'arm' }),
     armed ? button('키 꺼내기', () => void run(async () => { status = await api.admin.disarm(); resetFrom('inspect'); message = { ok: true, text: '키를 메모리에서 뺐어요.' }; }), { id: 'disarm' }) : null));
 }
@@ -283,7 +329,7 @@ function inspectDetail(pane: HTMLElement): void {
     h('dt', {}, 'Skill'), h('dd', {}, `${i.name} · ${i.path}`),
     h('dt', {}, '버전 (tree digest)'), h('dd', {}, i.digest),
     h('dt', {}, '크기'), h('dd', {}, `파일 ${i.files.length}개 · ${i.totalBytes} bytes`),
-    h('dt', {}, '현재 판정'), h('dd', {}, i.verdict ? `${i.verdict.verdict} · ${i.verdict.reason}` : '조직 고정 정책 없음'),
+    h('dt', {}, '현재 판정'), h('dd', {}, i.verdictStale ? '읽는 동안 바뀌었어요 · 다시 검토하세요' : i.verdict ? `${i.verdict.verdict} · ${i.verdict.reason}` : '조직 고정 정책 없음'),
     ...(i.certificate ? [h('dt', {}, '지금 인증서'), h('dd', {}, `${short(i.certificate.id)} · ${i.certificate.approverKeyId.slice(0, 16)}… · ${i.certificate.issuedAt} ~ ${i.certificate.expiresAt} · "${i.certificate.reason}"`)] : []),
     ...(i.excluded.length ? [h('dt', {}, 'digest에서 제외'), h('dd', {}, i.excluded.join(', '))] : [])));
   if (change) pane.append(h('p', { class: 'hint', style: 'margin-top:10px' },
@@ -294,9 +340,11 @@ function inspectDetail(pane: HTMLElement): void {
   const armedApprover = status?.armed?.role === 'approver';
   pane.append(h('div', { class: 'cmd', style: 'margin-top:12px' },
     button(i.inspected ? '✓ 검토 확인됨' : '✓ 이 버전을 검토했어요', () => void run(async () => {
-      const result = await api.admin.confirmInspected(i.instanceId, i.digest);
-      if (!result.ok) { message = { ok: false, text: result.message }; status = await api.admin.status(); return; }
+      // The page only asks; a native window owned by the main process shows the exact version and records the answer.
+      const result = await api.admin.review(i.instanceId);
+      if (!result.ok) { message = { ok: false, text: result.message }; adoptStatus(await api.admin.status()); return; }
       inspected = await api.admin.inspect(i.instanceId);
+      if (!inspected.inspected) { message = { ok: false, text: '검토하는 동안 Skill이 바뀌었어요. 다시 검토하세요.' }; return; }
       message = { ok: true, text: `검토한 버전으로 기록했어요: ${i.digest}` };
       device = 'approve';
     }), { primary: !i.inspected, disabled: !armedApprover || i.inspected, id: 'confirm' })));
@@ -333,7 +381,7 @@ function approveDetail(pane: HTMLElement): void {
     h('p', { class: 'hint' }, '인증서는 이 버전을 누가 승인했는지 기록할 뿐, Skill이 안전하다는 뜻은 아니에요.'),
     h('div', { class: 'cmd', style: 'margin-top:8px' }, signButton = button('서명', () => void run(async () => {
       const result = await api.admin.approve(i.instanceId, i.digest, lifetime, reason.trim());
-      if (!result.ok) { message = { ok: false, text: result.message }; status = await api.admin.status(); return; }
+      if (!result.ok) { message = { ok: false, text: result.message }; adoptStatus(await api.admin.status()); return; }
       signed = { certificateId: result.certificateId ?? '', certificatePath: result.certificatePath ?? '', expiresAt: result.expiresAt ?? '' };
       reason = '';
       message = { ok: true, text: '인증서에 서명했어요. POLICY CHECK에서 판정을 확인하세요.' };
