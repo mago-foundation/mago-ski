@@ -1,6 +1,6 @@
 # Design: hardening the administration rack (phase 1.1)
 
-Status: draft v3, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed comprehension and two antagonistic reviews; v2 failed comprehension and readiness. **[Decisions and exact details (v3)](#decisions-and-exact-details-v3) settles every open point and wins over any earlier section.**
+Status: draft v4, for Goldfish review (Elephant/Goldfish model: the design passes the comprehension, antagonistic and readiness checks before any code). v1 failed comprehension and two antagonistic reviews; v2 failed comprehension and readiness. **[Decisions and exact details (v3)](#decisions-and-exact-details-v3) and [Readiness addenda (v4)](#readiness-addenda-v4) settle every open point; v4 wins over v3, and both win over earlier sections.**
 
 ## Problem
 
@@ -225,4 +225,38 @@ This section wins over every earlier section. "D" numbers answer the v2 comprehe
 - Seams: `AdminSessionOptions.hooks?: { afterInspectTree?: () => Promise<void>; beforeSign?: () => Promise<void> }` (test-only; called between INSPECT's tree read and its verdict, and at the start of the session's `beforeSign`). F13 uses `afterInspectTree` to change `SKILL.md`; F6 uses `hooks.beforeSign` to call `disarm()` and asserts no certificate is written, and separately disarms from inside the `confirmSign` fake.
 - `setupRecoveryOrg` moves from `tests/root-recovery.test.ts` to `tests/helpers.ts` (exported) so `gui/tests/admin.test.ts` can build a v2 organisation for F4; `tests/root-recovery.test.ts` imports it.
 - Files edited in total: `src/admin.ts`, `src/policy.ts`, `src/verify.ts`, `gui/src/service/admin.ts`, `gui/src/service/types.ts`, `gui/src/service/service.ts`, `gui/src/main/main.ts`, `gui/src/preload/preload.cts`, `gui/src/renderer/admin.ts`, `gui/src/renderer/app.ts` (start and stop the 5-second status poll when the 관리 tab is shown or hidden), `docs/spec/gui-admin-rack-v1.md`, `gui/README.md`, `CHANGELOG.md`, and the tests named above. The spec's `admin:disarm` row becomes: `Drops the armed key at once (synchronous; ends any operation in progress)`.
+
+## Readiness addenda (v4)
+
+Wins over every earlier section, including v3. Numbers answer the v3 readiness check.
+
+1. **Timestamp rollback.** `src/timestamp.ts` exports `class TimestampRollbackError extends Error {}`; `verifyTimestamp` throws it (same message) for a version below `minimumVersion`. `loadPolicyTrust`'s freshness catch sets `rollback: true` when the error is a `TimestampRollbackError`. `src/timestamp.ts` is added to the edited files.
+2. **F8 test.** Engine test in `tests/approve-expect-digest.test.ts`: unchanged Skill, `expectName: 'other'`, expects `Refusing to approve: the Skill name is "docs-helper", not the reviewed "other"`. GUI test: swap `SKILL.md` between `review` and `approve`; expects `검토한 뒤 Skill이 바뀌었어요`.
+3. **Edits to existing assertions in `gui/tests/admin.test.ts`** (these lines change; nothing else in existing tests): the public-key-as-private-key assertion becomes `/키 파일 권한이 너무 넓어요/u`; "inspect this exact version first" assertions become `/먼저 이 정확한 버전을 검토하세요/u`; the scope assertion `/Skill 이름 "pdf-tools"을 포함하지 않아요/u`; "changed since it was reviewed" `/검토한 뒤 Skill이 바뀌었어요/u`; "outlast your approver key" `/승인자 키의 만료/u`; every `confirmInspected` call becomes `review(id)`. `world()` passes `discoveryRoots: () => [skills]`.
+4. **Key-load mapping with a default.** Error code `ENOENT` or `EACCES`, and any error not matched below → `키 파일을 읽을 수 없어요`; message containing `Private key permissions` → `키 파일 권한이 너무 넓어요 (chmod 600)`; containing `not a valid PKCS#8 key` or `not Ed25519` → `Ed25519 개인 키가 아니에요`.
+5. **Reason order.** Trim first; an empty result → `이유에 글자나 숫자를 3개 이상 적으세요`; then length (`이유는 1024자 이하여야 해요`), `requireDisplaySafeText`, then the letter-or-digit count. The F12 test includes whitespace-only input. `main.ts` checks only `typeof reason === 'string'` and a raw length of at most 4096 (English error is fine there); the 1024 rule lives in `AdminSession`.
+6. **Key location in `approve`.** After D11 step 4, call `resolveOutside(armed.keyPath, skill.path, 'Approver private key')`; any error → `Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.` D11 step 1 refuses with `승인자 키를 먼저 불러오세요` only when **no key** is armed; an armed key of another role gets `current('approver')`'s message `this needs the approver role; the armed key is <role>` (kept in English, as the existing test expects).
+7. **Order inside `review` and `arm`.**
+   - `review(id)`: D9 refusals; capture `op`; `current('approver')` (or, from phase 2, the role the caller passes); read the tree with contents and derive the name; `await withTimeout(confirmReview(summary), dialogTimeoutMs)`; if `true` and `op.generation === this.generation`, record and return `{ ok: true }`; otherwise start the cooldown and return `{ ok: false, message: '검토를 기록하지 않았어요' }`.
+   - `arm(path)`: `dropKey('arm')`; `readPin`; non-`loaded` pin → refuse with its reason; load the key (mapped errors, item 4); canonical path; key-location check (§6); `roleOf`; `proveIdentity`; set `armed = { key, keyPath, role, pinSha, lastUsed: Date.now() }`.
+8. **Dismissing the memory notice.** `RendererApi.admin.dismissMemoryReset(): Promise<AdminStatusView>`; preload `ipcRenderer.invoke('admin:dismiss-memory-reset')`; main handler calls `session.dismissMemoryReset()` then returns `session.status()`; `AdminSession.dismissMemoryReset(): void` sets `memoryReset = null`.
+9. **Wiring.** main passes `discoveryRoots: () => svc.view().roots.map((r) => r.path)`, `skillFolders`, `hostSkillDirs: () => svc.hostSkillDirs()`. `AdminSession` passes `readlink: (p) => readlinkSync(p)` (node:fs) to `readPin`; `mapPinPath` treats a thrown `readlink` as "not a link" (returns the path unchanged).
+10. **Exact result types.**
+    ```ts
+    export type PolicyRootResult =
+      | { ok: true; walk: RootWalk | null; activeRootKeyId: string }
+      | { ok: false; reason: string; rootRevoked: boolean; walk: RootWalk | null; rollback?: true; stateError?: 'unreadable' | 'write' };
+    ```
+    `TrustContextResult`'s failure variant (`src/verify.ts`) gains `rollback?: true; stateError?: 'unreadable' | 'write'`.
+11. **`inspected` in INSPECT.** `inspect()` sets `inspected: this.armed !== null && this.reviews.get(\`${this.armed.key.keyId}|${this.generation}|${instanceId}\`)?.digest === tree.digest`.
+
+Further decisions:
+
+- `withTimeout` clears its timer when the promise settles and calls `unref()` on it.
+- "A dialog is open" means a dialog promise has not settled yet (a counter in `AdminSession`), not that an operation is unfinished.
+- `checkRootEvents` catches errors thrown by the walk itself and returns them as `root event log: <message>`, as today's `try` does.
+- `pinView.reason` uses `pin.root.ok ? null : 'root event log: ' + pin.root.reason` when the pin is loaded; `roleOf`'s notes use `pin.root` in place of `walkError` (the root-revoked note uses `pin.root.walk?.revoked`).
+- `Key` and `RecoveryOrg` move to `tests/helpers.ts` together with `setupRecoveryOrg`.
+- `dialogSafe` is exported from `gui/src/service/admin.ts`.
+- Known limit, stated in the spec: an unqueued `status` poll that overlaps a load while the root event log grows can report a transient rollback; the next poll clears it.
 
