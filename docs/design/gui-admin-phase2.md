@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: draft v3, for Goldfish review. **v3 > v2 sections**: where [Decisions (v3)](#decisions-v3) says something, it replaces the earlier text. v1 failed comprehension; two antagonistic reviews found that root writes signed documents read after the dialog, ignored the GUI's rollback memory, and could re-enrol retired keys. This version is a rewrite.
+Status: draft v4, for Goldfish review. Precedence: [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections. v1 failed comprehension; two antagonistic reviews found that root writes signed documents read after the dialog, ignored the GUI's rollback memory, and could re-enrol retired keys. This version is a rewrite.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -572,3 +572,158 @@ The timestamp default follows `root-recovery-v1` and the CLI.
 - Spec lines 183–185 (phases): phase 2a and phase 2b, as in V0.
 
 Plus: the IPC rows (V11), the remaining write window (V1), the offline sentence (V13), the consequence sentence (V10) and the retired-key scope (V2). `docs/spec/trust-documents-v1.md` and `docs/spec/root-recovery-v1.md` get V2. The CLI help gets V8.
+
+## Decisions (v4)
+
+These decisions resolve the v3 comprehension check (B1–B11 and m1–m15) and the v3 readiness check (G1–G13). Where they differ from V0–V20, they win. Baseline:
+- code: `fix/gui-admin-hardening` with the v5.1 fixes;
+- spec: the hardened `docs/spec/gui-admin-rack-v1.md`.
+
+### W1. Base and v5.1 integration (G1, G2, m4)
+
+- **Base.** 2a starts from `dev` after the hardening PR, v5.1 code included, is merged. `feat/gui-admin-phase2` is recreated from that `dev`. This design file is carried over, and the old spec copy on that branch is dropped.
+- **Memory chain.** `recordDocumentVersions` runs inside the same per-`statePath` chain as `persistState`.
+- **v5.1 key checks.** Every phase 2 signing method runs these checks in step 1, again just before the dialog, and in `beforeWrite`:
+  - the armed key file still has the same `dev` and `ino`;
+  - the key is not inside a Skill (`keyInsideSkills`).
+- **Dialogs.** Every new dialog goes through `ask()`. The public-key picker goes through `AdminSession.pickFile`.
+
+### W2. Typed errors (m7)
+
+- **`FileChangedError`.** `src/fs-safe.ts` exports `class FileChangedError extends Error`. The `writeFileAtomic` mismatch throws it, with the same message as V1.
+- **Error mapping.** The GUI maps `FileChangedError`, `DocumentChangedError` and `StaleDocumentError` by class. It never matches on text.
+- **Expired documents.** The GUI checks expiry itself, from the view fields, before calling prepare. The engine's English expiry messages are only a backstop.
+
+### W3. Building contexts for consequences (B1, G6, G7)
+
+- **`contextFromBytes`.** `src/policy.ts` exports `contextFromBytes(o: { trustRoot: Buffer; revocations: Buffer; rootKeyId: string; rootPublicKey: KeyObject; now: Date }): TrustContextResult`. It runs `loadTrustContext` on the bytes, with expiry, and without freshness, memory or a state write.
+- **`from`.**
+  - For root-document writes, `from` is each Skill's verdict under `contextFromBytes` of the on-disk trust root and revocation list.
+  - When that fails, `from` is `UNVERIFIABLE` for every Skill. The dialog then adds `현재 문서로는 검증할 수 없어요: <reason>`.
+- **`to`.** For a trust-root write, `to` is the verdict under `contextFromBytes`. It uses the prepared payload, signed in memory with the armed key (never written), and the on-disk list. For a revocation write, it uses the on-disk trust root and the signed prepared list.
+- **Freshness.** When the pin has `freshness` and the write is a root document, **every** Skill's `to` is `BLOCKED_UNTIL_TIMESTAMP`, whatever `from` is. The line `서명 후 결과(타임스탬프 뒤): <verdict>` is shown beneath, so no false gain is shown.
+- **Timestamp signing.** `from` is the host view: `loadPolicyTrust` with the memory policy, freshness included. A failure makes every Skill `UNVERIFIABLE`. `to` is `contextFromBytes` of the documents the timestamp names.
+- **Renew and refresh** use the same rules. A renew of an expired trust root usually shows `UNVERIFIABLE → VERIFIED`.
+- **Too-deep folders.** Each `tooDeep` directory counts as one entry, with `from = to = 'UNVERIFIABLE'`, and the dialog line `너무 깊어서 확인하지 않은 폴더: <n>개`.
+- **One consequence type.** Every one of the 7 new `AdminSignSummary` members has `consequence: AdminConsequence`. The `AdminConsequence` in the v2 "GUI service" types bullet is deleted. V10's definition is the only one.
+
+### W4. Input binding at commit (B9)
+
+At prepare, the GUI captures `inputs: Array<{ path: string; sha256: string | null }>`. That covers the pin file, the trust root, the revocation list, the root event log (if any) and the timestamp (if configured). Its `beforeWrite` re-hashes each input and throws `DocumentChangedError` on any change. The consequence shown is therefore what is signed, up to the V1 window.
+
+### W5. Timestamp rules (B2, B3, B11, G4, m13)
+
+- **The key.** `prepareTimestamp` takes `key: PublicKeyInfo` in place of `keyId`, and `keyId = key.keyId`. The GUI passes the armed key's public part.
+- **The version (GUI path, `minimumVersions` given).** `max(version of the existing file if it is signed by this key, else 0; minimumVersions.timestamp) + 1`. An absent file, with memory at `k`, gives `k + 1`. The CLI path is unchanged.
+- **The lifetime.** The GUI offers only the choices from 6h, 12h and 24h that are within `max_lifetime`. The default is the largest one offered. When none fits, the template is disabled with `조직의 최대 타임스탬프 기간이 6시간보다 짧아요. CLI를 쓰세요.` The engine keeps refusing a lifetime above the maximum, and does not cap it.
+- **Revoked root.** When the pin's root is revoked (`rootRevoked`), *Sign timestamp* is disabled with `루트 키가 폐기됐어요. 루트 사고 대응이 필요해요 (3단계).`
+
+### W6. Forbidden keys (B4, B5, G5, G9a, m8, m9)
+
+- **Which actions.** `forbidden` is computed for add, remove and renew. V5 rule 5 holds: the payload must not list a forbidden key.
+  - With a forbidden approver listed, only removing that approver is possible. Add, removing another approver, and renew refuse with `<why>: 이 승인자를 먼저 빼세요`.
+  - V16's "Renew is always available" becomes "Renew is offered".
+- **`forbiddenApproverKeys(policy, now)`.**
+  - It calls `loadPolicyRoot(policy, now, { recordVersions: false })`.
+  - It reads the revocation list with `readRevocationsForUpdate(bytes, activeRootKeyId, activeRootPublicKey)`, with no expiry check. The active root's public key comes from the walk, or from the pin root for v1.
+  - An unreadable or invalid list throws `Cannot read the revocation list, so no approver is added: <reason>`.
+  - The GUI passes its memory policy (`memoryPolicy(pin)`, factored out of `readPin`). The CLI passes the `--policy` file. Neither writes any state.
+- **Recovery keys (B5).**
+  - The walker adds to `retired` every recovery key that a walked rotate removes from the recovery set, and the revoked root at revoke time (m9).
+  - The walker refuses a rotate whose `new_recovery` or `new_timestamp` names a key in `retired`, with `Root event <n>: rotate names key <id>, which was retired by an earlier event`. That enforces `root-recovery-v1` line 174 for walked events.
+  - The V2 host message becomes `trust root lists approver <id>, which has held the root, recovery or timestamp role; a key that left those roles never takes another`.
+  - The forbidden why text `a key that held the root or timestamp role` becomes `a key that held the root, recovery or timestamp role`, and its Korean form `예전에 루트·복구·타임스탬프 역할을 했던 키`.
+- **Gate (m9).** `verifier-worker.ts` uses `loadPolicyTrust`, so it refuses. `trust-store.ts` does not, as V2 states.
+
+### W7. Display safety (B6, V9 replaced)
+
+- **The rule.** V9's `isDisplaySafe` and `src/text-safety.ts` are dropped. `src/root-events.ts` exports `isDisplaySafeText(s: string): boolean`, the predicate behind `requireDisplaySafeText`.
+- **New text.** New approver names, in `addApprover` and prepare `add`, must pass it: `Approver name contains characters that cannot be shown safely`. So must new revocation reasons, in `updateRevocations` and prepare `key` or `digest`: `Revocation reason contains characters that cannot be shown safely`.
+- **Existing documents** are not re-validated. The GUI shows them through `dialogSafe`, as fixed in v5.1.
+
+### W8. Views read the documents directly (B7, G10, m15)
+
+- **`trustRoot()`.**
+  1. It reads the trust root file and runs `readTrustRootForUpdate(bytes, activeRootKeyId)`, with no expiry check. The view is `ok: true` whenever that succeeds, whether or not `pin.trust` is ok.
+  2. `forbidden` marks come from `forbiddenApproverKeys(memoryPolicy(pin), now)`. If it throws, every approver shows `forbidden: null`, and the view adds `note: '승인자 역할을 확인할 수 없어요: <reason>'`, a new field `note: string | null`. Then add, remove and renew are refused with the same text.
+  3. On failure, the GUI parses the file as JSON without verifying it, and reads its root key id field (the one `readTrustRootForUpdate` compares). If that field names a key in `walk.retired`, the view is `{ ok: false, message: <V16 previous-root text> }` and `signedByPreviousRoot` is implied. Otherwise it is `{ ok: false, message: <engine reason via dialogSafe> }`.
+- **`revocations()`.** The same, with `readRevocationsForUpdate`.
+- **Certificates.** The consequence uses only the pin's `certificate_dirs`. A host may have others, and the spec states this limit.
+- **Scopes.** The IPC scope limit is the engine's own `validateScope` limit, not 128.
+
+### W9. Memory snapshot (B8, G8)
+
+`signTimestamp` reads `snapshot = await readHostState(memoryFile)` before `current()`. `firstSeen` compares against `snapshot`:
+- for the trust root and the revocation list, `roots[activeRoot]`;
+- for the root events, `rootEvents[pinRoot].sequence`;
+- for the timestamp itself, `timestamps[keyId]`.
+
+### W10. Texts and lifetimes (B10, B11, m11, m12)
+
+- **Last approver.** `남는 승인자가 없어요. 지금 승인된 모든 Skill이 검증되지 않게 되고(UNTRUSTED_SIGNER), 새 승인자를 추가할 때까지 어떤 Skill도 승인할 수 없어요. 계속할까요?`
+- **Trust-root lifetime for add and remove.** The control `신뢰 루트 기간` offers `유지` (the default while the trust root has not expired), `180d` and `365d`. `유지` sends no `trustRootLifetime`.
+  - While the trust root has expired, `유지` is not offered.
+  - A request without a lifetime is refused with `신뢰 루트가 만료됐어요. 신뢰 루트 기간을 고르세요.`
+  - V15's trust-root default of 365d applies to Renew only.
+- **Replace line.** `이미 승인자예요: 이름 <old> → <new>, 범위 <old> → <new>, 만료 <old> → <new>`.
+- **Revoke-digest review record.** It is claimed before the dialog and restored on cancel, as in approve (D11).
+- **Revoke reason.** The maximum is 512 (`checkReason(reason, 512)`), and approve keeps 1024.
+- **Reviewing in TARGET.** TARGET lists the discovered Skills. Selecting one shows its digest and a `검토` button, which runs `review(instanceId)` with the armed root key, using the same review dialog. After that, the digest is offered as a target.
+
+### W11. Public-key picker (m10)
+
+`addApprover` follows this order:
+1. D9 refusals;
+2. the role check;
+3. `pickFile`, with the title `승인자 공개 키 선택 (PEM)`;
+4. `readRegularFile` of the chosen path, at most 64 KiB (`loadPublicKey`'s own limit; the 16 KiB in V13 is dropped), then the public-key load from those bytes (`loadPublicKeyBytes`, added beside `loadPrivateKeyBytes` if absent);
+5. prepare.
+
+A failed load gives `공개 키를 읽을 수 없어요`. Cancel gives `{ ok: false, message: '취소했어요' }` and starts the cooldown.
+
+The offline dialog comes after proof of possession, as V13 says (v2 §4's "first" is dropped).
+
+### W12. Names (m5, m6, m14)
+
+- **Renew field.** `renewTrustRoot`'s `expires` is passed as the change's `trustRootExpires`.
+- **Memory write failure.** A read error inside `recordDocumentVersions` gives `memoryWarning: true`. There is no `stateError` on that path.
+- **Timestamp mismatch.** `AdminVerifyAllView.needsTimestamp` is renamed `timestampMismatch: boolean`. It is true when the pin has `freshness` and the timestamp on disk does not name the documents now on disk.
+
+### W13. Renderer texts (G13)
+
+- **Template cards.** `TemplateKey` keeps `'setup' | 'incident'`, shown as phase 3 cards as today.
+- **Role name.** The root is called `ROLE_NAME.root` (`루트 관리자`) everywhere, so V18's `루트` becomes `루트 관리자`.
+- **Device texts.** The failed text of every device is the result message.
+
+| Device | Ready | Done |
+|---|---|---|
+| TRUST ROOT | `승인자 <n>명 · 버전 <v> · 만료 <date>` | `서명했어요: 버전 <v>` |
+| TARGET | `폐기할 대상을 고르세요` | `<label> 선택됨` |
+| REVOKE | `사유와 기간을 적고 폐기하세요` | `폐기했어요: 버전 <v>` |
+| REVOCATION REFRESH | `폐기 목록 버전 <v> · 만료 <date>` | `다시 서명했어요: 버전 <v>` |
+| TIMESTAMP | `타임스탬프 버전 <v or 없음> · 만료 <date or 없음>` | `서명했어요: 버전 <v>` |
+| POLICY CHECK | `검사 중…` | `VERIFIED <n>개 · 그 외 <m>개`, then one line per other verdict, `<verdict> <k>개` |
+
+### W14. Tests (G11, m2)
+
+- **Golden fixtures.** Before reimplementing anything, `tests/fixtures/admin-golden/` holds bytes signed by the current code (`fcc8192` plus v5.1). The signatures are deterministic Ed25519, with fixed keys and a fixed `now`, for add, remove, revoke-key, revoke-digest and refresh. The new tests compare prepare followed by commit against these bytes. Renew has no golden file, because it is new.
+- **Re-enrolment recipe.**
+  1. Rotate and adopt as in the rotation steps of the hardened `gui/tests/admin.test.ts`: the test that sets up a rotated root with `root rotate` events and `root adopt`.
+  2. Call `addApprover({ rootKeyPath: newRoot.priv, publicKeyPath: oldRoot.pub, … })` with no `--policy`. It succeeds.
+  3. `loadPolicyTrust` then fails with the W6 host message.
+  4. Repeat with a recovery key removed by the rotate.
+  5. A rotate that names a retired key in `new_recovery` is refused by the walker.
+- **Recovery world.** `gui/tests/admin.test.ts` gains `recoveryWorld(t, { freshness })`. It builds on `setupRecoveryOrg`, writes the v2 pin, and calls `signPolicyTimestamp` when `freshness` is set.
+
+### W15. Spec baseline (G12, m3)
+
+V20 is re-keyed by heading against the hardened spec:
+- **Templates:** the table under the templates heading;
+- **Phases:** the phases list;
+- **Memory:** the GUI memory paragraph.
+
+The phase 2 sections (Shared rules, Manage approvers, Revoke, Publish) are added as new text, written to V and W. They are not copied from the old copy. Also updated:
+- `CHANGELOG.md`;
+- the CLI help (V8);
+- `docs/spec/trust-documents-v1.md` and `docs/spec/root-recovery-v1.md` (V2 and W6, including the walker's new refusal);
+- `docs/capabilities.md`, if it describes the admin rack.
