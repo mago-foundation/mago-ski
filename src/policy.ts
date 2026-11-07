@@ -428,7 +428,7 @@ function applyProgress(state: HostState, pinned: string, progress: RootProgress)
 const persistChains = new Map<string, Promise<unknown>>();
 
 async function persistState(statePath: string, state: HostState): Promise<{ state: HostState } | { error: string }> {
-  const key = path.resolve(statePath);
+  const key = await canonicalOrLexical(statePath);
   const previous = persistChains.get(key) ?? Promise.resolve();
   const run = previous.then(() => persistStateNow(statePath, state));
   const tail = run.catch(() => undefined);
