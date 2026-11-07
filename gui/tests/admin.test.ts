@@ -10,7 +10,7 @@ import { generateKeyPair } from '../../src/keys.ts';
 import { adoptTrustDocuments, appendRootEvent, prepareRootEvent, signRootEvent } from '../../src/recovery-admin.ts';
 import { collectSkillTree } from '../../src/tree-digest.ts';
 import { daysAfter, setupOrg, setupRecoveryOrg, T0, tempDir, writeSkill, type Org, type RecoveryOrg } from '../../tests/helpers.ts';
-import { AdminSession, dialogSafe, mapPinPath, pinOwnershipProblem, type AdminSessionOptions } from '../src/service/admin.ts';
+import { AdminSession, dialogSafe, mapPinPath, pinOwnershipProblem, readPin, type AdminSessionOptions } from '../src/service/admin.ts';
 import type { AdminReviewSummary, AdminSignSummary } from '../src/service/types.ts';
 
 const UID = process.getuid!();
@@ -506,9 +506,14 @@ test('the armed key is dropped when the pin changes, when the role is gone, and 
   assert.match(failure(removed), /no longer holds its role/u);
   assert.equal((await w.session.status()).armed, null);
 
+  // The idle timer is driven by the mock clock, not by waiting.
   const idle = await world(t, { idleMs: 30 });
   await idle.session.arm(idle.org.approverKey);
-  await new Promise((r) => setTimeout(r, 80));
+  assert.equal((await idle.session.status()).armed?.role, 'approver');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await idle.session.arm(idle.org.approverKey);
+  t.mock.timers.tick(31);
+  t.mock.timers.reset();
   assert.equal((await idle.session.status()).armed, null);
 });
 
@@ -650,4 +655,239 @@ test('F4: an older root event log after a rotation is refused, and the rotated-o
 test('dialogSafe replaces controls, bidirectional marks and zero-width characters with their code points', () => {
   assert.equal(dialogSafe('plain 한글 text'), 'plain 한글 text');
   assert.equal(dialogSafe('a\nb‮c​d﻿e\u0085f⁦g'), 'a⟨U+000A⟩b⟨U+202E⟩c⟨U+200B⟩d⟨U+FEFF⟩e⟨U+0085⟩f⟨U+2066⟩g');
+});
+
+test('S4: dialogSafe also replaces format, private-use, unassigned, surrogate and separator code points', () => {
+  for (const [char, shown] of [
+    ['\u061c', '⟨U+061C⟩'], ['\u2060', '⟨U+2060⟩'], ['\ufff9', '⟨U+FFF9⟩'], ['\u180e', '⟨U+180E⟩'], ['\u00ad', '⟨U+00AD⟩'],
+    ['\u2028', '⟨U+2028⟩'], ['\u2029', '⟨U+2029⟩'], ['\ue000', '⟨U+E000⟩'], ['\u0378', '⟨U+0378⟩'],
+    ['\u{e0041}', '⟨U+E0041⟩'], ['\u{10ffff}', '⟨U+10FFFF⟩'], ['\u{f0000}', '⟨U+F0000⟩'], ['\ud800', '⟨U+D800⟩'],
+  ] as const) assert.equal(dialogSafe(`a${char}b`), `a${shown}b`, shown);
+  assert.equal(dialogSafe('Skill 😀 한글 é'), 'Skill 😀 한글 é', 'ordinary text, emoji and accents stay');
+});
+
+// ---- v5.1 review fixes
+
+test('C-F5: a confirmSign that changes SKILL.md makes approve refuse and write nothing', async (t) => {
+  const w = await world(t);
+  await w.session.arm(w.org.approverKey);
+  const digest = await reviewed(w);
+  w.handlers.sign = async () => { await appendFile(path.join(w.docs, 'SKILL.md'), 'Changed while the human was deciding.\n'); return true; };
+  const result = await w.session.approve('docs', digest, '30d', 'Reviewed');
+  assert.equal(result.ok, false);
+  await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
+});
+
+test('C-F5: an approver re-added with a new expiry or narrower scopes shows armed null at the next status', async (t) => {
+  const w = await world(t);
+  const readd = async (scopes: string[], expires: string) => {
+    await removeApprover({ rootKeyPath: w.org.rootKey, trustRootPath: w.org.trustRoot, now: T0, keyId: w.org.approverKeyId });
+    await addApprover({ rootKeyPath: w.org.rootKey, trustRootPath: w.org.trustRoot, now: T0, publicKeyPath: w.org.approverPub, name: 'Reviewer One', scopes, expires });
+  };
+  assert.equal((await w.session.arm(w.org.approverKey)).ok, true);
+  await readd(['docs-*'], '90d');
+  assert.equal((await w.session.status()).armed, null, 'a new expiry');
+  await readd(['docs-*'], '180d');
+  assert.equal((await w.session.arm(w.org.approverKey)).ok, true);
+  await readd(['docs-helper'], '180d');
+  assert.equal((await w.session.status()).armed, null, 'narrower scopes');
+});
+
+test('C-F2: a lifetime past the expiry the re-check just refreshed is refused', async (t) => {
+  const w = await world(t);
+  await w.session.arm(w.org.approverKey);
+  const digest = await reviewed(w);
+  // The same key, same scopes, a shorter expiry: no status poll came in between, so the stored role is stale.
+  await removeApprover({ rootKeyPath: w.org.rootKey, trustRootPath: w.org.trustRoot, now: T0, keyId: w.org.approverKeyId });
+  await addApprover({ rootKeyPath: w.org.rootKey, trustRootPath: w.org.trustRoot, now: T0, publicKeyPath: w.org.approverPub, name: 'Reviewer One', scopes: ['docs-*'], expires: '30d' });
+  const result = await w.session.approve('docs', digest, '90d', 'Reviewed');
+  assert.match(failure(result), /승인자 키의 만료/u);
+  assert.equal(w.calls.sign.length, 0);
+  await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
+});
+
+test('C-F3: a key folder that becomes a discovery root after arm is refused at signing', async (t) => {
+  const w = await world(t);
+  const home = path.join(w.base, 'keys-elsewhere');
+  await mkdir(home, { recursive: true });
+  const keyFile = path.join(home, 'approver.pem');
+  await copyFile(w.org.approverKey, keyFile);
+  await chmod(keyFile, 0o600);
+  assert.equal((await w.session.arm(keyFile)).ok, true);
+  const digest = await reviewed(w);
+  w.hostSkillDirs.push(home);
+  const result = await w.session.approve('docs', digest, '30d', 'Reviewed');
+  assert.equal(failure(result), 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.');
+  assert.equal(w.calls.sign.length, 0);
+
+  // The same check runs inside beforeSign: the folder turns into a Skill location while the dialog is open.
+  w.hostSkillDirs.length = 0;
+  const digest2 = await reviewed(w);
+  w.handlers.sign = async () => { w.hostSkillDirs.push(home); return true; };
+  assert.equal(failure(await w.session.approve('docs', digest2, '30d', 'Reviewed')), 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.');
+  await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
+});
+
+test('S6: a key file swapped after arm is refused with the new message and the key is dropped', async (t) => {
+  const w = await world(t);
+  const home = path.join(w.base, 'keys-elsewhere');
+  await mkdir(home, { recursive: true });
+  const keyFile = path.join(home, 'approver.pem');
+  await copyFile(w.org.approverKey, keyFile);
+  await chmod(keyFile, 0o600);
+  assert.equal((await w.session.arm(keyFile)).ok, true);
+  const digest = await reviewed(w);
+  // Same path, same bytes, another file (another inode).
+  await rename(keyFile, path.join(home, 'moved.pem'));
+  await copyFile(path.join(home, 'moved.pem'), keyFile);
+  await chmod(keyFile, 0o600);
+  const result = await w.session.approve('docs', digest, '30d', 'Reviewed');
+  assert.equal(failure(result), '키 파일이 바뀌었어요. 다시 불러오세요.');
+  assert.equal(w.calls.sign.length, 0);
+  assert.equal((await w.session.status()).armed, null);
+});
+
+test('S6: arm opens the real path once; a symbolic link to a key arms, a key over 64 KiB does not', async (t) => {
+  const w = await world(t);
+  const link = path.join(w.base, 'link.pem');
+  await symlink(w.org.approverKey, link);
+  assert.equal((await w.session.arm(link)).ok, true, 'a link is resolved to the real file before it is opened');
+  const big = path.join(w.base, 'big.pem');
+  await writeFile(big, Buffer.alloc(70 * 1024, 0x41), { mode: 0o600 });
+  assert.deepEqual(await w.session.arm(big), { ok: false, reason: '키 파일을 읽을 수 없어요' });
+});
+
+test('S3: the key picker is a dialog: refused while another is open, counted while open, and a cancel starts the cooldown', async (t) => {
+  const w = await world(t, { cooldownMs: 60_000 });
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
+  await w.session.arm(w.org.approverKey);
+  const shown = gate<void>();
+  const answer = gate<boolean>();
+  w.handlers.review = async () => { shown.open(); return await answer.promise; };
+  const review = w.session.review('docs');
+  await shown.promise;
+  await assert.rejects(w.session.pickFile(async () => { throw new Error('must not open'); }), /다른 확인 창이 열려 있어요/u);
+  answer.open(false);
+  await review;
+  // The cancelled review started the cooldown: the picker is refused with the cooldown text.
+  await assert.rejects(w.session.pickFile(async () => null), /잠시 후 다시 시도하세요/u);
+
+  const free = await world(t, { cooldownMs: 60_000 });
+  const picking = gate<string | null>();
+  const opened = gate<void>();
+  const pick = free.session.pickFile(async () => { opened.open(); return await picking.promise; });
+  await opened.promise;
+  await assert.rejects(free.session.pickFile(async () => null), /다른 확인 창이 열려 있어요/u);
+  assert.match(failure(await free.session.review('docs')), /(다른 확인 창이 열려 있어요|승인자 키를 먼저)/u);
+  picking.open(null);
+  assert.equal(await pick, null);
+  await assert.rejects(free.session.pickFile(async () => null), /잠시 후 다시 시도하세요/u, 'a cancelled picker starts the cooldown');
+
+  const chosen = await world(t);
+  assert.equal(await chosen.session.pickFile(async () => '/some/key.pem'), '/some/key.pem');
+  assert.equal(await chosen.session.pickFile(async () => '/some/other.pem'), '/some/other.pem', 'a chosen file starts no cooldown');
+});
+
+test('C-F8: a dialog stuck past the timeout and the grace no longer blocks others; its late answer is ignored', async (t) => {
+  const w = await world(t, { dialogTimeoutMs: 10 });
+  await w.session.arm(w.org.approverKey);
+  const never = gate<boolean>();
+  w.handlers.review = () => never.promise;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const first = w.session.review('docs');
+  while (w.calls.review.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(10);
+  assert.deepEqual(await first, { ok: false, message: '검토를 기록하지 않았어요' });
+  assert.deepEqual(await w.session.review('docs'), { ok: false, message: '다른 확인 창이 열려 있어요' });
+  t.mock.timers.tick(4999);
+  assert.deepEqual(await w.session.review('docs'), { ok: false, message: '다른 확인 창이 열려 있어요' }, 'still open just before the grace ends');
+  t.mock.timers.tick(1);
+  w.handlers.review = async () => true;
+  assert.equal((await w.session.review('docs')).ok, true, 'the slot was released');
+  // The late answer of the stuck dialog changes nothing, and does not free a slot it no longer holds.
+  never.open(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  const blocker = gate<boolean>();
+  const shown = gate<void>();
+  w.handlers.review = async () => { shown.open(); return await blocker.promise; };
+  const open = w.session.review('docs');
+  await shown.promise;
+  // Only the picker is outside the queue: it is refused while the review dialog holds the slot.
+  await assert.rejects(w.session.pickFile(async () => null), /다른 확인 창이 열려 있어요/u);
+  blocker.open(true);
+  assert.equal((await open).ok, true);
+  t.mock.timers.reset();
+});
+
+test('C-F10: a reset refused by the dialog rules says why; a reset with a key armed drops the key', async (t) => {
+  const w = await world(t, { cooldownMs: 60_000 });
+  await w.session.arm(w.org.approverKey);
+  const shown = gate<void>();
+  const picking = gate<string | null>();
+  const pick = w.session.pickFile(async () => { shown.open(); return await picking.promise; });
+  await shown.promise;
+  const busy = await w.session.resetMemory();
+  assert.deepEqual([busy.ok, !busy.ok && busy.message], [false, '다른 확인 창이 열려 있어요']);
+  assert.equal(busy.status.armed?.role, 'approver');
+  picking.open(null);
+  await pick;
+  const cooling = await w.session.resetMemory();
+  assert.deepEqual([cooling.ok, !cooling.ok && cooling.message], [false, '잠시 후 다시 시도하세요']);
+  assert.equal(w.calls.reset, 0);
+
+  const r = await world(t);
+  await r.session.arm(r.org.approverKey);
+  const done = await r.session.resetMemory();
+  assert.equal(done.ok, true);
+  assert.equal(done.status.armed, null, 'a reset drops the armed key');
+  assert.equal(r.calls.reset, 1);
+});
+
+test('S1: an unreadable memory is retried and never moved aside; a corrupt memory is moved aside', async (t) => {
+  const w = await world(t);
+  const stateDir = path.dirname(w.stateFile);
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(w.stateFile, '{ not json');
+  // A trailing slash on a regular file reads as ENOTDIR: an I/O error, not a format error.
+  const options = { path: w.pinPath, rootUid: UID, trustedBase: w.base, now: NOW, platform: 'linux' as const, procDir: w.procDir, readlink: () => '' };
+  const resets: string[] = [];
+  const started = Date.now();
+  const stuck = await readPin({ ...options, memoryFile: `${w.stateFile}/`, onMemoryReset: (r) => { resets.push(r.backup); } });
+  assert.deepEqual([stuck.kind, stuck.kind === 'invalid' && stuck.reason], ['invalid', '이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요.']);
+  assert.ok(Date.now() - started >= 300, 'retried after 50, 100 and 200 ms');
+  assert.equal(resets.length, 0);
+  assert.deepEqual((await readdir(stateDir)).filter((n) => n.includes('.unreadable-')), [], 'nothing was renamed');
+  assert.equal(await readFile(w.stateFile, 'utf8'), '{ not json');
+
+  // The read recovers during the retries (the file goes away): the pin loads and nothing is moved.
+  const recovering = readPin({ ...options, memoryFile: `${w.stateFile}/`, onMemoryReset: (r) => { resets.push(r.backup); } });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  await rename(w.stateFile, path.join(stateDir, 'elsewhere.json'));
+  assert.equal((await recovering).kind, 'loaded');
+  assert.equal(resets.length, 0);
+
+  // Corrupt: renamed aside, once, and the pin loads with an empty memory.
+  await writeFile(w.stateFile, '{ not json');
+  const corrupt = await readPin({ ...options, memoryFile: w.stateFile, onMemoryReset: (r) => { resets.push(r.backup); } });
+  assert.equal(corrupt.kind, 'loaded');
+  assert.equal(resets.length, 1);
+  assert.equal(await readFile(resets[0]!, 'utf8'), '{ not json');
+});
+
+test('C-F5: a memory that cannot be written (read-only file and folder) makes the pin invalid, not corrupt', { skip: process.getuid?.() === 0 ? 'root ignores file modes' : false }, async (t) => {
+  const w = await world(t);
+  const first = await w.session.status();
+  assert.equal(first.pin.kind, 'loaded');
+  // A newer trust root needs a new record; the memory file and its folder refuse the write.
+  await addApprover({ rootKeyPath: w.org.rootKey, trustRootPath: w.org.trustRoot, now: T0, publicKeyPath: w.org.approverPub, name: 'Reviewer One', scopes: ['docs-*'], expires: '90d' });
+  const stateDir = path.dirname(w.stateFile);
+  await chmod(w.stateFile, 0o400);
+  await chmod(stateDir, 0o500);
+  t.after(() => chmod(stateDir, 0o700));
+  const status = await w.session.status();
+  assert.equal(status.pin.kind, 'invalid');
+  assert.match(status.pin.reason ?? '', /^이 컴퓨터의 기록을 저장하지 못했어요/u);
+  assert.equal(status.memoryReset, null);
+  assert.deepEqual((await readdir(stateDir)).filter((n) => n.includes('.unreadable-')), []);
 });

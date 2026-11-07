@@ -1,14 +1,14 @@
 // Root recovery v1 (docs/spec/root-recovery-v1.md): policy v2, the root event log, host state v2, freshness and
 // the once-per-host reporting of trust failures on every host.
 import assert from 'node:assert/strict';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createMagoSkiExtension } from '../hosts/pi/index.ts';
 import { runGitHubCheck } from '../hosts/github/run.ts';
 import { canonicalBytes, parseCanonicalJsonBytes } from '../src/canonical-json.ts';
 import { loadPrivateKey } from '../src/keys.ts';
-import { loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy } from '../src/policy.ts';
+import { HostStateFormatError, loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy } from '../src/policy.ts';
 import {
   adoptTrustDocuments, appendRootEvent, currentRootState, prepareRootEvent, signPolicyTimestamp, signRootEvent,
 } from '../src/recovery-admin.ts';
@@ -664,9 +664,9 @@ test('loadPolicyRoot reads nothing without recovery, never writes with recordVer
 
   await writeFile(org.statePath, '{ not json');
   const unreadable = await loadPolicyRoot(policy, NOW);
-  assert.equal(!unreadable.ok && unreadable.stateError, 'unreadable');
+  assert.equal(!unreadable.ok && unreadable.stateError, 'corrupt');
   const trustUnreadable = await loadPolicyTrust(policy, NOW);
-  assert.equal(!trustUnreadable.ok && trustUnreadable.stateError, 'unreadable');
+  assert.equal(!trustUnreadable.ok && trustUnreadable.stateError, 'corrupt');
 });
 
 test('trust failures carry typed rollback and stateError fields, messages unchanged', async (t) => {
@@ -683,7 +683,7 @@ test('trust failures carry typed rollback and stateError fields, messages unchan
 
   await writeFile(org.statePath, 'garbage');
   const unreadable = await loadPolicyTrust(policy, later(2));
-  assert.equal(!unreadable.ok && unreadable.stateError, 'unreadable');
+  assert.equal(!unreadable.ok && unreadable.stateError, 'corrupt');
   assert.equal(!unreadable.ok && unreadable.rollback, undefined);
 });
 
@@ -694,4 +694,72 @@ test('a state file that cannot be written is reported as stateError write', asyn
   const result = await loadPolicyTrust(policy, later(1));
   assert.equal(!result.ok && result.stateError, 'write');
   assert.match(!result.ok ? result.reason : '', /cannot record trust versions/u);
+});
+
+test('the state error kinds: format problems are corrupt, every other read error is unreadable', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const kind = async (statePath: string) => {
+    const result = await loadPolicyTrust({ ...policy, statePath }, later(1), { recordVersions: false });
+    return !result.ok ? result.stateError : undefined;
+  };
+  const corrupt = path.join(org.dir, 'corrupt-state.json');
+  await writeFile(corrupt, '{ not json');
+  assert.equal(await kind(corrupt), 'corrupt');
+  await writeFile(corrupt, JSON.stringify({ type: 'mago.host-state/v1', roots: {}, extra: 1 }));
+  assert.equal(await kind(corrupt), 'corrupt', 'exact keys');
+  await writeFile(corrupt, new TextEncoder().encode(`{"roots":{"${'a'.repeat(64)}":{"revocations_version":0,"trust_root_version":1}},"type":"mago.host-state/v1"}`));
+  assert.equal(await kind(corrupt), 'corrupt', 'bad counter');
+  await writeFile(corrupt, Buffer.alloc(1024 * 1024 + 1, 0x20));
+  assert.equal(await kind(corrupt), 'corrupt', 'over the size limit');
+  const directory = path.join(org.dir, 'state-is-a-directory');
+  await mkdir(directory);
+  assert.equal(await kind(directory), 'corrupt', 'not a regular file');
+  assert.ok(new HostStateFormatError('x') instanceof Error);
+
+  // A path below a regular file cannot be read at all: ENOTDIR is unreadable, not corrupt.
+  assert.equal(await kind(path.join(corrupt, 'below.json')), 'unreadable');
+});
+
+test('a corrupt state file is never overwritten by a load', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  // The state file turns corrupt between the load's read and its write: the write must not replace it.
+  const original = org.statePath;
+  await writeFile(original, '{ not json');
+  const result = await loadPolicyTrust(policy, later(1));
+  assert.equal(!result.ok && result.stateError, 'corrupt');
+  assert.equal(await readFile(original, 'utf8'), '{ not json', 'a corrupt memory is never overwritten by a load');
+});
+
+test('overlapping loads of an old and a new document never lower the recorded version', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const newer = await readFile(org.trustRoot);
+  const recorded = async () => {
+    const state = parseCanonicalJsonBytes(await readFile(org.statePath), 'state') as { roots: Record<string, { trust_root_version: number }> };
+    return state.roots[org.rootKeyId]!.trust_root_version;
+  };
+  await rm(org.statePath, { force: true });
+  assert.equal((await loadPolicyTrust(policy, later(2))).ok, true);
+  const expected = await recorded();
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(olderCopy, older);
+  await writeFile(newerCopy, newer);
+  const oldPolicy = { ...policy, trustRootPath: olderCopy };
+  const newPolicy = { ...policy, trustRootPath: newerCopy };
+  for (let trial = 0; trial < 40; trial += 1) {
+    await rm(org.statePath, { force: true });
+    // Two loads on one empty state file, one with the old document and one with the new, started together.
+    const loads = trial % 2 === 0 ? [loadPolicyTrust(oldPolicy, later(2)), loadPolicyTrust(newPolicy, later(2))]
+      : [loadPolicyTrust(newPolicy, later(2)), loadPolicyTrust(oldPolicy, later(2))];
+    await Promise.all(loads);
+    assert.equal(await recorded(), expected, `trial ${trial}`);
+  }
 });
