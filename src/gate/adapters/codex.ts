@@ -11,7 +11,11 @@
 //     Codex only to answer "does ANY SKILL.md exist there?" (plus `incomplete`: unreadable entry, symlinked SKILL.md,
 //     FIFO, cap hit, bad root, ancestor cap hit, missing/relative cwd, unreadable host environment). If any exists or the
 //     walk is incomplete, EVERY `$token` is treated as possibly naming a non-admin Skill (see MASKING below); a token that
-//     is not a valid engine Skill name (e.g. `a:b`) is blocked without asking; anything not VERIFIED is blocked in enforce.
+//     is not a valid engine Skill name is blocked without asking; anything not VERIFIED is blocked in enforce.
+//     Independent of the walk: a token with a plugin namespace (`$acme:search`, `:` followed by a non-colon) is always
+//     blocked (NOT_ADMIN), and a link is checked first: only a link that resolves (realpath, `skill://` and `file://` accepted)
+//     to an approved `<admin_root>/<name>/SKILL.md` is asked; every other link is blocked (NOT_ADMIN), because Codex selects
+//     a linked mention by path (design docs/design/codex-gate-findings.md, Y1/X1: L1-L3, T1).
 //     On a clean machine only tokens equal to an admin-root directory name are asked, so `$5` in prose passes. RESIDUAL
 //     OVER-BLOCKING: on a machine with any user/repo Skill, `$word` prose is blocked in enforce. KNOWN LIMIT (live test):
 //     admin Skills are named here by the engine's frontmatter rule, Codex uses YAML; a mismatch can only affect
@@ -25,9 +29,10 @@
 //     repo Skills removed). LIVE TEST (0.163.0 and 0.166.0, docs/spikes/codex-gate-live.md): Codex writes its bundled
 //     Skills to <codex_home>/skills/.system at startup, so a non-admin Skill always exists and EVERY bare mention of an
 //     admin Skill is blocked; in practice only the linked form works.
-//   * PreToolUse (Bash): matching command text is BYPASSABLE (globs, variables, scripts) = defence in depth only.
+//   * PreToolUse (any tool whose tool_input.command is a string; repeated slashes are collapsed; any `.agents`/`.codex` or
+//     SKILL.md text outside an admin Skill path is blocked): matching command text is BYPASSABLE (globs, variables, scripts) = defence in depth only.
 //   * Non-admin roots are walked like Codex (depth 6, hidden dirs skipped, directory symlinks followed with loop
-//     detection, cap 2000 dirs). A linked mention whose path is inside a non-admin root is blocked. A Skill created after
+//     detection, cap 2000 dirs). A Skill created after
 //     the walk is a race the filesystem deny is meant to cover.
 //   * Repo roots: `.codex/skills` and `.agents/skills` in EVERY ancestor of cwd up to `/` (at most 64 levels, more =
 //     incomplete). Project-root markers are NOT used: `project_root_markers` is employee-controllable (user config.toml,
@@ -86,6 +91,8 @@ const MAX_ENVIRON_BYTES = 256 * 1024;
 
 const COULD_NOT_VERIFY = 'mago-ski could not verify this Skill; it is blocked until verification works.';
 const MASKED = 'A Skill with this name also exists outside your organisation\'s approved Skills, so a plain mention is blocked. Mention the approved Skill by its link, or remove the other Skill.';
+const notAdmin = (adminRoot: string): string =>
+  `This Skill is not one of your organisation's approved Skills, so it is blocked. Approved Skills are installed in ${adminRoot}.`;
 const notApproved = (verdict: string): string =>
   `This Skill is not approved by your organisation (mago-ski: ${verdict}). If it was updated, restart the session to use the new version.`;
 
@@ -286,11 +293,18 @@ async function findSkills(cfg: CodexConfig, cwd: string | undefined, env: HostEn
   return { admin, adminReal, anySkill: scan.found, roots: [...roots, ...scan.realRoots], incomplete: scan.incomplete, cwd: validCwd ? cwd : undefined };
 }
 
-/** The admin Skill (actual directory name) that a link `[$x](path)` resolves to by realpath, exactly `<admin>/<name>/SKILL.md`. */
+/**
+ * The admin Skill (actual directory name) that a link `[$x](path)` resolves to by realpath, exactly `<admin>/<name>/SKILL.md`
+ * (rule L2). A leading `skill://` or `file://` is stripped; a `file://` with a host part, a relative link without a usable
+ * cwd, any other scheme and anything that does not resolve all give undefined (rule L3: not an approved Skill file).
+ */
 async function adminLinkName(link: string, f: Found): Promise<string | undefined> {
-  if (f.adminReal === undefined || /^[a-z][a-z0-9+.-]*:\/\//iu.test(link) && !/^file:\/\//iu.test(link)) return undefined;
+  if (f.adminReal === undefined || /^[a-z][a-z0-9+.-]*:\/\//iu.test(link) && !/^(file|skill):\/\//iu.test(link)) return undefined;
+  const stripped = link.replace(/^(file|skill):\/\//iu, '');
+  if (/^file:\/\//iu.test(link) && !stripped.startsWith('/')) return undefined; // file://host/...
+  if (!path.isAbsolute(stripped) && f.cwd === undefined) return undefined;
   try {
-    const real = await realpath(path.resolve(f.cwd ?? '/', link.replace(/^file:\/\//iu, '')));
+    const real = await realpath(path.resolve(f.cwd ?? '/', stripped));
     // The service publishes each admin entry as a symlink to its generation (service.ts HOST-VISIBLE SKILLS), so the link
     // is compared with the resolved `<admin>/<name>/SKILL.md` of each admin entry, not with a path under the admin root.
     for (const name of f.admin.values())
@@ -306,23 +320,16 @@ async function listRoot(root: string): Promise<string[]> {
   return readdir(root);
 }
 
-/** A linked mention `[$x](path)` pointing (lexically or by realpath) into a non-admin root. */
-async function linkInRoots(links: string[], cwd: string | undefined, roots: string[]): Promise<boolean> {
-  const inside = (p: string): boolean => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`));
-  for (const link of links) {
-    if (/^skill:\/\//iu.test(link) || /^[a-z][a-z0-9+.-]*:\/\//iu.test(link) && !/^file:\/\//iu.test(link)) continue;
-    const abs = path.resolve(cwd !== undefined && path.isAbsolute(cwd) ? cwd : '/', link.replace(/^file:\/\//iu, ''));
-    if (inside(abs)) return true;
-    try { if (inside(await realpath(abs))) return true; } catch { /* nonexistent: the lexical check stands */ }
-  }
-  return false;
-}
-
 // --- Bash command text (best-effort) -----------------------------------------------------------------------------------
-function inspectCommand(command: string, cfg: CodexConfig): { rogue: boolean; admin: string[] } {
-  // Any mention of a user/repo Skill location, in any spelling (~, $HOME, relative): ".agents/skills" and ".codex/skills".
-  const rogue = /\.(agents|codex)\/skills/u.test(command) || cfg.skillRoots.some((r) => command.includes(r));
-  const esc = cfg.adminRoot.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+function inspectCommand(raw: string, cfg: CodexConfig): { rogue: boolean; admin: string[] } {
+  const command = raw.replace(/\/{2,}/gu, '/'); // `.agents//skills` is the same path
+  const collapse = (v: string): string => v.replace(/\/{2,}/gu, '/');
+  const esc = collapse(cfg.adminRoot).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  // Any mention of a user/repo Skill location in any spelling (~, $HOME, relative), or of a SKILL.md file other than an
+  // admin Skill's own `<admin_root>/<name>/SKILL.md`.
+  const outsideAdmin = command.replace(new RegExp(`${esc}/[A-Za-z0-9][A-Za-z0-9._-]*/SKILL\\.md`, 'giu'), '');
+  const rogue = /\.(agents|codex)(?![A-Za-z0-9_-])/u.test(command) || /skill\.md/iu.test(outsideAdmin)
+    || cfg.skillRoots.some((r) => command.includes(collapse(r)));
   const admin = new Set<string>();
   for (const m of command.matchAll(new RegExp(`${esc}/([A-Za-z0-9][A-Za-z0-9._-]*)`, 'gu'))) admin.add(m[1]!);
   return { rogue, admin: [...admin] };
@@ -356,10 +363,10 @@ function parseHookInput(bytes: Buffer, peek: (k: Kind) => void): Parsed {
     return { kind: 'prompt', prompt: raw['prompt'], ...(cwd !== undefined ? { cwd } : {}) };
   }
   if (typeof raw['tool_name'] !== 'string' || !isRecord(raw['tool_input'])) throw new Error('bad tool call');
-  if (raw['tool_name'] !== 'Bash') return { kind: 'other-tool' };
   const command = raw['tool_input']['command'];
-  if (typeof command !== 'string') throw new Error('missing command');
-  return { kind: 'bash', command };
+  if (typeof command === 'string') return { kind: 'bash', command }; // any tool with a string command is a shell command
+  if (raw['tool_name'] === 'Bash') throw new Error('missing command');
+  return { kind: 'other-tool' };
 }
 
 const OK: HookOutcome = { code: 0, stdout: '', stderr: '' };
@@ -403,20 +410,30 @@ async function runHookInner(argv: readonly string[], deps: CodexDeps, setMode: (
         let env: HostEnv | undefined;
         try { env = await (deps.readHostEnv ?? readProcEnviron)(await host()); } catch { env = undefined; } // fail closed in findSkills
         const f = await findSkills(cfg, parsed.cwd, env);
-        if (mode === 'enforce' && await linkInRoots(links, f.cwd, f.roots)) return block(notApproved('NOT_ADMIN_ROOT'));
         const wide = f.anySkill || f.incomplete; // a non-admin Skill may exist: any token could name it
-        const plainKeys = new Set([...plain].map((n) => n.toLowerCase()));
-        const linkedAdmin = new Set<string>();
-        for (const l of links) { const a = await adminLinkName(l, f); if (a !== undefined) linkedAdmin.add(a.toLowerCase()); }
-        for (const n of names) {
-          const key = n.toLowerCase();
-          const adminName = f.admin.get(key);
-          if (adminName === undefined && !wide) continue;
-          // MASKING: an admin name may really select a same-name repo/user Skill unless it is linked to the admin file.
-          if (wide && adminName !== undefined && (plainKeys.has(key) || !linkedAdmin.has(key)) && mode === 'enforce') return block(MASKED);
+        // Links first, in prompt order (design Y1/X1): L1 ignored, L2 resolves to an admin Skill file (asked), L3 blocked.
+        for (const l of links) {
+          if (/^(app|mcp|plugin):\/\//iu.test(l)) continue; // L1
+          const a = await adminLinkName(l, f);
+          if (a === undefined) {
+            if (mode === 'enforce') return block(notAdmin(cfg.adminRoot)); // L3
+            continue;
+          }
+          asks.push({ skill: validateSkillName(a), event: 'prompt-expansion' });
+        }
+        // Then the plain tokens in prompt order (T1-T6, "wide" form).
+        for (const n of plain) {
+          if (/:[^:]/u.test(n)) { // T1: a plugin-namespaced token can select a Skill the walk never lists
+            if (mode === 'enforce') return block(notAdmin(cfg.adminRoot));
+            continue;
+          }
+          const adminName = f.admin.get(n.toLowerCase());
+          if (adminName === undefined && !wide) continue; // T6
+          // T2: under wide, an admin name may really select a same-name repo/user Skill.
+          if (wide && adminName !== undefined && mode === 'enforce') return block(MASKED);
           let skill: string;
           try { skill = validateSkillName(adminName ?? n); } catch {
-            if (mode === 'enforce') return block(notApproved('NOT_ADMIN_ROOT')); // e.g. a namespaced `a:b`
+            if (mode === 'enforce') return block(notAdmin(cfg.adminRoot)); // T4: e.g. `alpha:` under wide
             continue;
           }
           asks.push({ skill, event: 'prompt-expansion' });
@@ -424,7 +441,7 @@ async function runHookInner(argv: readonly string[], deps: CodexDeps, setMode: (
       }
     } else if (parsed.kind === 'bash') {
       const c = inspectCommand(parsed.command, cfg);
-      if (c.rogue && mode === 'enforce') return block(notApproved('NOT_ADMIN_ROOT'));
+      if (c.rogue && mode === 'enforce') return block(notAdmin(cfg.adminRoot));
       if (c.admin.length > MAX_ADMIN_NAMES) return fail(COULD_NOT_VERIFY);
       for (const skill of c.admin) asks.push({ skill: validateSkillName(skill), event: 'skill-invoke' });
     }

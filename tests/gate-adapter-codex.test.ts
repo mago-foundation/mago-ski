@@ -19,6 +19,7 @@ const PROD_ENTRY = path.resolve('src/gate/adapters/codex-hook.ts');
 const MSG_APPROVED = /not approved by your organisation \(mago-ski: (\w+)\)/u;
 const MSG_UNVERIFIED = /could not verify this Skill/u;
 const MSG_MASKED = /also exists outside/u;
+const MSG_NOT_ADMIN = /not one of your organisation's approved Skills/u;
 
 // A fake host: an allowlisted-exe process that runs the hook entry as its child (so the parent-chain walk finds it).
 const HOST_SCRIPT = `
@@ -140,14 +141,14 @@ test('codex hook: real service; mentions, bash, revoke', { skip: LINUX_ONLY }, a
   const run = (stdin: string) => host.hook([cfg, 'enforce', UID], stdin);
   silent(await run(START));
   denied(await run(submit('please use $alpha now')), MSG_MASKED); // a user Skill exists: bare admin names are masked
-  denied(await run(submit('[$alpha](skill://alpha)')), MSG_MASKED);
+  denied(await run(submit('[$alpha](skill://alpha)')), MSG_NOT_ADMIN);
   silent(await run(submit(`[$alpha](${r.admin}/alpha/SKILL.md)`)));
   denied(await run(submit('use $rogue')), MSG_APPROVED);
   denied(await run(submit('use $ROGUE')), MSG_APPROVED); // case-insensitive file systems
   for (const p of ['echo $HOME', 'no mention at all']) silent(await run(submit(p)));
-  denied(await run(bash(`cat ${r.user}/rogue/SKILL.md`)), MSG_APPROVED);
-  denied(await run(bash('cat ~/.agents/skills/rogue/SKILL.md')), MSG_APPROVED);
-  denied(await run(bash('ls ./.codex/skills')), MSG_APPROVED);
+  denied(await run(bash(`cat ${r.user}/rogue/SKILL.md`)), MSG_NOT_ADMIN);
+  denied(await run(bash('cat ~/.agents/skills/rogue/SKILL.md')), MSG_NOT_ADMIN);
+  denied(await run(bash('ls ./.codex/skills')), MSG_NOT_ADMIN);
   silent(await run(bash(`cat ${r.admin}/alpha/SKILL.md`)));
   silent(await run(bash('ls -la && echo hi')));
   silent(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { x: 1 } })));
@@ -331,7 +332,7 @@ test('codex hook: rogue Skills with exotic frontmatter or a plugin namespace are
   };
   for (const plugin of ['.codex-plugin', '.claude-plugin', '.cursor-plugin']) {
     const run = await repoWith(fm('foo'), plugin);
-    denied(await run('use $acme:foo'), MSG_APPROVED); // not a valid engine name: blocked without asking
+    denied(await run('use $acme:foo'), MSG_NOT_ADMIN); // T1: namespaced token
     blocked(await run('use $foo'));
   }
   for (const content of ['---\n{name: rogue}\n---\n', '---\nname: "ro\\x67ue"\n---\n', '---\nname: &a rogue\n---\n', '---\rname: rogue\r---\r', '---\n? name\n: rogue\n---\n']) {
@@ -522,10 +523,11 @@ test('codex hook: a same-name admin Skill is masked by a repo Skill; only the ad
   silent(await host.hook([cfg, 'enforce', UID], START)); // the service admits the session
   denied(await run('use $alpha'), MSG_MASKED);
   denied(await run('use $ALPHA'), MSG_MASKED);
-  denied(await run(`use [$alpha](skill://alpha)`), MSG_MASKED);
+  denied(await run(`use [$alpha](skill://alpha)`), MSG_NOT_ADMIN);
   denied(await run(`use [$alpha](${r.admin}/alpha/SKILL.md) and $alpha`), MSG_MASKED); // one plain mention is enough
-  denied(await run(`use [$alpha](${path.join(repo, '.agents/skills/alpha/SKILL.md')})`), MSG_APPROVED); // link into a non-admin root
-  denied(await run(`use [$alpha](/nonexistent/alpha/SKILL.md)`), MSG_MASKED);
+  denied(await run(`use [$alpha](${path.join(repo, '.agents/skills/alpha/SKILL.md')})`), MSG_NOT_ADMIN); // link into a non-admin root
+  denied(await run(`use [$alpha](/nonexistent/alpha/SKILL.md)`), MSG_NOT_ADMIN);
+  silent(await run(`use [$alpha](skill://${r.admin}/alpha/SKILL.md)`)); // L2: absolute skill:// link to the admin file is asked and verified
   silent(await run(`use [$alpha](${r.admin}/alpha/SKILL.md)`));
   silent(await host.hook([cfg, 'enforce', UID], submit('use $alpha', { cwd: await tempDir(t) }))); // no non-admin Skill: bare name checked and allowed
   silent(await host.hook([await configFile(t, svc.sockets.decision, r, {}, 'shadow'), 'shadow', UID], submit('use $alpha', { cwd: repo })));
@@ -574,4 +576,20 @@ test('codex hook: admin Skills the service publishes (links to generations) are 
   denied(await host.hook([cfg, 'enforce', UID], submit('use $alpha')), MSG_MASKED);
   await revoke(digest); // enforce: the service removes the link, so the Skill is gone from the admin root
   assert.deepEqual(await readdir(managed), []);
+});
+
+test('codex hook: commit 1 security rules hold with an empty walk (H1, H2) and for every tool with a command', async (t) => {
+  const { r, run } = await adapter(t); // no non-admin Skill anywhere; the fake service never answers
+  const cwd = await tempDir(t);
+  denied(await run(submit('use $acme:search', { cwd })), MSG_NOT_ADMIN); // H2: plugin-namespaced token
+  denied(await run(submit('[$x](skill:///some/unscanned/path/s/SKILL.md)', { cwd })), MSG_NOT_ADMIN); // H1
+  denied(await run(submit(`[$alpha](skill://${r.admin}/alpha/SKILL.md)`, { cwd })), MSG_UNVERIFIED); // L2: asked (the fake service never answers)
+  silent(await run(submit('use $alpha: now', { cwd }))); // T6: trailing colon is not an admin key
+  silent(await run(submit('[$x](mcp://srv/tool) [$y](app://z)', { cwd }))); // L1
+  const other = (command: string) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'shell', tool_input: { command }, cwd: '/' });
+  denied(await run(other('cat .agents//skills/x/SKILL.md')), MSG_NOT_ADMIN);
+  denied(await run(other('cat ./a/SKILL.md')), MSG_NOT_ADMIN);
+  silent(await run(other('ls /tmp')));
+  silent(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/x' }, cwd: '/' })));
+  blocked(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, cwd: '/' }))); // Bash without a command
 });
