@@ -333,7 +333,11 @@ function inspectCommand(raw: string, cfg: CodexConfig): { rogue: boolean; admin:
   const rogue = /\.(agents|codex)(?![A-Za-z0-9_-])/u.test(command) || /skill\.md/iu.test(outsideAdmin)
     || cfg.skillRoots.some((r) => command.includes(collapse(r)));
   const admin = new Set<string>();
-  for (const m of command.matchAll(new RegExp(`${start}${esc}/([A-Za-z0-9][A-Za-z0-9._-]*)`, 'gu'))) admin.add(m[1]!);
+  for (const m of command.matchAll(new RegExp(`${esc}/([A-Za-z0-9][A-Za-z0-9._-]*)`, 'gu'))) admin.add(m[1]!);
+  // An admin path that does not start a word (`-I/etc/codex/skills/a`, `<other>/etc/codex/...`) is not trusted: block.
+  const anywhere = [...command.matchAll(new RegExp(esc, 'gu'))].length;
+  const atStart = [...command.matchAll(new RegExp(`${start}${esc}`, 'gu'))].length;
+  if (anywhere !== atStart) return { rogue: true, admin: [...admin] };
   return { rogue, admin: [...admin] };
 }
 
