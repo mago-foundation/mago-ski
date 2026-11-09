@@ -4,7 +4,7 @@ import type {
   ActionResult, ChangeView, DiffLine, FileChangeView, HistoryEvent, InstanceDetail, InstanceView,
   ObservationState, PkiResultView, Prefs, RendererApi, ServiceView,
 } from '../service/types.ts';
-import { renderAdmin } from './admin.ts';
+import { renderAdmin, setAdminPolling } from './admin.ts';
 import { actionDigest, detailMatches } from './binding.ts';
 import { $, h } from './dom.ts';
 
@@ -599,6 +599,8 @@ function showTab(next: typeof tab): void {
   tab = next;
   document.querySelectorAll<HTMLElement>('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === next)));
   for (const name of ['skills', 'activity', 'settings', 'admin'] as const) ($(`tab-${name}`) as HTMLElement).hidden = name !== next;
+  // A pin change or a revoked approver must disarm within seconds even if nobody clicks: poll while the tab is visible.
+  setAdminPolling(next === 'admin', api);
   if (view) apply(view);
 }
 

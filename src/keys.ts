@@ -168,25 +168,30 @@ export async function loadPrivateKey(filePath: string): Promise<PrivateKeyInfo> 
     throw new Error('Private key permissions must deny group and other access (chmod 600)');
   
   const pem = await readRegularFile(filePath, 'Private key', MAX_KEY_FILE_BYTES);
-  let privateKey: KeyObject;
-
   try {
-    try {
-      privateKey = createPrivateKey({ key: pem, format: 'pem', type: 'pkcs8' });
-    } catch {
-      throw new Error('Private key is not a valid PKCS#8 key');
-    }
-
-    if (privateKey.asymmetricKeyType !== 'ed25519')
-      throw new Error('Private key is not Ed25519');
-
-    return {
-      ...describePublicKey(createPublicKey(privateKey)),
-      privateKey,
-    };
+    return loadPrivateKeyBytes(pem);
   } finally {
     pem.fill(0);
   }
+}
+
+/** Parses a PKCS#8 Ed25519 PEM from bytes the caller already read. The caller zeroes `pem`. */
+export function loadPrivateKeyBytes(pem: Buffer): PrivateKeyInfo {
+  let privateKey: KeyObject;
+
+  try {
+    privateKey = createPrivateKey({ key: pem, format: 'pem', type: 'pkcs8' });
+  } catch {
+    throw new Error('Private key is not a valid PKCS#8 key');
+  }
+
+  if (privateKey.asymmetricKeyType !== 'ed25519')
+    throw new Error('Private key is not Ed25519');
+
+  return {
+    ...describePublicKey(createPublicKey(privateKey)),
+    privateKey,
+  };
 }
 
 export async function loadPublicKey(filePath: string): Promise<PublicKeyInfo> {
