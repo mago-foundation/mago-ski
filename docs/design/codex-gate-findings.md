@@ -1,6 +1,6 @@
 # Design: Codex gate live-test findings (bare mentions, bypasses, silent blocks, labels)
 
-Status: draft v3, for Goldfish review. Precedence: [Decisions (v3)](#decisions-v3) > the v2 text below. v1 passed comprehension but was NO-GO on readiness. Its antagonistic review found two live bypasses in today's adapter (H1, H2), five ways the strict reader disagreed with Codex (H3–H6, M1), and showed that the fix did not help a stock install (H8). This version is a rewrite.
+Status: draft v4, for Goldfish review. Precedence: [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > the v2 text. v1 passed comprehension but was NO-GO on readiness. Its antagonistic review found two live bypasses in today's adapter (H1, H2), five ways the strict reader disagreed with Codex (H3–H6, M1), and showed that the fix did not help a stock install (H8). This version is a rewrite.
 
 Sources:
 - [the Codex live test](../spikes/codex-gate-live.md), findings 2, 5 and 6;
@@ -414,3 +414,74 @@ Codex then always names an admin Skill by its Skill name, and the digest-folder 
 2. **Commit 2.** The reader (X2) and `known` / `unknown`, which enable the precise T2, T4 and T5.
 3. **Commit 3.** Removed names (X4) and the install-time name rule (X5).
 4. **Then** the live tests, spike and docs.
+
+## Decisions (v4)
+
+These decisions resolve the v3 readiness review. The v3 antagonistic review was cut off by a rate limit and must be re-run on v4 before coding starts.
+
+### Y1. Commit order and commit 1 (X10)
+
+1. **Security commit.** L1–L3, T1, X6, and T2–T5 in the "wide" form:
+   - `wide = found || incomplete`, where `found` is today's `anySkill`;
+   - T2 under `wide` gives MASKED, not MASKED_UNKNOWN, so today's tests keep their text;
+   - T4 is today's rule (an invalid name gives NOT_ADMIN, a valid name is asked);
+   - T3 and T5 are inert;
+   - T6 allows only when not `wide`.
+
+   This commit changes one case on purpose: `[$alpha](skill://<admin>/alpha/SKILL.md)` is now asked through L2, where today it is masked.
+2. **Removed names (X4).** This commit needs no reader.
+3. **Reader (X2)**, together with the precise T2, T4 and T5.
+4. **Install name rule (X5).**
+
+Each commit is shipped only when it blocks everything the previous commit blocked, except the L2 case above.
+
+### Y2. Table text (X1, X8)
+
+- `$alpha: now`: the token `alpha:` is not an admin key. It is allowed and not asked (T6) when no Skill is found, and blocked NOT_ADMIN by T4 under `wide`.
+- `$Alpha` with a user Skill `name: Alpha` gives MASKED (T2).
+- Case folding is deliberately stricter than Codex's exact matching. The docs say "same name, ignoring case".
+- If two admin folders differ only by case, the walk is incomplete.
+- Every block goes through one `deny(message)` helper, which shadow mode maps to allow.
+
+### Y3. Reader (X2)
+
+- The implementation is ported from the X2 prose, not copied from `reader3`.
+- The list of value starters that give unknown is `* % [ { ! &`. `? @` and a backtick are dropped, because Codex loads values starting with them.
+- The quote scan stops at the rule-2 marker.
+- The golden corpus path is `tests/fixtures/codex-names.json`.
+- Reads have a total budget of 8 MiB; past it, the walk is incomplete.
+
+### Y4. Removed names (X4)
+
+- `addRemoved` rejects names over 64 characters.
+- The cap is 2048 names, and the file at most 192 KiB.
+- Install edits the file only when the name is in it, and never creates the file.
+- A failed removal-write after publish is best effort and is counted in `status` as `removedNamesWriteFailures`. A stale name only causes an extra service query.
+- Uninstall and reconcile write the file **before** the unlink: in `uninstall` before `service.ts:602`, and in `reconcileOnce` before `:527`. This replaces the v2 bullet "after the unlink".
+- `gate-service.test.ts:197` filters dot-entries.
+- `listRoot` filters dot-entries (`codex.ts:302-307`).
+
+### Y5. Install name rule (X5)
+
+The check runs in `install`, after `installSkill` (`service.ts:586-589`) and before `storeCertificate` (`:592`):
+
+1. Read the published `path.join(r.dir, 'SKILL.md')` with `readRegularFile(…, 65536)`.
+2. Require `readKnownName(hex, hex, bytes) === name`, where `hex` is the tree digest without its `sha256:` prefix.
+
+A `SKILL.md` without a `name:` line therefore fails, because Codex would name the Skill after its digest folder. Skills installed before this rule are not re-checked. The gate is unreleased, so the docs say to reinstall. Tests cover a nameless `SKILL.md` and a 65-character name.
+
+### Y6. Tests and live (X8, X9)
+
+- **Tests.** The X8 list applies, plus:
+  - lines 148–150, 334 and 527: NOT_ADMIN after commit 1;
+  - lines 145, 146 and 355: NOT_ADMIN after commit 3;
+  - lines 142, 352 and 574: a user Skill `name: alpha` is added, because `roots()` writes `rogue`;
+  - line 563: `MSG_APPROVED` today, and NOT_ADMIN once the reader lands.
+- **Live tests.**
+  - `mention-bare-approved` expects served.
+  - The alpha-collision scenario expects `blocked(o)`, with model calls = 0.
+  - `gate-world.ts` `writeSkill` gains a `mark` parameter, and `Outcome.reached` includes the repo mark.
+  - The `$MixedName` row uses a user Skill with `name: MixedName`.
+- **Spike doc.** Re-list `.system` before writing the count.
+- **CHANGELOG.** The entry goes under `### Changed`, without "earlier versions", because the gate is unreleased.
+- **Claude Code.** The Claude Code live test checks that the removed-names dotfile in the managed folder is ignored.
