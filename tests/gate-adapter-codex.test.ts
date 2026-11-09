@@ -592,7 +592,10 @@ test('codex hook: commit 1 security rules hold with an empty walk (H1, H2) and f
   denied(await run(submit('use $acme:search', { cwd })), MSG_NOT_ADMIN); // H2: plugin-namespaced token
   denied(await run(submit('[$x](skill:///some/unscanned/path/s/SKILL.md)', { cwd })), MSG_NOT_ADMIN); // H1
   denied(await run(submit(`[$alpha](skill://${r.admin}/alpha/SKILL.md)`, { cwd })), MSG_UNVERIFIED); // L2: asked (the fake service never answers)
-  silent(await run(submit('use $alpha: now', { cwd }))); // T6: trailing colon is not an admin key
+  // T6: a trailing colon is not an admin key. Off Linux the host environment (/proc) cannot be read, so the walk is
+  // incomplete and the invalid token is blocked instead (fail closed).
+  if (process.platform === 'linux') silent(await run(submit('use $alpha: now', { cwd })));
+  else denied(await run(submit('use $alpha: now', { cwd })), MSG_NOT_ADMIN);
   silent(await run(submit('[$x](mcp://srv/tool) [$y](app://z)', { cwd }))); // L1
   const other = (command: string) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'shell', tool_input: { command }, cwd: '/' });
   denied(await run(other('cat .agents//skills/x/SKILL.md')), MSG_NOT_ADMIN);
