@@ -1,95 +1,25 @@
 // Root recovery v1 (docs/spec/root-recovery-v1.md): policy v2, the root event log, host state v2, freshness and
 // the once-per-host reporting of trust failures on every host.
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test from 'node:test';
 import { createMagoSkiExtension } from '../hosts/pi/index.ts';
 import { runGitHubCheck } from '../hosts/github/run.ts';
 import { canonicalBytes, parseCanonicalJsonBytes } from '../src/canonical-json.ts';
-import { generateKeyPair, loadPrivateKey } from '../src/keys.ts';
-import { loadPolicy, loadPolicyTrust, verifyWithPolicy, type Policy } from '../src/policy.ts';
+import { loadPrivateKey } from '../src/keys.ts';
+import { HostStateFormatError, loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy } from '../src/policy.ts';
 import {
-  adoptTrustDocuments, appendRootEvent, buildRecoverySet, currentRootState, initRootEventLog, prepareRootEvent, signPolicyTimestamp, signRootEvent,
+  adoptTrustDocuments, appendRootEvent, currentRootState, prepareRootEvent, signPolicyTimestamp, signRootEvent,
 } from '../src/recovery-admin.ts';
 import {
   addEnvelopeSignature, clearRootWalkCache, parseRootEventLog, rootEventLogBytes, unsignedEventEnvelope, walkRootEvents, walkRootEventsCached,
 } from '../src/root-events.ts';
 import { addApprover } from '../src/admin.ts';
-import { approve, daysAfter, T0, tempDir, writeSkill } from './helpers.ts';
-import { initRoot } from '../src/admin.ts';
+import { approve, daysAfter, setupRecoveryOrg, T0, tempDir, writeSkill, type Key, type RecoveryOrg } from './helpers.ts';
 
 const NOW = new Date(T0.getTime() + 60_000);
 const later = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
-
-interface Key { priv: string; pub: string; keyId: string }
-
-interface RecoveryOrg {
-  dir: string;
-  policyDir: string;
-  policyPath: string;
-  statePath: string;
-  logPath: string;
-  eventsPath: string;
-  timestampPath: string;
-  trustRoot: string;
-  revocations: string;
-  root: Key;
-  approver: Key;
-  recovery: Key[];
-  timestamp: Key;
-  key: (name: string) => Promise<Key>;
-  policy: () => Promise<Policy>;
-  writePolicy: (changes: Record<string, unknown>) => Promise<void>;
-}
-
-async function setupRecoveryOrg(t: TestContext, options: { mode?: 'shadow' | 'enforce'; freshness?: boolean; rotate?: number; revoke?: number } = {}): Promise<RecoveryOrg> {
-  const dir = await tempDir(t, 'mago-ski-recovery-');
-  const keys = path.join(dir, 'keys');
-  await mkdir(keys);
-  const key = async (name: string): Promise<Key> => {
-    const pair = await generateKeyPair(path.join(keys, `${name}.pem`), path.join(keys, `${name}.pub`));
-    return { priv: pair.privatePath, pub: pair.publicPath, keyId: pair.keyId };
-  };
-  const root = await key('root');
-  const approver = await key('approver');
-  const recovery = [await key('a'), await key('b'), await key('c')];
-  const timestamp = await key('timestamp');
-  const policyDir = path.join(dir, 'policy');
-  await mkdir(policyDir);
-  const trustRoot = path.join(policyDir, 'trust-root.json');
-  const revocations = path.join(policyDir, 'revocations.json');
-  const eventsPath = path.join(policyDir, 'root-events.json');
-  const timestampPath = path.join(policyDir, 'timestamp.json');
-  await initRoot({ rootKeyPath: root.priv, trustRootOut: trustRoot, revocationsOut: revocations, now: T0 });
-  await addApprover({ rootKeyPath: root.priv, trustRootPath: trustRoot, now: T0, publicKeyPath: approver.pub, name: 'Reviewer', scopes: ['*'], expires: '180d' });
-  await initRootEventLog(eventsPath);
-  const set = await buildRecoverySet({ publicKeyPaths: recovery.map((item) => item.pub), rotateThreshold: options.rotate ?? 2, revokeThreshold: options.revoke ?? 1 });
-  const policyPath = path.join(policyDir, 'policy.json');
-  let document: Record<string, unknown> = {
-    policy_version: 'mago.policy/v2',
-    mode: options.mode ?? 'shadow',
-    root_fingerprint: root.keyId,
-    recovery: { key_ids: set.keyIds, rotate_threshold: set.rotateThreshold, revoke_threshold: set.revokeThreshold },
-    root_events: 'root-events.json',
-    trust_root: 'trust-root.json',
-    revocations: 'revocations.json',
-    state_file: 'state.json',
-    decision_log: 'decisions.jsonl',
-    ...(options.freshness ? { freshness: { timestamp: 'timestamp.json', key_id: timestamp.keyId, max_lifetime: '24h' } } : {}),
-  };
-  const writePolicy = async (changes: Record<string, unknown>) => {
-    document = { ...document, ...changes };
-    for (const [name, value] of Object.entries(changes)) if (value === undefined) delete document[name];
-    await writeFile(policyPath, JSON.stringify(document, null, 2));
-  };
-  await writePolicy({});
-  return {
-    dir, policyDir, policyPath, statePath: path.join(policyDir, 'state.json'), logPath: path.join(policyDir, 'decisions.jsonl'),
-    eventsPath, timestampPath, trustRoot, revocations, root, approver, recovery, timestamp, key,
-    policy: async () => await loadPolicy(policyPath), writePolicy,
-  };
-}
 
 let proposals = 0;
 /** prepare + sign by each key + append, as the CLI does. */
@@ -361,6 +291,8 @@ test('freshness: a current timestamp passes; an expired, mismatched or rolled-ba
   await writeFile(org.timestampPath, previousTimestamp);
   const rolledBack = await loadPolicyTrust(policy, later(5));
   assert.match(!rolledBack.ok ? rolledBack.reason : '', /timestamp version 1 is older than version 2 already seen \(rollback\)/u);
+  assert.equal(!rolledBack.ok && rolledBack.rollback, true);
+  assert.equal(!expired.ok && expired.rollback, undefined);
 });
 
 test('freshness: the lifetime is capped by max_lifetime, and only the active timestamp key signs', async (t) => {
@@ -645,4 +577,230 @@ test('root-events sign shows the event and, with --policy, refuses a proposal th
   const { showRootEvent, describeRootEvent } = await import('../src/recovery-admin.ts');
   const shown = await showRootEvent({ proposalPath: stale.out, now: later(1) });
   assert.deepEqual([describeRootEvent(shown.event).action, shown.missing], ['revoke', [org.recovery[0]!.keyId]]);
+});
+
+/** Runs `loadPolicyTrust` and `loadPolicyRoot` against separate state files and compares the root part and the recorded root events. */
+async function compareRootLoads(org: RecoveryOrg, now: Date): Promise<{ trust: Awaited<ReturnType<typeof loadPolicyTrust>>; root: Awaited<ReturnType<typeof loadPolicyRoot>> }> {
+  const policy = await org.policy();
+  const trustState = path.join(org.policyDir, 'state-trust.json');
+  const rootState = path.join(org.policyDir, 'state-root.json');
+  const trust = await loadPolicyTrust({ ...policy, statePath: trustState }, now);
+  const root = await loadPolicyRoot({ ...policy, statePath: rootState }, now);
+  if (root.ok && trust.ok) {
+    assert.equal(root.activeRootKeyId, trust.context.root?.activeRootKeyId);
+    assert.equal(root.walk?.count, trust.context.root?.sequence);
+  } else if (!root.ok && !trust.ok) {
+    assert.equal(root.reason, trust.reason);
+    assert.equal(root.rootRevoked, trust.rootRevoked ?? false);
+    assert.equal(root.rollback, trust.rollback);
+  } else {
+    // The trust load may fail later for a reason that is not about the root; the root load must then be ok.
+    assert.equal(root.ok, true);
+    assert.equal(trust.ok, false);
+  }
+  const recorded = async (file: string) => {
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8'));
+      return { root_events: parsed.root_events ?? null, v2: parsed.type === 'mago.host-state/v2' };
+    } catch {
+      return { root_events: null, v2: false }; // an absent file reads as none
+    }
+  };
+  assert.deepEqual(await recorded(rootState), await recorded(trustState));
+  return { trust, root };
+}
+
+test('loadPolicyRoot gives the root part of loadPolicyTrust and records the same state (v1 policy log, v2, rollback, fork, revoked root)', async (t) => {
+  // v1: an empty log records nothing and keeps a v1 state file.
+  const plain = await setupRecoveryOrg(t);
+  const v1 = await compareRootLoads(plain, NOW);
+  assert.equal(v1.root.ok && v1.root.activeRootKeyId, plain.root.keyId);
+
+  // v2, then rollback to the empty log.
+  const org = await setupRecoveryOrg(t);
+  const empty = await readFile(org.eventsPath);
+  const r1 = await org.key('r1');
+  await (await event(org, { action: 'rotate', signers: [org.recovery[0]!, org.recovery[1]!], newRoot: r1 })).append();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(1) });
+  const v2 = await compareRootLoads(org, later(2));
+  assert.equal(v2.root.ok && v2.root.activeRootKeyId, r1.keyId);
+  assert.equal(v2.root.ok && v2.root.walk?.count, 1);
+
+  await writeFile(org.eventsPath, empty);
+  const rolledBack = await compareRootLoads(org, later(2));
+  assert.equal(!rolledBack.root.ok && rolledBack.root.rollback, true);
+  assert.equal(!rolledBack.root.ok && rolledBack.root.walk, null);
+
+  // Fork and revoked root, on a fresh organisation.
+  const forkOrg = await setupRecoveryOrg(t);
+  const none = await readFile(forkOrg.eventsPath);
+  const first = await event(forkOrg, { action: 'revoke', signers: [forkOrg.recovery[0]!], reason: 'first' });
+  const second = await event(forkOrg, { action: 'revoke', signers: [forkOrg.recovery[1]!], reason: 'second' });
+  await first.append();
+  const revoked = await compareRootLoads(forkOrg, NOW);
+  assert.equal(!revoked.root.ok && revoked.root.rootRevoked, true);
+  assert.equal(!revoked.root.ok && revoked.root.walk?.revoked?.sequence, 1);
+
+  await writeFile(forkOrg.eventsPath, none);
+  await compareRootLoads(forkOrg, NOW);
+  await second.append();
+  const forked = await compareRootLoads(forkOrg, NOW);
+  assert.match(!forked.root.ok ? forked.root.reason : '', /\(fork\)/u);
+  assert.equal(!forked.root.ok && forked.root.rootRevoked, true);
+});
+
+test('loadPolicyRoot reads nothing without recovery, never writes with recordVersions false, and types state failures', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const plain = await setupOrg(t);
+  const v1 = await loadPolicyRoot({ ...(await loadPolicy(plain.policyPath)), statePath: '/nonexistent/never-read.json' }, NOW);
+  assert.deepEqual(v1, { ok: true, walk: null, activeRootKeyId: plain.rootKeyId });
+
+  const org = await setupRecoveryOrg(t);
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!] })).append();
+  const policy = await org.policy();
+  const observed = await loadPolicyRoot(policy, NOW, { recordVersions: false });
+  assert.equal(!observed.ok && observed.rootRevoked, true);
+  await assert.rejects(readFile(org.statePath), /ENOENT/u);
+
+  await writeFile(org.statePath, '{ not json');
+  const unreadable = await loadPolicyRoot(policy, NOW);
+  assert.equal(!unreadable.ok && unreadable.stateError, 'corrupt');
+  const trustUnreadable = await loadPolicyTrust(policy, NOW);
+  assert.equal(!trustUnreadable.ok && trustUnreadable.stateError, 'corrupt');
+});
+
+test('trust failures carry typed rollback and stateError fields, messages unchanged', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const oldTrustRoot = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  assert.equal((await loadPolicyTrust(policy, later(2))).ok, true);
+  await writeFile(org.trustRoot, oldTrustRoot);
+  const rolledBack = await loadPolicyTrust(policy, later(2));
+  assert.equal(!rolledBack.ok && rolledBack.rollback, true);
+  assert.equal(!rolledBack.ok && rolledBack.stateError, undefined);
+
+  await writeFile(org.statePath, 'garbage');
+  const unreadable = await loadPolicyTrust(policy, later(2));
+  assert.equal(!unreadable.ok && unreadable.stateError, 'corrupt');
+  assert.equal(!unreadable.ok && unreadable.rollback, undefined);
+});
+
+test('a state file that cannot be written is reported as stateError write', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = { ...(await loadPolicy(org.policyPath)), statePath: path.join(org.dir, 'missing-dir', 'state.json') };
+  const result = await loadPolicyTrust(policy, later(1));
+  assert.equal(!result.ok && result.stateError, 'write');
+  assert.match(!result.ok ? result.reason : '', /cannot record trust versions/u);
+});
+
+test('the state error kinds: format problems are corrupt, every other read error is unreadable', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const kind = async (statePath: string) => {
+    const result = await loadPolicyTrust({ ...policy, statePath }, later(1), { recordVersions: false });
+    return !result.ok ? result.stateError : undefined;
+  };
+  const corrupt = path.join(org.dir, 'corrupt-state.json');
+  await writeFile(corrupt, '{ not json');
+  assert.equal(await kind(corrupt), 'corrupt');
+  await writeFile(corrupt, JSON.stringify({ type: 'mago.host-state/v1', roots: {}, extra: 1 }));
+  assert.equal(await kind(corrupt), 'corrupt', 'exact keys');
+  await writeFile(corrupt, new TextEncoder().encode(`{"roots":{"${'a'.repeat(64)}":{"revocations_version":0,"trust_root_version":1}},"type":"mago.host-state/v1"}`));
+  assert.equal(await kind(corrupt), 'corrupt', 'bad counter');
+  await writeFile(corrupt, Buffer.alloc(1024 * 1024 + 1, 0x20));
+  assert.equal(await kind(corrupt), 'corrupt', 'over the size limit');
+  const directory = path.join(org.dir, 'state-is-a-directory');
+  await mkdir(directory);
+  assert.equal(await kind(directory), 'corrupt', 'not a regular file');
+  assert.ok(new HostStateFormatError('x') instanceof Error);
+
+  // A path below a regular file cannot be read at all: ENOTDIR is unreadable, not corrupt.
+  assert.equal(await kind(path.join(corrupt, 'below.json')), 'unreadable');
+});
+
+test('a corrupt state file is never overwritten by a load', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(newerCopy, await readFile(org.trustRoot));
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  await writeFile(olderCopy, older);
+  // The first load records the older document; the file then turns corrupt; a load of a newer document has something to record
+  // and reaches the write path, which must not replace the corrupt bytes.
+  await rm(org.statePath, { force: true });
+  assert.equal((await loadPolicyTrust({ ...policy, trustRootPath: olderCopy }, later(2))).ok, true);
+  const corrupt = '{ not json';
+  await writeFile(org.statePath, corrupt);
+  const result = await loadPolicyTrust({ ...policy, trustRootPath: newerCopy }, later(2));
+  assert.equal(!result.ok && result.stateError, 'corrupt');
+  assert.equal(await readFile(org.statePath, 'utf8'), corrupt, 'a corrupt memory is never overwritten by a load');
+});
+
+test('two spellings of one state file through a symlinked folder never lower a recorded version', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(olderCopy, older);
+  await writeFile(newerCopy, await readFile(org.trustRoot));
+  const real = path.join(org.dir, 'real');
+  const link = path.join(org.dir, 'link');
+  await mkdir(real);
+  await symlink(real, link);
+  const pathA = path.join(real, 'state.json');
+  const pathB = path.join(link, 'state.json');
+  const recorded = async () => {
+    const state = parseCanonicalJsonBytes(await readFile(pathA), 'state') as { roots: Record<string, { trust_root_version: number }> };
+    return state.roots[org.rootKeyId]!.trust_root_version;
+  };
+  assert.equal((await loadPolicyTrust({ ...policy, trustRootPath: newerCopy, statePath: pathA }, later(2))).ok, true);
+  const expected = await recorded();
+  for (let trial = 0; trial < 40; trial += 1) {
+    await rm(pathA, { force: true });
+    const oldLoad = { ...policy, trustRootPath: olderCopy, statePath: pathA };
+    const newLoad = { ...policy, trustRootPath: newerCopy, statePath: pathB };
+    await Promise.all(trial % 2 === 0 ? [loadPolicyTrust(oldLoad, later(2)), loadPolicyTrust(newLoad, later(2))]
+      : [loadPolicyTrust(newLoad, later(2)), loadPolicyTrust(oldLoad, later(2))]);
+    assert.equal(await recorded(), expected, `trial ${trial}`);
+  }
+});
+
+test('overlapping loads of an old and a new document never lower the recorded version', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const newer = await readFile(org.trustRoot);
+  const recorded = async () => {
+    const state = parseCanonicalJsonBytes(await readFile(org.statePath), 'state') as { roots: Record<string, { trust_root_version: number }> };
+    return state.roots[org.rootKeyId]!.trust_root_version;
+  };
+  await rm(org.statePath, { force: true });
+  assert.equal((await loadPolicyTrust(policy, later(2))).ok, true);
+  const expected = await recorded();
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(olderCopy, older);
+  await writeFile(newerCopy, newer);
+  const oldPolicy = { ...policy, trustRootPath: olderCopy };
+  const newPolicy = { ...policy, trustRootPath: newerCopy };
+  for (let trial = 0; trial < 40; trial += 1) {
+    await rm(org.statePath, { force: true });
+    // Two loads on one empty state file, one with the old document and one with the new, started together.
+    const loads = trial % 2 === 0 ? [loadPolicyTrust(oldPolicy, later(2)), loadPolicyTrust(newPolicy, later(2))]
+      : [loadPolicyTrust(newPolicy, later(2)), loadPolicyTrust(oldPolicy, later(2))];
+    await Promise.all(loads);
+    assert.equal(await recorded(), expected, `trial ${trial}`);
+  }
 });

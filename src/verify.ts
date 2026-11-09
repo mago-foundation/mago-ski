@@ -68,6 +68,10 @@ export type TrustContextResult =
       reason: string;
       /** The active root key is revoked by a root event: every Skill is blocked, in shadow mode too. */
       rootRevoked?: boolean;
+      /** A version, sequence or timestamp is lower than the host state's: the documents are older than already seen. */
+      rollback?: true;
+      /** The host state file is malformed (`corrupt`), could not be read (`unreadable`) or could not be written (`write`). */
+      stateError?: 'corrupt' | 'unreadable' | 'write';
     };
 
 export interface CertificateEvaluation {
@@ -141,6 +145,7 @@ export function loadTrustContext(options: {
         ok: false,
         verdict: 'UNVERIFIABLE',
         reason: `trust root version ${trustRoot.version} is older than version ${options.minimum.trustRootVersion} already seen (rollback)`,
+        rollback: true,
       };
     }
 
@@ -149,6 +154,7 @@ export function loadTrustContext(options: {
         ok: false,
         verdict: 'UNVERIFIABLE',
         reason: `revocation list version ${revocations.version} is older than version ${options.minimum.revocationsVersion} already seen (rollback)`,
+        rollback: true,
       };
     }
 

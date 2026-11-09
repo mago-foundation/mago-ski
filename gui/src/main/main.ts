@@ -3,9 +3,9 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, session, type IpcMainInvokeEvent } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { AdminSession, LIFETIMES, MAX_REASON } from '../service/admin.ts';
+import { AdminSession, dialogSafe, LIFETIMES } from '../service/admin.ts';
 import { ObservationService } from '../service/service.ts';
-import type { InstanceView, Prefs } from '../service/types.ts';
+import type { AdminReviewSummary, AdminSignSummary, InstanceView, Prefs } from '../service/types.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererIndex = path.join(here, '..', 'renderer', 'index.html');
@@ -80,6 +80,43 @@ function registerIpc(svc: ObservationService): void {
   });
 }
 
+/** A native confirmation: cancel is the default and the escape answer; only the second button confirms. */
+async function confirmBox(options: { title: string; message: string; detail: string; action: string }): Promise<boolean> {
+  const box: Electron.MessageBoxOptions = {
+    type: 'warning', buttons: ['취소', options.action], defaultId: 0, cancelId: 0, noLink: true,
+    title: options.title, message: options.message, detail: options.detail,
+  };
+  const result = window ? await dialog.showMessageBox(window, box) : await dialog.showMessageBox(box);
+  return result.response === 1;
+}
+
+const ADMIN_RAW_REASON_LIMIT = 4096;
+
+function confirmReview(s: AdminReviewSummary): Promise<boolean> {
+  return confirmBox({
+    title: 'Skill 검토 확인', message: '이 정확한 버전의 파일을 모두 검토했나요?', action: '검토함',
+    detail: [`Skill: ${dialogSafe(s.skillName)}`, `폴더: ${dialogSafe(s.skillPath)}`, `버전: ${s.digest}`, `파일: ${s.files}개`].join('\n'),
+  });
+}
+
+function confirmSign(s: AdminSignSummary): Promise<boolean> {
+  return confirmBox({
+    title: '인증서 서명', message: '이 Skill 버전에 인증서를 서명할까요?', action: '서명',
+    detail: [
+      `Skill: ${dialogSafe(s.skillName)}`, `폴더: ${dialogSafe(s.skillPath)}`, `검토한 버전: ${s.reviewedDigest}`, `서명할 버전: ${s.digest}`,
+      `기간: ${s.lifetime} (만료 ${s.expiresAt})`, `이유: ${dialogSafe(s.reason)}`,
+      `키: ${s.role} · ${dialogSafe(s.keyName ?? '-')} · ${s.keyId}`,
+    ].join('\n'),
+  });
+}
+
+function confirmReset(): Promise<boolean> {
+  return confirmBox({
+    title: '기록 초기화', message: '이 컴퓨터가 기억하는 조직 문서 버전을 지울까요? 오래된 문서를 다시 받아들일 수 있게 돼요.',
+    detail: '', action: '초기화',
+  });
+}
+
 /**
  * Administration rack (docs/spec/gui-admin-rack-v1.md). The renderer never names a file or sees key material: the key is
  * chosen in a dialog owned by this process and stays in the AdminSession.
@@ -91,24 +128,39 @@ function registerAdminIpc(svc: ObservationService): void {
       return found ? { path: found.path, name: found.name } : null;
     },
     hostPolicyPath: () => svc.view().host.policy.path,
+    confirmReview, confirmSign, confirmReset,
+    stateDir: app.getPath('userData'),
+    discoveryRoots: () => svc.view().roots.map((r) => r.path),
+    skillFolders: () => svc.view().instances.map((i) => i.path),
+    hostSkillDirs: () => svc.hostSkillDirs(),
   });
   admin = session;
   handle('admin:status', () => session.status());
   handle('admin:arm', async () => {
     const options: Electron.OpenDialogOptions = { title: '서명 키 불러오기 (개인 키 PEM)', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'PEM', extensions: ['pem'] }, { name: '모든 파일', extensions: ['*'] }] };
-    const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
-    if (picked.canceled || !picked.filePaths[0]) return { ok: false, reason: 'cancelled' };
-    return await session.arm(picked.filePaths[0]);
+    let chosen: string | null;
+    try {
+      chosen = await session.pickFile(async () => {
+        const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+        return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+      });
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '잠시 후 다시 시도하세요' };
+    }
+    if (chosen === null) return { ok: false, reason: 'cancelled' };
+    return await session.arm(chosen);
   });
   handle('admin:disarm', () => { session.disarm(); return session.status(); });
   handle('admin:inspect', (id) => session.inspect(requireString(id, ID, 'instance id')));
-  handle('admin:confirm-inspected', (id, digest) => session.confirmInspected(requireString(id, ID, 'instance id'), requireString(digest, DIGEST, 'digest')));
+  handle('admin:review', (id) => session.review(requireString(id, ID, 'instance id')));
   handle('admin:approve', (id, digest, lifetime, reason) => {
     if (typeof lifetime !== 'string' || !(LIFETIMES as readonly string[]).includes(lifetime)) throw new Error('invalid lifetime');
-    if (typeof reason !== 'string' || reason.length > MAX_REASON) throw new Error('invalid reason');
+    if (typeof reason !== 'string' || reason.length > ADMIN_RAW_REASON_LIMIT) throw new Error('invalid reason');
     return session.approve(requireString(id, ID, 'instance id'), requireString(digest, DIGEST, 'digest'), lifetime as (typeof LIFETIMES)[number], reason);
   });
   handle('admin:check', (id) => session.check(requireString(id, ID, 'instance id')));
+  handle('admin:reset-memory', () => session.resetMemory());
+  handle('admin:dismiss-memory-reset', () => { session.dismissMemoryReset(); return session.status(); });
 }
 
 function createWindow(): BrowserWindow {
@@ -122,6 +174,16 @@ function createWindow(): BrowserWindow {
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
+  // Anything that replaces or loses the page ends the armed key; nothing may sign on behalf of a page that is gone.
+  const disarm = () => admin?.disarm();
+  let loaded = false;
+  win.webContents.on('did-start-navigation', disarm);
+  win.webContents.on('render-process-gone', disarm);
+  win.webContents.on('destroyed', disarm);
+  win.webContents.on('did-finish-load', () => {
+    if (loaded) disarm();
+    loaded = true;
+  });
   win.once('ready-to-show', () => win.show());
   void win.loadFile(rendererIndex);
   return win;

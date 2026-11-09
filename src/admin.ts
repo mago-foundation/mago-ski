@@ -300,12 +300,21 @@ export async function approveSkill(options: {
   out?: string;
   /** The digest the approver reviewed; issuance is refused if the bytes on disk differ. */
   expectDigest?: string;
+  /** The Skill name the approver reviewed; issuance is refused if the signed SKILL.md yields a different name. */
+  expectName?: string;
+  /** Write to `<outDir>/<signed name>.cert.json` instead of next to the Skill; exclusive with `out`. */
+  outDir?: string;
+  /** Awaited after the certificate is built and just before it is written; a throw writes nothing. */
+  beforeSign?: (info: { skillName: string; digest: string }) => void | Promise<void>;
 }): Promise<{ path: string; skillName: string; digest: string; certificateId: string; expiresAt: Date }> {
   const skillDir = path.resolve(options.skillDir);
   const expected = options.expectDigest === undefined ? null : validateDigest(options.expectDigest, 'expected digest');
 
   if ((options.approverKeyPath === undefined) === (options.approverKey === undefined)) {
     throw new Error('Pass exactly one of approverKeyPath and approverKey');
+  }
+  if (options.out !== undefined && options.outDir !== undefined) {
+    throw new Error('Pass at most one of out and outDir');
   }
 
   await requireSkillRoot(skillDir);
@@ -325,6 +334,12 @@ export async function approveSkill(options: {
   if (expected !== null && tree.digest !== expected) {
     throw new Error(
       `Refusing to approve: the Skill changed since it was reviewed (expected ${expected}, found ${tree.digest}). Review the current version and approve again.`,
+    );
+  }
+
+  if (options.expectName !== undefined && skillName !== options.expectName) {
+    throw new Error(
+      `Refusing to approve: the Skill name is "${skillName}", not the reviewed "${options.expectName}"`,
     );
   }
 
@@ -359,7 +374,10 @@ export async function approveSkill(options: {
     previousDigest,
   });
 
-  const targetPath = options.out ?? path.join(tree.root, CERTIFICATE_FILENAME);
+  await options.beforeSign?.({ skillName, digest: tree.digest });
+
+  const targetPath = options.out
+    ?? (options.outDir === undefined ? path.join(tree.root, CERTIFICATE_FILENAME) : path.join(options.outDir, `${skillName}.cert.json`));
   const written    = await writeFileAtomic(targetPath, bytes);
   const parsed     = parseCertificate(bytes);
 
