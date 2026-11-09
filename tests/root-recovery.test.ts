@@ -1,7 +1,7 @@
 // Root recovery v1 (docs/spec/root-recovery-v1.md): policy v2, the root event log, host state v2, freshness and
 // the once-per-host reporting of trust failures on every host.
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createMagoSkiExtension } from '../hosts/pi/index.ts';
@@ -726,12 +726,53 @@ test('a corrupt state file is never overwritten by a load', async (t) => {
   const { setupOrg } = await import('./helpers.ts');
   const org = await setupOrg(t);
   const policy = await loadPolicy(org.policyPath);
-  // The state file turns corrupt between the load's read and its write: the write must not replace it.
-  const original = org.statePath;
-  await writeFile(original, '{ not json');
-  const result = await loadPolicyTrust(policy, later(1));
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(newerCopy, await readFile(org.trustRoot));
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  await writeFile(olderCopy, older);
+  // The first load records the older document; the file then turns corrupt; a load of a newer document has something to record
+  // and reaches the write path, which must not replace the corrupt bytes.
+  await rm(org.statePath, { force: true });
+  assert.equal((await loadPolicyTrust({ ...policy, trustRootPath: olderCopy }, later(2))).ok, true);
+  const corrupt = '{ not json';
+  await writeFile(org.statePath, corrupt);
+  const result = await loadPolicyTrust({ ...policy, trustRootPath: newerCopy }, later(2));
   assert.equal(!result.ok && result.stateError, 'corrupt');
-  assert.equal(await readFile(original, 'utf8'), '{ not json', 'a corrupt memory is never overwritten by a load');
+  assert.equal(await readFile(org.statePath, 'utf8'), corrupt, 'a corrupt memory is never overwritten by a load');
+});
+
+test('two spellings of one state file through a symlinked folder never lower a recorded version', async (t) => {
+  const { setupOrg } = await import('./helpers.ts');
+  const org = await setupOrg(t);
+  const policy = await loadPolicy(org.policyPath);
+  const older = await readFile(org.trustRoot);
+  await addApprover({ rootKeyPath: org.rootKey, trustRootPath: org.trustRoot, now: later(1), publicKeyPath: org.approverPub, name: 'Reviewer One', scopes: ['*'], expires: '180d' });
+  const olderCopy = path.join(org.dir, 'trust-root.older.json');
+  const newerCopy = path.join(org.dir, 'trust-root.newer.json');
+  await writeFile(olderCopy, older);
+  await writeFile(newerCopy, await readFile(org.trustRoot));
+  const real = path.join(org.dir, 'real');
+  const link = path.join(org.dir, 'link');
+  await mkdir(real);
+  await symlink(real, link);
+  const pathA = path.join(real, 'state.json');
+  const pathB = path.join(link, 'state.json');
+  const recorded = async () => {
+    const state = parseCanonicalJsonBytes(await readFile(pathA), 'state') as { roots: Record<string, { trust_root_version: number }> };
+    return state.roots[org.rootKeyId]!.trust_root_version;
+  };
+  assert.equal((await loadPolicyTrust({ ...policy, trustRootPath: newerCopy, statePath: pathA }, later(2))).ok, true);
+  const expected = await recorded();
+  for (let trial = 0; trial < 40; trial += 1) {
+    await rm(pathA, { force: true });
+    const oldLoad = { ...policy, trustRootPath: olderCopy, statePath: pathA };
+    const newLoad = { ...policy, trustRootPath: newerCopy, statePath: pathB };
+    await Promise.all(trial % 2 === 0 ? [loadPolicyTrust(oldLoad, later(2)), loadPolicyTrust(newLoad, later(2))]
+      : [loadPolicyTrust(newLoad, later(2)), loadPolicyTrust(oldLoad, later(2))]);
+    assert.equal(await recorded(), expected, `trial ${trial}`);
+  }
 });
 
 test('overlapping loads of an old and a new document never lower the recorded version', async (t) => {

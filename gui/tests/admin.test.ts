@@ -73,17 +73,19 @@ async function world(t: TestContext, options: { scopes?: string[]; now?: Date; i
   const instances: Record<string, { path: string; name: string }> = { docs: { path: docs, name: 'docs-helper' }, pdf: { path: pdf, name: 'pdf-tools' } };
   const procDir = await procFixture(base);
   const f = fakes(base, procDir);
+  /** Folders a test adds to the discovery roots after the session exists. */
+  const extraRoots: string[] = [];
   const session = new AdminSession({
     ...f.options, pinPath, idleMs: options.idleMs ?? 60_000, now: () => options.now ?? NOW,
     ...(options.cooldownMs === undefined ? {} : { cooldownMs: options.cooldownMs }),
     ...(options.dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs: options.dialogTimeoutMs }),
     instance: (id) => instances[id] ?? null,
-    discoveryRoots: () => [skills],
+    discoveryRoots: () => [skills, ...extraRoots],
     skillFolders: () => Object.values(instances).map((i) => i.path),
   });
   t.after(() => session.disarm());
   const stateFile = path.join(base, 'state', 'admin-state.json');
-  return { org, base, pinDir, pinPath, writePin, skills, docs, pdf, session, procDir, stateFile, ...f };
+  return { org, base, extraRoots, pinDir, pinPath, writePin, skills, docs, pdf, session, procDir, stateFile, ...f };
 }
 
 /** Review the Skill and return its digest. */
@@ -250,7 +252,8 @@ test('approve moved key: a key moved into the Skill after arming fails the store
   const digest = await reviewed(w);
   await rename(keyFile, path.join(w.docs, 'approver.pem'));
   const result = await w.session.approve('docs', digest, '30d', 'Reviewed the formatting rules');
-  assert.equal(failure(result), 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.');
+  assert.equal(failure(result), '키 파일이 바뀌었어요. 다시 불러오세요.');
+  assert.equal((await w.session.status()).armed, null, 'the key is dropped');
   await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
 });
 
@@ -666,6 +669,14 @@ test('S4: dialogSafe also replaces format, private-use, unassigned, surrogate an
   assert.equal(dialogSafe('Skill 😀 한글 é'), 'Skill 😀 한글 é', 'ordinary text, emoji and accents stay');
 });
 
+test('F5: dialogSafe replaces variation selectors, the combining grapheme joiner and blank fillers, and keeps decomposed accents', () => {
+  for (const [char, shown] of [
+    ['\ufe00', '⟨U+FE00⟩'], ['\ufe0f', '⟨U+FE0F⟩'], ['\u{e0100}', '⟨U+E0100⟩'], ['\u{e01ef}', '⟨U+E01EF⟩'],
+    ['\u034f', '⟨U+034F⟩'], ['\u3164', '⟨U+3164⟩'], ['\u2800', '⟨U+2800⟩'],
+  ] as const) assert.equal(dialogSafe(`a${char}b`), `a${shown}b`, shown);
+  assert.equal(dialogSafe('e\u0301 a\u0308'), 'e\u0301 a\u0308', 'decomposed accents stay');
+});
+
 // ---- v5.1 review fixes
 
 test('C-F5: a confirmSign that changes SKILL.md makes approve refuse and write nothing', async (t) => {
@@ -715,15 +726,15 @@ test('C-F3: a key folder that becomes a discovery root after arm is refused at s
   await chmod(keyFile, 0o600);
   assert.equal((await w.session.arm(keyFile)).ok, true);
   const digest = await reviewed(w);
-  w.hostSkillDirs.push(home);
+  w.extraRoots.push(home);
   const result = await w.session.approve('docs', digest, '30d', 'Reviewed');
   assert.equal(failure(result), 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.');
   assert.equal(w.calls.sign.length, 0);
 
   // The same check runs inside beforeSign: the folder turns into a Skill location while the dialog is open.
-  w.hostSkillDirs.length = 0;
+  w.extraRoots.length = 0;
   const digest2 = await reviewed(w);
-  w.handlers.sign = async () => { w.hostSkillDirs.push(home); return true; };
+  w.handlers.sign = async () => { w.extraRoots.push(home); return true; };
   assert.equal(failure(await w.session.approve('docs', digest2, '30d', 'Reviewed')), 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.');
   await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
 });
@@ -895,4 +906,60 @@ test('C-F5: a memory that cannot be written (read-only file and folder) makes th
     await chmod(stateDir, 0o700);
     await chmod(w.stateFile, 0o600);
   }
+});
+
+test('F1: a queued approve and a key picker never have two dialogs open', async (t) => {
+  const w = await world(t);
+  assert.equal((await w.session.arm(w.org.approverKey)).ok, true);
+  const digest = await reviewed(w);
+  let shown = 0;
+  let peak = 0;
+  const count = (delta: number) => { shown += delta; peak = Math.max(peak, shown); };
+  const pickerHold = gate<string | null>();
+  const signHold = gate<boolean>();
+  w.handlers.sign = async () => { count(1); try { return await signHold.promise; } finally { count(-1); } };
+  const approving = w.session.approve('docs', digest, '30d', 'Reviewed for the race');
+  await new Promise((resolve) => setImmediate(resolve));
+  const picking = w.session.pickFile(async () => { count(1); try { return await pickerHold.promise; } finally { count(-1); } })
+    .then(() => 'opened', (error: Error) => error.message);
+  for (let i = 0; i < 500 && w.calls.sign.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  pickerHold.open(null);
+  signHold.open(true);
+  await picking;
+  await approving;
+  assert.equal(peak, 1, 'two native dialogs were open at once');
+});
+
+test('F2: a key moved into a digest-excluded folder during the signing dialog is refused and writes no certificate', async (t) => {
+  const w = await world(t);
+  const home = path.join(w.base, 'keys-elsewhere');
+  await mkdir(home, { recursive: true });
+  const keyFile = path.join(home, 'approver.pem');
+  await copyFile(w.org.approverKey, keyFile);
+  await chmod(keyFile, 0o600);
+  assert.equal((await w.session.arm(keyFile)).ok, true);
+  const digest = await reviewed(w);
+  const hidden = path.join(w.docs, '.git');
+  await mkdir(hidden);
+  w.handlers.sign = async () => { await rename(keyFile, path.join(hidden, 'approver.pem')); return true; };
+  const result = await w.session.approve('docs', digest, '30d', 'Reviewed for the move');
+  assert.equal(failure(result), '키 파일이 바뀌었어요. 다시 불러오세요.');
+  assert.equal((await w.session.status()).armed, null, 'the key is dropped');
+  await assert.rejects(access(path.join(w.docs, '.mago-ski-cert.json')));
+});
+
+test('F2: a key moved away before the dialog gives the swap message and is dropped, with no dialog shown', async (t) => {
+  const w = await world(t);
+  const home = path.join(w.base, 'keys-elsewhere');
+  await mkdir(home, { recursive: true });
+  const keyFile = path.join(home, 'approver.pem');
+  await copyFile(w.org.approverKey, keyFile);
+  await chmod(keyFile, 0o600);
+  assert.equal((await w.session.arm(keyFile)).ok, true);
+  const digest = await reviewed(w);
+  await rename(keyFile, path.join(w.base, 'moved-away.pem'));
+  const result = await w.session.approve('docs', digest, '30d', 'Reviewed for the move');
+  assert.equal(failure(result), '키 파일이 바뀌었어요. 다시 불러오세요.');
+  assert.equal((await w.session.status()).armed, null);
+  assert.equal(w.calls.sign.length, 0);
 });
