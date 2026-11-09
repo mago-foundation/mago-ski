@@ -529,6 +529,13 @@ test('codex hook: a same-name admin Skill is masked by a repo Skill; only the ad
   denied(await run(`use [$alpha](/nonexistent/alpha/SKILL.md)`), MSG_NOT_ADMIN);
   silent(await run(`use [$alpha](skill://${r.admin}/alpha/SKILL.md)`)); // L2: absolute skill:// link to the admin file is asked and verified
   silent(await run(`use [$alpha](${r.admin}/alpha/SKILL.md)`));
+  // Review of commit 1: the link text must name the admin Skill it points at; env-var names and odd schemes are links too.
+  denied(await run(`use [$rogue](${r.admin}/alpha/SKILL.md)`), MSG_NOT_ADMIN);
+  denied(await run(`use [$acme:search](${r.admin}/alpha/SKILL.md)`), MSG_NOT_ADMIN);
+  denied(await run(`use [$HOME](${path.join(repo, '.agents/skills/alpha/SKILL.md')})`), MSG_NOT_ADMIN);
+  denied(await run('use [$rogue](Mcp://x)'), MSG_NOT_ADMIN);
+  denied(await host.hook([cfg, 'enforce', UID], bash(`cat /home/u/cx/rogue${r.admin}/alpha/SKILL.md`, { cwd: repo })), MSG_NOT_ADMIN);
+  denied(await host.hook([cfg, 'enforce', UID], JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'shell', tool_input: { command: ['cat', `${repo}/.agents/skills/alpha/SKILL.md`] }, cwd: repo, session_id: 'x' })), MSG_NOT_ADMIN);
   silent(await host.hook([cfg, 'enforce', UID], submit('use $alpha', { cwd: await tempDir(t) }))); // no non-admin Skill: bare name checked and allowed
   silent(await host.hook([await configFile(t, svc.sockets.decision, r, {}, 'shadow'), 'shadow', UID], submit('use $alpha', { cwd: repo })));
 });

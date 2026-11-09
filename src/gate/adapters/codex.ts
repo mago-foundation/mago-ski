@@ -119,7 +119,7 @@ function nameAt(text: string, start: number): number { // end index of the name 
   return end;
 }
 
-export function extractMentions(text: string, links?: string[], plain?: Set<string>): Set<string> {
+export function extractMentions(text: string, links?: string[], plain?: Set<string>, linkNames?: string[]): Set<string> {
   const names = new Set<string>();
   let i = 0;
   while (i < text.length) {
@@ -133,6 +133,7 @@ export function extractMentions(text: string, links?: string[], plain?: Set<stri
         if (link !== '') {
           const name = text.slice(i + 2, nameEnd);
           links?.push(link);
+          linkNames?.push(name); // the link text's name, env-var names included (parallel to `links`)
           if (!ENV_VARS.has(name.toUpperCase())) {
             if (!/^(app|mcp|plugin):\/\//u.test(link)) names.add(name);
             const stem = link.replace(/^skill:\/\//u, '').split(/[/\\]/u);
@@ -327,11 +328,12 @@ function inspectCommand(raw: string, cfg: CodexConfig): { rogue: boolean; admin:
   const esc = collapse(cfg.adminRoot).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   // Any mention of a user/repo Skill location in any spelling (~, $HOME, relative), or of a SKILL.md file other than an
   // admin Skill's own `<admin_root>/<name>/SKILL.md`.
-  const outsideAdmin = command.replace(new RegExp(`${esc}/[A-Za-z0-9][A-Za-z0-9._-]*/SKILL\\.md`, 'giu'), '');
+  const start = '(?<=^|[\\s\'"`=;|&()<>])'; // the admin path must start a word: `<other>/<admin>/x/SKILL.md` is not admin
+  const outsideAdmin = command.replace(new RegExp(`${start}${esc}/[A-Za-z0-9][A-Za-z0-9._-]*/SKILL\\.md`, 'giu'), '');
   const rogue = /\.(agents|codex)(?![A-Za-z0-9_-])/u.test(command) || /skill\.md/iu.test(outsideAdmin)
     || cfg.skillRoots.some((r) => command.includes(collapse(r)));
   const admin = new Set<string>();
-  for (const m of command.matchAll(new RegExp(`${esc}/([A-Za-z0-9][A-Za-z0-9._-]*)`, 'gu'))) admin.add(m[1]!);
+  for (const m of command.matchAll(new RegExp(`${start}${esc}/([A-Za-z0-9][A-Za-z0-9._-]*)`, 'gu'))) admin.add(m[1]!);
   return { rogue, admin: [...admin] };
 }
 
@@ -365,6 +367,8 @@ function parseHookInput(bytes: Buffer, peek: (k: Kind) => void): Parsed {
   if (typeof raw['tool_name'] !== 'string' || !isRecord(raw['tool_input'])) throw new Error('bad tool call');
   const command = raw['tool_input']['command'];
   if (typeof command === 'string') return { kind: 'bash', command }; // any tool with a string command is a shell command
+  if (Array.isArray(command) && command.length > 0 && command.every((c) => typeof c === 'string'))
+    return { kind: 'bash', command: command.join(' ') }; // argv-style commands are inspected the same way
   if (raw['tool_name'] === 'Bash') throw new Error('missing command');
   return { kind: 'other-tool' };
 }
@@ -405,17 +409,20 @@ async function runHookInner(argv: readonly string[], deps: CodexDeps, setMode: (
     if (parsed.kind === 'prompt') {
       const links: string[] = [];
       const plain = new Set<string>();
-      const names = extractMentions(parsed.prompt, links, plain);
-      if (names.size > 0) {
+      const linkNames: string[] = [];
+      const names = extractMentions(parsed.prompt, links, plain, linkNames);
+      if (names.size > 0 || links.length > 0) { // a link decides even when its name is an env var
         let env: HostEnv | undefined;
         try { env = await (deps.readHostEnv ?? readProcEnviron)(await host()); } catch { env = undefined; } // fail closed in findSkills
         const f = await findSkills(cfg, parsed.cwd, env);
         const wide = f.anySkill || f.incomplete; // a non-admin Skill may exist: any token could name it
         // Links first, in prompt order (design Y1/X1): L1 ignored, L2 resolves to an admin Skill file (asked), L3 blocked.
-        for (const l of links) {
-          if (/^(app|mcp|plugin):\/\//iu.test(l)) continue; // L1
+        for (const [i, l] of links.entries()) {
+          if (/^(app|mcp|plugin):\/\//u.test(l)) continue; // L1 (exact lower-case schemes, as Codex matches them)
           const a = await adminLinkName(l, f);
-          if (a === undefined) {
+          // L2 also needs the link text to name that same admin Skill; `[$rogue](<admin>/alpha/SKILL.md)` is L3.
+          const text = linkNames[i] ?? '';
+          if (a === undefined || text.toLowerCase() !== a.toLowerCase()) {
             if (mode === 'enforce') return block(notAdmin(cfg.adminRoot)); // L3
             continue;
           }
