@@ -1527,3 +1527,45 @@ These corrections win over P1–P7.
 5. **Refusal key for T5.** The method's refusal message uses `admin.p2.notice.consequenceToFailed` with the reason, the same text as the notice. No separate `err` key is added.
 6. **Reason limits.** `checkReason(reason, max)` takes the limit as an argument. Approve passes `MAX_REASON` (1024, unchanged). Revoke passes 512.
 7. **The no-write test (P7).** The `admin-state.json` snapshot is taken after the first `pin()` read in the test. The test asserts that the preview, and a refused write, add nothing after that point.
+
+### P9. 2b code review fixes (v14)
+
+These fixes come from the two Goldfish code reviews of `4a0bbbe..4ee5cd6`. Neither review found a HIGH. Where they differ from earlier sections, they win.
+
+1. **Protected role keys, from the active state (security M1, correctness L2).**
+   - **Source.** `roleKeyIds` is built from the walk that `requireRootWalk` returns, in the same operation:
+     - the active root (`activeRoot(pin)`, or the pin root when there is no walk);
+     - `walk.recovery.keyIds`;
+     - `walk.timestampKeyId`.
+   - **Former keys** (pinned root, recovery and timestamp keys that a rotation has replaced) are revocable, as P3 says.
+   - **Callers.** `writeRevocations` and `revocationTargets` both use the walk from their own `requireRootWalk` call (security LOW-1).
+   - **Test.** After a rotation drops recovery key R1, a picker revoke of R1 succeeds. A revoke of the new active recovery key is refused.
+2. **Untested guard (correctness M1).** Add a test: a root event appended from inside the timestamp signing dialog makes `signTimestamp` refuse with `admin.p2.err.changed`, and the timestamp file is byte-identical afterwards.
+3. **Texts (correctness L3, L4, L9).**
+   - `admin.p2.err.notATarget` no longer mentions certificates:
+     - ko: `현재 승인자, 검토한 버전, 또는 직접 고른 공개 키만 폐기할 수 있어요`;
+     - en: `Only current approvers, versions you reviewed, or a public key you chose can be revoked`.
+   - `admin.p2.notice.listEmpty` is deleted (unused).
+   - For an other-key target, the key line does not repeat the key id: its label already ends with it.
+4. **Renderer.**
+   - **Template switch (correctness L5).** A template switch while `loadDocs` is in flight reloads for the new template when the load finishes.
+   - **Choose button (security LOW-2).** TARGET's Choose button for a digest matches the (digest, instanceId) pair, not the digest alone.
+5. **Tests (correctness L7, L8).** Add assertions for:
+   - `firstSeen` on the trust root and revocation lines;
+   - an empty root event log giving `firstSeen = false`;
+   - TARGET `reviewed` turning false after the Skill changes;
+   - the role-key exclusion in `revocationTargets`.
+
+   Other test changes:
+   - The approve-restore test asserts the exact changed-version text.
+   - The vacuous forged-certificate test is removed. The by-id refusal test stays.
+   - U3's post-commit `loadPolicyRoot(..., true)` is kept and commented as redundant with the next `pin()` read. It stays, so that a memory write failure is reported (P1).
+6. **Renderer smoke test (new).** `gui/tests/renderer-smoke.test.ts` loads the built renderer, with a fake `RendererApi`, in the Playwright Electron or Chromium page that `gui/scripts/screenshots.ts` already uses. It opens every admin template once with a key armed and approvers present, and fails on any page error. CI runs it where Playwright is available, and skips it with a clear reason otherwise. This class of bug is how the 2a list crash shipped.
+7. **Docs (correctness L6).**
+   - P8.2 and the spec's Revoke section say the public-key picker opens when Revoke is pressed, after the refusals.
+   - V11's `AdminRevocationTarget` loses `source`.
+   - The CHANGELOG says the 2a crash happened whenever the approver list had rows.
+8. **Accepted, no change.**
+   - The engine has no role-key refusal of its own (security LOW-3). This is a later engine change.
+   - No-argument channels have no parsers (LOW-4), as for `admin:status`.
+   - Approve does not refuse an already-revoked digest, because hosts refuse it.
