@@ -72,6 +72,8 @@ export type TrustContextResult =
       rollback?: true;
       /** The host state file is malformed (`corrupt`), could not be read (`unreadable`) or could not be written (`write`). */
       stateError?: 'corrupt' | 'unreadable' | 'write';
+      /** The timestamp is valid but names other document digests or versions than the files read (the binding check). */
+      bindingMismatch?: true;
     };
 
 export interface CertificateEvaluation {

@@ -12,14 +12,14 @@ async function sources(dir: string): Promise<string[]> {
     if (entry.name === 'node_modules' || entry.name === 'dist') continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) found.push(...await sources(full));
-    else if (/\.(ts|cts|mts|js)$/u.test(entry.name)) found.push(full);
+    else if (/\.(ts|cts|mts|js|mjs|cjs)$/u.test(entry.name)) found.push(full);
   }
   return found;
 }
 
 test('only src/policy.ts defines and only the GUI admin service imports loadTrustForPreview', async () => {
   const allowed = new Set([path.join(root, 'src', 'policy.ts'), path.join(root, 'gui', 'src', 'service', 'admin.ts')]);
-  for (const base of ['src', 'hosts', 'scripts', path.join('gui', 'src'), path.join('gui', 'scripts')]) {
+  for (const base of ['src', 'hosts', 'scripts', path.join('gui', 'src'), path.join('gui', 'scripts'), path.join('gui', 'tests')]) {
     for (const file of await sources(path.join(root, base))) {
       const text = await readFile(file, 'utf8');
       if (text.includes('loadTrustForPreview'))
