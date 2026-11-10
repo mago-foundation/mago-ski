@@ -14,5 +14,5 @@
     "outDir": "dist",
     "rootDir": ".."
   },
-  "include": ["src/renderer/**/*.ts"]
+  "include": ["src/renderer/**/*.ts", "src/i18n/**/*.ts"]
 }

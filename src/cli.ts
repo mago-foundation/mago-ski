@@ -2,19 +2,24 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addApprover, approveSkill, initRoot, removeApprover, updateRevocations } from './admin.ts';
+import { addApprover, approveSkill, initRoot, removeApprover, renewTrustRoot, updateRevocations } from './admin.ts';
 import { parseCertificate } from './certificate.ts';
 import { diffSkillTrees } from './diff.ts';
 import { readRegularFile } from './fs-safe.ts';
 import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
-  appendDecision, decisionRecord, defaultPolicyPath, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, verifyWithPolicy,
+  appendDecision, decisionRecord, defaultPolicyPath, effectiveMode, findSkillDirs, forbiddenApproverKeys, loadPolicy, loadPolicyTrust, tooDeepResult,
+  trustFailureEvent, trustFailureRecord, verifyWithPolicy, type Policy,
 } from './policy.ts';
+import {
+  adoptTrustDocuments, appendRootEvent, buildRecoverySet, currentRootState, describeRootEvent, initRootEventLog, prepareRootEvent,
+  recoverySetJson, showRootEvent, signPolicyTimestamp, signRootEvent,
+} from './recovery-admin.ts';
 import { isMainModule } from './main-module.ts';
 import { formatTimestamp } from './time.ts';
 import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
 import { verifyTrustRoot } from './trust-root.ts';
-import { unverifiable, type VerificationResult } from './verify.ts';
+import { resolveSkillName, unverifiable, type VerificationResult } from './verify.ts';
 import { createRequire } from 'node:module';
 
 const usage = `mago-ski — organization-approved Skill certificates,
@@ -28,10 +33,18 @@ KEYS AND TRUST  (root key holder)
   root init              Create the trust root and revocation list
   root add-approver      Add or replace an approver
   root remove-approver   Remove an approver
+  root renew             Extend the trust root's lifetime
   root show              Verify and print a trust root
+  root adopt             Re-sign trust documents with a new root key
   revoke key             Revoke an approver key
   revoke digest          Revoke one approved Skill version
   revoke refresh         Re-sign the revocation list
+
+ROOT RECOVERY  (recovery key holders, timestamp job)
+  recovery init          Build the policy's recovery set
+  root-events init|prepare-revoke|prepare-rotate|show|sign|append
+                         Propose, check, sign and append root events
+  timestamp sign         Sign the freshness timestamp
 
 APPROVING SKILLS  (reviewer)
   approve SKILL_DIR      Issue a certificate for a Skill
@@ -42,6 +55,7 @@ CHECKING SKILLS
   digest SKILL_DIR       Print a Skill's tree digest
   diff                   Compare two versions of a Skill
   inspect CERTIFICATE    Print a certificate's contents
+  policy check           Check a policy the way a host does
 
 POLICY
   --policy FILE, else $MAGO_SKI_POLICY, else
@@ -82,7 +96,7 @@ Prints the key id (sha256:...), which identifies the key in trust roots and revo
 /* ******************************************************************************************  */
 /** Per-command: root                                                                          */
 /* ******************************************************************************************  */
-  root: `Usage: mago-ski root <init | add-approver | remove-approver | show> [options]
+  root: `Usage: mago-ski root <init | add-approver | remove-approver | renew | show> [options]
 
 Manages the organization's signed trust root (who may approve which Skills).
 Run "mago-ski root <subcommand> --help" for details.`,
@@ -119,6 +133,7 @@ Adds (or replaces) an approver and re-signs the trust root with the next version
   --expires DUR                how long the approver key stays valid
   --out FILE                   write the new trust root here instead
   --trust-root-expires DUR     also set a new trust root lifetime
+  --policy FILE                refuse keys that hold or held another role in this organisation (recommended)
 ${DURATION_NOTE}`,
 
   /* ************************************************* */
@@ -128,6 +143,11 @@ ${DURATION_NOTE}`,
 
 Removes an approver and re-signs the trust root. Certificates from that approver stop verifying once hosts read
 the new trust root. If the key may be compromised, also revoke it with "mago-ski revoke key".`,
+
+  /*		Per-command "root" -> "root renew"   */
+  'root renew': `Usage: mago-ski root renew --root-key FILE --trust-root FILE --expires DUR [--out FILE]
+
+Re-signs the trust root with a new expiry and the same approvers.`,
 
   /* ************************************** */
   /*		Per-command "root" -> "root show"   */
@@ -236,6 +256,119 @@ or removed network origins. Exits 1 when the digest changed, since that always n
 
 Prints a certificate's Skill, digest, approver, dates and reason. Checks structure only; use
 "mago-ski verify" to check its signature against your trust root.`,
+
+/* ******************************************************************************************  */
+/** Per-command: root recovery                                                                 */
+/* ******************************************************************************************  */
+  'root adopt': `Usage: mago-ski root adopt --root-key FILE --from-root-fingerprint ID --trust-root FILE --revocations FILE [options]
+
+After a rotate root event: re-signs the trust root and revocation list with the new root key. Every approver and
+revocation entry is kept, and each document gets the next version. Both files are updated in place.
+
+  --root-key FILE                the new root private key (the rotate event's new root)
+  --from-root-fingerprint ID     the root key the current documents are signed by
+  --trust-root-expires DUR       new trust root lifetime (default 365d)
+  --revocations-expires DUR      new revocation list lifetime (default 30d)
+
+The current documents may have been signed by a leaked key: review the printed approvers before publishing.
+${DURATION_NOTE}`,
+
+  recovery: `Usage: mago-ski recovery init --public-key FILE [--public-key ...] --rotate-threshold N --revoke-threshold N
+
+Prints the "recovery" block for a mago.policy/v2 policy: the recovery keys' fingerprints and both thresholds.
+Recovery keys only sign root events. Keep each one offline, with a different person, never next to the root key.
+1 <= revoke-threshold <= rotate-threshold <= number of keys; 3 keys, rotate 2, revoke 1 is a good default.`,
+
+  'recovery init': `Usage: mago-ski recovery init --public-key FILE [--public-key ...] --rotate-threshold N --revoke-threshold N
+
+Prints the "recovery" block for a mago.policy/v2 policy: the recovery keys' fingerprints and both thresholds.
+Recovery keys only sign root events. Keep each one offline, with a different person, never next to the root key.
+1 <= revoke-threshold <= rotate-threshold <= number of keys; 3 keys, rotate 2, revoke 1 is a good default.`,
+
+  'root-events': `Usage: mago-ski root-events <init | prepare-revoke | prepare-rotate | show | sign | append> [options]
+
+Manages the root event log: signed, numbered events that revoke or replace the root key.
+Run "mago-ski root-events <subcommand> --help" for details.`,
+
+  'root-events init': `Usage: mago-ski root-events init --out FILE
+
+Writes an empty root event log. Publish it next to the trust root: a policy with "recovery" needs the file to exist.`,
+
+  'root-events prepare-revoke': `Usage: mago-ski root-events prepare-revoke --policy FILE --signer-public FILE [--signer-public ...] --reason TEXT --out FILE
+
+Writes an unsigned proposal to revoke the active root key. Hosts that read the event block every Skill, in shadow
+mode too, until a rotate event. List every recovery key that will sign (at least revoke_threshold of them).
+
+  --policy FILE          the organization's policy (names the root event log)
+  --signer-public FILE   public key of a recovery key that will sign; repeat for several
+  --reason TEXT          shown in every host's block message (at most 1024 characters)
+  --out FILE             the proposal file (must not exist yet)`,
+
+  'root-events prepare-rotate': `Usage: mago-ski root-events prepare-rotate --policy FILE --new-root-public FILE --signer-public FILE [...] --reason TEXT --out FILE [options]
+
+Writes an unsigned proposal to replace the root key, and optionally the recovery set or the timestamp key.
+It must be signed by rotate_threshold keys of the current recovery set, the new set's rotate_threshold keys,
+the new root key, and the new timestamp key if one is given.
+
+  --policy FILE                  the organization's policy (names the root event log)
+  --new-root-public FILE         the new root public key (may be the current root to change only the other keys)
+  --signer-public FILE           public key of a recovery key that will sign; repeat for several
+  --new-recovery-public FILE     a key of the new recovery set; repeat for each (default: keep the current set)
+  --rotate-threshold N           the new set's rotate threshold (required with --new-recovery-public)
+  --revoke-threshold N           the new set's revoke threshold (required with --new-recovery-public)
+  --new-timestamp-public FILE    a new timestamp key
+  --reason TEXT                  why (at most 1024 characters)
+  --out FILE                     the proposal file (must not exist yet)`,
+
+  'root-events show': `Usage: mago-ski root-events show PROPOSAL [--policy FILE]
+
+Prints what a proposal does (action, number, root key, new keys, reason), who has signed and who still must.
+With --policy, also checks that it is the next event of the published log. Run it before you sign, and compare
+the output with what was agreed through a channel other than the one that delivered the proposal.`,
+
+  'root-events sign': `Usage: mago-ski root-events sign PROPOSAL --key FILE [--policy FILE]
+
+Adds your signature to a proposal, in place, and prints the event you signed and who still has to sign. Refuses a
+key the event does not list. With --policy, refuses a proposal that is not the next event of the published log.
+Check the event with "mago-ski root-events show" first: your signature covers everything in it.`,
+
+  'root-events append': `Usage: mago-ski root-events append PROPOSAL --policy FILE
+
+Adds a fully signed proposal to the policy's root event log, after checking the whole new log exactly as a host
+would. Prepare proposals against the published log, never a private copy: two events with the same number are a
+fork, and hosts fail closed on a fork.`,
+
+  timestamp: `Usage: mago-ski timestamp sign --policy FILE --key FILE [--expires DUR] [--version N]
+
+Signs the policy's freshness timestamp: the digests of the root event log, trust root and revocation list as they
+are now, with the next version. Run it from an automated job every 6 hours with a 24h lifetime, and publish the
+timestamp together with the documents it names.
+
+  --key FILE       the active timestamp private key (keep it away from the root key)
+  --expires DUR    lifetime (default 24h; at most the policy's freshness max_lifetime)
+  --version N      the version to use, when the current timestamp file cannot be read`,
+
+  'timestamp sign': `Usage: mago-ski timestamp sign --policy FILE --key FILE [--expires DUR] [--version N]
+
+Signs the policy's freshness timestamp: the digests of the root event log, trust root and revocation list as they
+are now, with the next version. Run it from an automated job every 6 hours with a 24h lifetime, and publish the
+timestamp together with the documents it names.
+
+  --key FILE       the active timestamp private key (keep it away from the root key)
+  --expires DUR    lifetime (default 24h; at most the policy's freshness max_lifetime)
+  --version N      the version to use, when the current timestamp file cannot be read`,
+
+  policy: `Usage: mago-ski policy check [--policy FILE] [--json]
+
+Loads the policy, walks the root event log, checks the timestamp if "freshness" is set, verifies the trust root and
+revocation list against the active root, and prints the active keys and thresholds. Never writes the host state.
+Exits 0 when everything checks, 1 otherwise: use it to gate a policy rollout.`,
+
+  'policy check': `Usage: mago-ski policy check [--policy FILE] [--json]
+
+Loads the policy, walks the root event log, checks the timestamp if "freshness" is set, verifies the trust root and
+revocation list against the active root, and prints the active keys and thresholds. Never writes the host state.
+Exits 0 when everything checks, 1 otherwise: use it to gate a policy rollout.`,
 };
 
 /* ******************************************************************************************  */
@@ -405,7 +538,9 @@ async function runRoot(
   }
 
   if (sub === 'add-approver') {
-    allow(parsed, ['--root-key', '--trust-root', '--out', '--public-key', '--name', '--scope', '--expires', '--trust-root-expires'], 0, ['--scope']);
+    allow(parsed, ['--root-key', '--trust-root', '--out', '--public-key', '--name', '--scope', '--expires', '--trust-root-expires', '--policy'], 0, ['--scope']);
+    const policyFile = optional(parsed, '--policy');
+    const forbidden = policyFile === undefined ? undefined : await forbiddenApproverKeys(await loadPolicy(policyFile), now);
     const result = await addApprover({
       rootKeyPath: one(parsed, '--root-key'), 
       trustRootPath: one(parsed, '--trust-root'), 
@@ -416,6 +551,7 @@ async function runRoot(
       name: one(parsed, '--name'), 
       scopes: parsed.flags.get('--scope') ?? [], 
       expires: one(parsed, '--expires'),
+      ...(forbidden ? { forbidden } : {}),
     });
     
     print({ 
@@ -445,6 +581,24 @@ async function runRoot(
     return 0;
   }
   
+  if (sub === 'renew') {
+    allow(parsed, ['--root-key', '--trust-root', '--out', '--expires'], 0);
+    const result = await renewTrustRoot({
+      rootKeyPath: one(parsed, '--root-key'),
+      trustRootPath: one(parsed, '--trust-root'),
+      out: optional(parsed, '--out'),
+      now,
+      expires: one(parsed, '--expires'),
+    });
+    print({
+      status: 'TRUST_ROOT_RENEWED',
+      trust_root_version: result.version,
+      trust_root: result.path,
+      expires_at: formatTimestamp(result.expiresAt),
+    });
+    return 0;
+  }
+
   if (sub === 'show') {
     allow(parsed, ['--trust-root', '--root-fingerprint'], 0);
     const trustRoot = verifyTrustRoot(await readRegularFile(one(parsed, '--trust-root'), 'Trust root', 4 * 1024 * 1024),
@@ -457,7 +611,29 @@ async function runRoot(
     return 0;
   }
 
-  throw new UsageError('Unknown root command; use init, add-approver, remove-approver or show');
+  if (sub === 'adopt') {
+    allow(parsed, ['--root-key', '--from-root-fingerprint', '--trust-root', '--revocations', '--trust-root-expires', '--revocations-expires'], 0);
+    const result = await adoptTrustDocuments({
+      rootKeyPath:        one(parsed, '--root-key'),
+      fromRootKeyId:      validateKeyId(one(parsed, '--from-root-fingerprint'), '--from-root-fingerprint'),
+      trustRootPath:      one(parsed, '--trust-root'),
+      revocationsPath:    one(parsed, '--revocations'),
+      now,
+      trustRootExpires:   optional(parsed, '--trust-root-expires'),
+      revocationsExpires: optional(parsed, '--revocations-expires'),
+    });
+    print({
+      status: 'TRUST_DOCUMENTS_ADOPTED',
+      root_key_id: result.trustRoot.root.keyId,
+      trust_root_version: result.trustRootVersion,
+      revocations_version: result.revocationsVersion,
+      approvers: result.trustRoot.approvers.map((entry) => ({ name: entry.name, key_id: entry.keyId, scopes: entry.scopes, expires_at: formatTimestamp(entry.expiresAt) })),
+      next: 'Review the approvers above (the old key may have been misused), then publish both files.',
+    });
+    return 0;
+  }
+
+  throw new UsageError('Unknown root command; use init, add-approver, remove-approver, renew, show or adopt');
 }
 
 async function runRevoke(
@@ -530,6 +706,146 @@ async function loadCliPolicy(
   }
 }
 
+function integerFlag(parsed: Parsed, flag: string): number | undefined {
+  const value = optional(parsed, flag);
+  if (value === undefined) return undefined;
+  if (!/^[0-9]{1,6}$/u.test(value)) throw new UsageError(`${flag} must be a positive integer`);
+  return Number(value);
+}
+
+async function requiredPolicy(parsed: Parsed): Promise<Policy> {
+  one(parsed, '--policy');
+  return await loadCliPolicy(parsed);
+}
+
+async function runRecovery(sub: string | undefined, parsed: Parsed): Promise<number> {
+  if (sub !== 'init') throw new UsageError('Unknown recovery command; use init');
+  allow(parsed, ['--public-key', '--rotate-threshold', '--revoke-threshold'], 0, ['--public-key']);
+  const rotate = integerFlag(parsed, '--rotate-threshold');
+  const revoke = integerFlag(parsed, '--revoke-threshold');
+  if (rotate === undefined || revoke === undefined) throw new UsageError('--rotate-threshold and --revoke-threshold are required');
+  const keys = parsed.flags.get('--public-key') ?? [];
+  if (keys.length === 0) throw new UsageError('--public-key is required');
+  const set = await buildRecoverySet({ publicKeyPaths: keys, rotateThreshold: rotate, revokeThreshold: revoke });
+  print({ recovery: recoverySetJson(set), next: 'Put "recovery" in each host policy (policy_version "mago.policy/v2"), with "root_events" naming an empty log.' });
+  return 0;
+}
+
+async function runRootEvents(sub: string | undefined, parsed: Parsed, now: Date): Promise<number> {
+  if (sub === 'init') {
+    allow(parsed, ['--out'], 0);
+    print({ status: 'ROOT_EVENTS_INITIALIZED', root_events: await initRootEventLog(one(parsed, '--out')) });
+    return 0;
+  }
+  if (sub === 'prepare-revoke' || sub === 'prepare-rotate') {
+    const common = ['--policy', '--signer-public', '--reason', '--out'];
+    if (sub === 'prepare-revoke') allow(parsed, common, 0, ['--signer-public']);
+    else allow(parsed, [...common, '--new-root-public', '--new-recovery-public', '--rotate-threshold', '--revoke-threshold', '--new-timestamp-public'], 0, ['--signer-public', '--new-recovery-public']);
+    const policy = await requiredPolicy(parsed);
+    const prepared = await prepareRootEvent({
+      policy,
+      action:                 sub === 'prepare-revoke' ? 'revoke' : 'rotate',
+      reason:                 one(parsed, '--reason'),
+      signerPublicPaths:      parsed.flags.get('--signer-public') ?? [],
+      out:                    one(parsed, '--out'),
+      now,
+      newRootPublicPath:      optional(parsed, '--new-root-public'),
+      newRecoveryPublicPaths: parsed.flags.get('--new-recovery-public'),
+      rotateThreshold:        integerFlag(parsed, '--rotate-threshold'),
+      revokeThreshold:        integerFlag(parsed, '--revoke-threshold'),
+      newTimestampPublicPath: optional(parsed, '--new-timestamp-public'),
+    });
+    print({
+      status: 'ROOT_EVENT_PREPARED', proposal: prepared.path, sequence: prepared.event.sequence, action: prepared.event.action,
+      root_key_id: prepared.event.rootKeyId, must_be_signed_by: prepared.required,
+      next: 'Each listed key holder runs "mago-ski root-events sign PROPOSAL --key FILE"; then "mago-ski root-events append".',
+    });
+    return 0;
+  }
+  if (sub === 'show') {
+    allow(parsed, ['--policy'], 1);
+    const policy = optional(parsed, '--policy') ? await loadCliPolicy(parsed) : undefined;
+    const result = await showRootEvent({ proposalPath: parsed.positional[0]!, policy, now });
+    print({ event: describeRootEvent(result.event), signatures: result.signed, still_missing: result.missing, ...(policy ? { extends_log: true } : {}) });
+    return 0;
+  }
+  if (sub === 'sign') {
+    allow(parsed, ['--key', '--policy'], 1);
+    const policy = optional(parsed, '--policy') ? await loadCliPolicy(parsed) : undefined;
+    const result = await signRootEvent({ proposalPath: parsed.positional[0]!, keyPath: one(parsed, '--key'), policy, now });
+    print({ status: 'ROOT_EVENT_SIGNED', signed_by: result.keyId, event: describeRootEvent(result.event), signatures: result.signed, still_missing: result.missing });
+    return 0;
+  }
+  if (sub === 'append') {
+    allow(parsed, ['--policy'], 1);
+    const policy = await requiredPolicy(parsed);
+    const result = await appendRootEvent({ policy, proposalPath: parsed.positional[0]!, now });
+    print({
+      status: 'ROOT_EVENT_APPENDED', root_events: result.path, sequence: result.event.sequence, action: result.event.action,
+      active_root_key_id: result.walk.activeRootKeyId, root_revoked: result.walk.revoked !== null,
+      next: result.walk.revoked
+        ? 'Publish the log now. Hosts that read it block every Skill until a rotate event.'
+        : 'Publish the log. Then sign a trust root and revocation list with the active root ("mago-ski root adopt") and re-sign the timestamp.',
+    });
+    return 0;
+  }
+  throw new UsageError('Unknown root-events command; use init, prepare-revoke, prepare-rotate, show, sign or append');
+}
+
+async function runTimestamp(sub: string | undefined, parsed: Parsed, now: Date): Promise<number> {
+  if (sub !== 'sign') throw new UsageError('Unknown timestamp command; use sign');
+  allow(parsed, ['--policy', '--key', '--expires', '--version'], 0);
+  const policy = await requiredPolicy(parsed);
+  const result = await signPolicyTimestamp({
+    policy, keyPath: one(parsed, '--key'), now, expires: optional(parsed, '--expires'), version: integerFlag(parsed, '--version'),
+  });
+  print({
+    status: 'TIMESTAMP_SIGNED', timestamp: result.path, version: result.timestamp.version,
+    expires_at: formatTimestamp(result.timestamp.expiresAt), root_events_count: result.timestamp.rootEvents.count,
+    trust_root_version: result.timestamp.trustRoot.version, revocations_version: result.timestamp.revocations.version,
+  });
+  return 0;
+}
+
+async function runPolicyCheck(sub: string | undefined, parsed: Parsed, now: Date): Promise<number> {
+  if (sub !== 'check') throw new UsageError('Unknown policy command; use check');
+  allow(parsed, ['--policy'], 0);
+  const policy = await loadCliPolicy(parsed);
+  const trust  = await loadPolicyTrust(policy, now, { recordVersions: false });
+  const root   = policy.recovery ? await currentRootState(policy, now).catch(() => null) : null;
+  const report: Record<string, unknown> = {
+    status:           trust.ok ? 'OK' : trust.rootRevoked ? 'ROOT_REVOKED' : 'TRUST_UNAVAILABLE',
+    policy:           policy.path,
+    mode:             policy.mode,
+    effective_mode:   effectiveMode(policy.mode, trust),
+    root_fingerprint: policy.rootKeyId,
+    recovery:         policy.recovery !== null,
+  };
+  if (root) {
+    report.active_root_key_id = root.activeRootKeyId;
+    report.root_events        = root.count;
+    report.recovery_set       = recoverySetJson(root.recovery);
+    report.timestamp_key_id   = root.timestampKeyId;
+    if (root.revoked) report.revoked_by_event = root.revoked.sequence;
+  }
+  if (trust.ok) {
+    report.trust_root_version  = trust.context.trustRoot.version;
+    report.revocations_version = trust.context.revocations.version;
+    report.trust_root_expires_at = formatTimestamp(trust.context.trustRoot.expiresAt);
+    report.revocations_expires_at = formatTimestamp(trust.context.revocations.expiresAt);
+    report.approvers = trust.context.trustRoot.approvers.length;
+    if (trust.context.root?.timestamp) {
+      report.timestamp_version    = trust.context.root.timestamp.version;
+      report.timestamp_expires_at = formatTimestamp(trust.context.root.timestamp.expiresAt);
+    }
+  } else {
+    report.verdict = trust.verdict;
+    report.reason  = trust.reason;
+  }
+  print(report);
+  return trust.ok ? 0 : 1;
+}
+
 async function runVerify(
   parsed: Parsed, 
   now: Date
@@ -539,8 +855,17 @@ async function runVerify(
   
   const policy = await loadCliPolicy(parsed);
   const skillDir = parsed.positional[0]!;
+  const trust = await loadPolicyTrust(policy, now);
+  if (!trust.ok) {
+    // A trust failure affects every Skill: one record for the host, not one per Skill.
+    const name = optional(parsed, '--name') ?? await resolveSkillName(skillDir).catch(() => path.basename(path.resolve(skillDir)));
+    await appendDecision(policy.decisionLogPath, trustFailureRecord(trust, policy.mode, now));
+    printResult(unverifiable(path.resolve(skillDir), name, trust.reason, now, trust.verdict), parsed.booleans.has('--json'));
+    return 1;
+  }
   const result = await verifyWithPolicy(policy, skillDir, {
     now,
+    context: trust.context,
     ...(optional(parsed, '--name') ? { skillName: one(parsed, '--name') } : {}),
     ...(optional(parsed, '--certificate') ? { certificate: one(parsed, '--certificate') } : {}),
   });
@@ -563,13 +888,21 @@ async function runVerifyAll(
   
   const { skillDirs, tooDeep } = await findSkillDirs(policy.skillDirs);
   const trust = await loadPolicyTrust(policy, now);
+  if (!trust.ok) {
+    // Reported once for the host instead of once per Skill, so it is not buried among identical lines.
+    const event = trustFailureEvent(trust);
+    await appendDecision(policy.decisionLogPath, trustFailureRecord(trust, policy.mode, now));
+    if (parsed.booleans.has('--json'))
+      process.stdout.write(`${JSON.stringify({ event, verdict: trust.verdict, reason: trust.reason, skills: skillDirs.length + tooDeep.length })}\n`);
+    else
+      process.stdout.write(`FAIL ${event.toUpperCase()}  ${trust.reason}\n0/${skillDirs.length + tooDeep.length} Skills verified (mode: ${effectiveMode(policy.mode, trust)})\n`);
+    return 1;
+  }
   
   let failures = 0;
   const results: VerificationResult[] = [];
   for (const skillDir of skillDirs) {
-    results.push(trust.ok
-      ? await verifyWithPolicy(policy, skillDir, { now, context: trust.context })
-      : unverifiable(skillDir, path.basename(skillDir), trust.reason, now, trust.verdict));
+    results.push(await verifyWithPolicy(policy, skillDir, { now, context: trust.context }));
   }
   
   for (const directory of tooDeep) 
@@ -620,7 +953,7 @@ export async function runCli(
     return 0;
   }
 
-  const hasSub = command === 'root' || command === 'revoke';
+  const hasSub = ['root', 'revoke', 'recovery', 'root-events', 'timestamp', 'policy'].includes(command!);
   const parsed = parseArgs(argv.slice(hasSub ? 2 : 1));
   switch (command) {
     case 'keygen': {
@@ -637,6 +970,14 @@ export async function runCli(
       return await runRoot(maybeSub, parsed, now);
     case 'revoke':
       return await runRevoke(maybeSub, parsed, now);
+    case 'recovery':
+      return await runRecovery(maybeSub, parsed);
+    case 'root-events':
+      return await runRootEvents(maybeSub, parsed, now);
+    case 'timestamp':
+      return await runTimestamp(maybeSub, parsed, now);
+    case 'policy':
+      return await runPolicyCheck(maybeSub, parsed, now);
     case 'approve': {
       allow(parsed, ['--key', '--expires', '--reason', '--name', '--previous', '--out', '--expect-digest'], 1);
       const result = await approveSkill({

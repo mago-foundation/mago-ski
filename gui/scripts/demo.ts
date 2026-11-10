@@ -1,11 +1,14 @@
 // Builds a throwaway home directory with Pi-style Skill folders, so the GUI can be tried without touching your own.
-//   node scripts/demo.ts setup DIR [--org]   create DIR/home (with an org PKI policy when --org is given)
+//   node scripts/demo.ts setup DIR [--org|--freshness]   create DIR/home (with an org PKI policy when --org is given; --freshness
+//                                            makes it a policy v2 organisation with a recovery set and a signed timestamp)
 //   node scripts/demo.ts change DIR          make the "docs-helper" change from the preview
 // Then start the app against it:  HOME=DIR/home MAGO_SKI_GUI_DATA=DIR/gui-data npx electron .
 import { appendFile, chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { addApprover, approveSkill, initRoot } from '../../src/admin.ts';
 import { generateKeyPair } from '../../src/keys.ts';
+import { loadPolicy } from '../../src/policy.ts';
+import { buildRecoverySet, initRootEventLog, signPolicyTimestamp } from '../../src/recovery-admin.ts';
 
 const [command, target, flag] = process.argv.slice(2);
 if (!target || (command !== 'setup' && command !== 'change')) {
@@ -38,7 +41,7 @@ if (command === 'setup') {
   await mkdir(path.join(home, '.pi', 'agent'), { recursive: true });
   await writeFile(path.join(home, '.pi', 'agent', 'settings.json'), JSON.stringify({ packages: ['npm:@mago-foundation/mago-ski'] }, null, 2));
 
-  if (flag === '--org') {
+  if (flag === '--org' || flag === '--freshness') {
     const keys = path.join(dir, 'keys');
     const policyDir = path.join(home, '.mago-ski');
     await mkdir(keys, { recursive: true });
@@ -48,12 +51,26 @@ if (command === 'setup') {
     const alice = await generateKeyPair(path.join(keys, 'alice.pem'), path.join(keys, 'alice.pub'));
     await initRoot({ rootKeyPath: root.privatePath, trustRootOut: path.join(policyDir, 'trust-root.json'), revocationsOut: path.join(policyDir, 'revocations.json'), now });
     await addApprover({ rootKeyPath: root.privatePath, trustRootPath: path.join(policyDir, 'trust-root.json'), now, publicKeyPath: alice.publicPath, name: 'Alice (platform team)', scopes: ['*'], expires: '180d' });
-    await writeFile(path.join(policyDir, 'policy.json'), JSON.stringify({
-      policy_version: 'mago.policy/v1', mode: 'enforce', root_fingerprint: root.keyId, trust_root: 'trust-root.json',
-      revocations: 'revocations.json', state_file: 'state.json', decision_log: 'decisions.jsonl',
-    }, null, 2));
+    const policyFile = path.join(policyDir, 'policy.json');
+    const base = { mode: 'enforce', root_fingerprint: root.keyId, trust_root: 'trust-root.json', revocations: 'revocations.json', state_file: 'state.json', decision_log: 'decisions.jsonl' };
+    if (flag === '--freshness') {
+      // A policy v2 organisation: three recovery keys, an empty root event log and a timestamp key that signed a timestamp now.
+      const recovery = [];
+      for (const name of ['recovery-a', 'recovery-b', 'recovery-c']) recovery.push(await generateKeyPair(path.join(keys, `${name}.pem`), path.join(keys, `${name}.pub`)));
+      const timestamp = await generateKeyPair(path.join(keys, 'timestamp.pem'), path.join(keys, 'timestamp.pub'));
+      await initRootEventLog(path.join(policyDir, 'root-events.json'));
+      const set = await buildRecoverySet({ publicKeyPaths: recovery.map((k) => k.publicPath), rotateThreshold: 2, revokeThreshold: 1 });
+      await writeFile(policyFile, JSON.stringify({
+        policy_version: 'mago.policy/v2', ...base,
+        recovery: { key_ids: set.keyIds, rotate_threshold: set.rotateThreshold, revoke_threshold: set.revokeThreshold }, root_events: 'root-events.json',
+        freshness: { timestamp: 'timestamp.json', key_id: timestamp.keyId, max_lifetime: '24h' },
+      }, null, 2));
+      await signPolicyTimestamp({ policy: await loadPolicy(policyFile), keyPath: timestamp.privatePath, now, expires: '24h' });
+    } else {
+      await writeFile(policyFile, JSON.stringify({ policy_version: 'mago.policy/v1', ...base }, null, 2));
+    }
     for (const s of [docs, review]) await approveSkill({ skillDir: s, approverKeyPath: alice.privatePath, now, expires: '90d', reason: 'Reviewed for the demo' });
-    console.log(`org PKI: enforce policy at ${path.join(policyDir, 'policy.json')}; docs-helper and code-review approved, pdf-tools not`);
+    console.log(`org PKI${flag === '--freshness' ? ' with freshness' : ''}: enforce policy at ${policyFile}; docs-helper and code-review approved, pdf-tools not`);
   }
   console.log(`demo home: ${home}`);
   console.log(`start:     HOME=${home} MAGO_SKI_GUI_DATA=${path.join(dir, 'gui-data')} npx electron .`);

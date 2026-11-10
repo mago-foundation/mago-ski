@@ -19,6 +19,7 @@ Host (Pi, CI)       pins the root fingerprint and checks that a certificate chai
 
 - **Approval binds an exact digest.** Every byte of every covered file is included, plus its executable bit on Linux and macOS; files excluded from the digest are not approved. A one-sentence change needs a new certificate, even if no capability changed.
 - **Hosts trust the root, not individual keys.** Approvers are delegated by the root, limited to Skill-name scopes, and expire.
+- **A leaked root key is recoverable.** With a v2 policy, a few offline recovery keys can revoke the root key (any one trustee, by default) and replace it (two of three, by default) with signed root events, without editing any host's policy. An optional timestamp key stops hosts from being kept on old files. See [root recovery](docs/spec/root-recovery-v1.md).
 - **Revocation reaches every certificate at once.** Revoke a key and every certificate it signed stops verifying as soon as a host has the updated revocation list; revoke a digest to pull one version. Lists expire (30 days by default), which bounds how long a host can keep using an old one.
 - **The model never holds a credential.** The host verifies; in Pi enforce mode, only Skills that passed are advertised to the model.
 - **No maliciousness judgment.** A certificate records who approved what. It does not certify that a Skill is safe.
@@ -101,7 +102,33 @@ mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 o
 | **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
 | **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect`, plus key, root, revoke and approve commands. Run `mago-ski --help` | |
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
-| **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Read-only toward policy and host state; it never approves | [gui/README.md](gui/README.md) |
+| **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Never writes host state. Its administration rack covers approving Skill versions, managing approvers, revoking, refreshing the revocation list and signing the timestamp, each confirmed in a native dialog, with the role proven by the key against an admin-owned organisation pin ([spec](docs/spec/gui-admin-rack-v1.md)). English and Korean | [gui/README.md](gui/README.md) |
+
+## Desktop GUI
+
+The desktop GUI (PoC) shows its texts in English or Korean. It follows the system language and has a language switch in the header. See [gui/README.md](gui/README.md).
+
+![The observation tab: three Skills, one changed, with the file diff](docs/images/gui-observe.png)
+
+The observation tab lists the installed Skills and shows what changed in the selected one since the version you remember.
+
+![The admin tab: the organisation pin and the template picker](docs/images/gui-admin-templates.png)
+
+The admin tab shows the organisation pin and the fixed templates an approver or administrator works through.
+
+![The Approve template with an approver key loaded and a Skill in INSPECT](docs/images/gui-admin-approve.png)
+
+In the Approve template the approver's key is loaded (IDENTITY) and INSPECT shows the exact version of a Skill before anything is signed.
+
+![The Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK](docs/images/gui-admin-approvers.png)
+
+![Revoke: TARGET with the current approvers and a reviewed Skill](docs/images/gui-admin-revoke.png)
+
+![Refresh revocation list: REVOCATION REFRESH](docs/images/gui-admin-refresh.png)
+
+![Sign timestamp: TIMESTAMP](docs/images/gui-admin-timestamp.png)
+
+In the Manage approvers template TRUST ROOT shows the trust root's approvers, expiry and lifetime controls, and POLICY CHECK shows every Skill's verdict under the host's own loader.
 
 ## Verdicts
 
@@ -114,9 +141,9 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 ## Documentation
 
 - [Threat model](docs/threat-model.md): what is and is not protected
-- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md)
+- Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md), [GUI administration rack](docs/spec/gui-admin-rack-v1.md) (draft)
 - [Test vectors](tests/vectors/) for other implementations
-- [Pi interception spike](docs/phase1/pi-interception.md)
+- [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md)
 - [Security policy](SECURITY.md): how to report a vulnerability
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)

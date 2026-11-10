@@ -50,7 +50,7 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-function decodeEntryName(name: Buffer): string {
+export function decodeEntryName(name: Buffer): string {
   let decoded: string;
   try {
     decoded = utf8Decoder.decode(name);

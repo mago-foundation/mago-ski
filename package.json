@@ -1,6 +1,6 @@
 {
   "name": "@mago-foundation/mago-ski",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Skills PKI: organization-approved, exact-version Skill certificates enforced on the agent host",
   "license": "Apache-2.0",
   "author": "The Mago Foundation",
@@ -37,6 +37,8 @@
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check && npm run build",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "test:live:claude-code": "node tests/live/claude-code-gate.live.ts",
+    "test:live:codex": "node tests/live/codex-gate.live.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {

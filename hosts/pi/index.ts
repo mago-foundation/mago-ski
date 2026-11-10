@@ -15,7 +15,9 @@ import { lstat, realpath } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import { isInside, readRegularFile } from '../../src/fs-safe.ts';
-import { appendDecision, loadPolicy, loadPolicyTrust, verifyWithPolicy, type DecisionRecord, type Mode, type Policy } from '../../src/policy.ts';
+import {
+  appendDecision, loadPolicy, loadPolicyTrust, trustFailureEvent, trustFailureRecord, verifyWithPolicy, type DecisionRecord, type Mode, type Policy,
+} from '../../src/policy.ts';
 import { formatTimestamp } from '../../src/time.ts';
 import { CERTIFICATE_FILENAME, hashFile, sha256Hex } from '../../src/tree-digest.ts';
 import { validateSkillName } from '../../src/names.ts';
@@ -138,9 +140,13 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
     /** Skill directories already reported for an unsafe path, so the notice and log line appear once. */
     const reportedPaths = new Set<string>();
 
+    /** The current failure of the trust documents, reported once per host while it lasts (null when trust loads). */
+    let trustFailure: { key: string; event: string; reason: string; rootRevoked: boolean; noticed: boolean } | null = null;
+
     const mode = (): Mode => (policy ? policy.mode : 'enforce');
     const active = () => policy !== null || policyError !== null;
-    const enforcing = () => mode() === 'enforce';
+    // A revoked root key blocks in shadow mode too: it is a signed statement that the trust anchor is not sound.
+    const enforcing = () => mode() === 'enforce' || trustFailure?.rootRevoked === true;
 
     /**
      * The policy decides the mode, so it must come from the host, never from the project. An explicit
@@ -199,11 +205,28 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
 
     async function trustContext(): Promise<TrustContextResult> {
       if (!policy) return { ok: false, verdict: 'UNVERIFIABLE', reason: policyError ?? 'no policy' };
+      let result: TrustContextResult;
       try {
-        return await loadPolicyTrust(policy, now());
+        result = await loadPolicyTrust(policy, now());
       } catch (error) {
-        return { ok: false, verdict: 'UNVERIFIABLE', reason: (error as Error).message };
+        result = { ok: false, verdict: 'UNVERIFIABLE', reason: (error as Error).message };
       }
+      await noteTrust(result);
+      return result;
+    }
+
+    /** One decision record when a trust failure starts or changes; none per Skill while it lasts. */
+    async function noteTrust(result: TrustContextResult): Promise<void> {
+      if (result.ok) {
+        trustFailure = null;
+        return;
+      }
+      const event = trustFailureEvent(result);
+      const key = `${event}|${result.reason}`;
+      if (trustFailure?.key === key) return;
+      trustFailure = { key, event, reason: result.reason, rootRevoked: result.rootRevoked === true, noticed: false };
+      if (policy?.decisionLogPath)
+        await appendDecision(policy.decisionLogPath, trustFailureRecord(result, policy.mode, now())).catch(() => {});
     }
 
     /** Never throws: any failure becomes an UNVERIFIABLE entry for that Skill. */
@@ -240,6 +263,23 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       const fresh: Entry[] = [];
       for (const skill of skills) fresh.push(await verifyEntry(skill, context));
       entries = fresh;
+      if (trustFailure) {
+        // Reported once for the host: one notice when it starts or changes, and the status bar while it lasts.
+        for (const entry of fresh) lastLogged.set(entry.lexDir, entry.result.verdict);
+        if (ctx.hasUI) {
+          if (!trustFailure.noticed) {
+            trustFailure.noticed = true;
+            const message = trustFailure.rootRevoked
+              ? `mago-ski: ROOT KEY REVOKED - all Skills blocked, in shadow mode too. ${trustFailure.reason}`
+              : `mago-ski ${enforcing() ? 'blocked' : 'would block (shadow)'} all Skills: trust documents unavailable - ${trustFailure.reason}`;
+            ctx.ui.notify(message, trustFailure.rootRevoked || enforcing() ? 'error' : 'warning');
+          }
+          ctx.ui.setStatus('mago-ski', trustFailure.rootRevoked
+            ? 'mago-ski: ROOT KEY REVOKED - all Skills blocked'
+            : `mago-ski ${mode()}: trust unavailable - 0/${fresh.length} Skills verified`);
+        }
+        return fresh;
+      }
       for (const entry of fresh) {
         if (lastLogged.get(entry.lexDir) === entry.result.verdict) continue;
         lastLogged.set(entry.lexDir, entry.result.verdict);
@@ -311,7 +351,8 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
 
     /** Logs the decision; returns a block in enforce mode, undefined in shadow mode. */
     async function judge(entry: Entry, event: string, verdict: Verdictish, reason: string): Promise<Block> {
-      await log(recordFor(entry, event, verdict, reason), false);
+      // While the trust documents fail, the single host record stands for every Skill.
+      if (!trustFailure) await log(recordFor(entry, event, verdict, reason), false);
       return enforcing() ? { block: true, reason: `mago-ski: Skill "${entry.name}" ${verdict}: ${reason}` } : undefined;
     }
 
@@ -478,6 +519,8 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!known) {
         // Not seen yet (first prompt of a session). Never let Pi expand it unchecked: turn it into a
         // plain request; the model can only use the Skill if it is advertised, and reads are checked.
+        // Load trust first: a revoked root blocks in shadow mode too, even before the first agent run.
+        if (!enforcing()) await trustContext();
         if (!enforcing()) return { action: 'continue' };
         return { action: 'transform', text: `Use the "${name}" skill.${args ? ` ${args}` : ''}` };
       }

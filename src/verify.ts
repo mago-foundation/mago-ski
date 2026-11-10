@@ -24,7 +24,7 @@ export type Verdict = (typeof VERDICTS)[number];
  * Precedence rank for candidate selection (lower rank wins):
  * VERIFIED (0) beats all failures, followed by the failure priority order.
  */
-const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
+export const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
   VERIFIED: 0,
   REVOKED: 1,
   UNAPPROVED_CHANGE: 2,
@@ -36,9 +36,23 @@ const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
 
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
+/** Root recovery state behind a trust context (policy v2 with "recovery"). */
+export interface RootStatus {
+  /** root_fingerprint in the policy. */
+  pinnedRootKeyId: string;
+  /** The root key that signed the trust root and revocation list after walking the root event log. */
+  activeRootKeyId: string;
+  /** Events in the root event log. */
+  sequence: number;
+  recovery: { keyIds: string[]; rotateThreshold: number; revokeThreshold: number };
+  timestampKeyId: string | null;
+  timestamp: { version: number; expiresAt: Date } | null;
+}
+
 export interface TrustContext {
   trustRoot: TrustRoot;
   revocations: Revocations;
+  root?: RootStatus;
 }
 
 export interface MinimumVersions {
@@ -48,7 +62,19 @@ export interface MinimumVersions {
 
 export type TrustContextResult =
   | { ok: true; context: TrustContext }
-  | { ok: false; verdict: 'EXPIRED' | 'UNVERIFIABLE'; reason: string };
+  | {
+      ok: false;
+      verdict: 'EXPIRED' | 'UNVERIFIABLE';
+      reason: string;
+      /** The active root key is revoked by a root event: every Skill is blocked, in shadow mode too. */
+      rootRevoked?: boolean;
+      /** A version, sequence or timestamp is lower than the host state's: the documents are older than already seen. */
+      rollback?: true;
+      /** The host state file is malformed (`corrupt`), could not be read (`unreadable`) or could not be written (`write`). */
+      stateError?: 'corrupt' | 'unreadable' | 'write';
+      /** The timestamp is valid but names other document digests or versions than the files read (the binding check). */
+      bindingMismatch?: true;
+    };
 
 export interface CertificateEvaluation {
   verdict: Verdict;
@@ -121,6 +147,7 @@ export function loadTrustContext(options: {
         ok: false,
         verdict: 'UNVERIFIABLE',
         reason: `trust root version ${trustRoot.version} is older than version ${options.minimum.trustRootVersion} already seen (rollback)`,
+        rollback: true,
       };
     }
 
@@ -129,6 +156,7 @@ export function loadTrustContext(options: {
         ok: false,
         verdict: 'UNVERIFIABLE',
         reason: `revocation list version ${revocations.version} is older than version ${options.minimum.revocationsVersion} already seen (rollback)`,
+        rollback: true,
       };
     }
 
@@ -518,7 +546,7 @@ export function unverifiable(
   requireValidDate(now, 'Verification time');
 
   const safeVerdict: Exclude<Verdict, 'VERIFIED'> =
-    verdict === ('VERIFIED' as string) || !(verdict in VERDICT_RANK) ? 'UNVERIFIABLE' : verdict;
+    verdict === ('VERIFIED' as string) || !Object.hasOwn(VERDICT_RANK, verdict) ? 'UNVERIFIABLE' : verdict;
 
   return {
     verdict: safeVerdict,

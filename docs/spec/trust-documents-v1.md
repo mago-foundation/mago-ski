@@ -24,7 +24,7 @@ An organization's trust is anchored in one **root key**, kept offline. Hosts pin
 
 - `version`: positive integer, increased on every change. Hosts with a configured state file reject versions lower than those recorded there.
 - `root.public_key` must hash to `root.key_id`, which must equal the pinned fingerprint and the envelope's `keyid`.
-- `approvers`: sorted by `key_id`, unique, at most 256. The root key may not also be an approver.
+- `approvers`: sorted by `key_id`, unique, at most 256. The root key may not also be an approver. With root recovery, a host also refuses (`UNVERIFIABLE`) a trust root that lists an approver whose key has held the root or timestamp role in the root events the host walked: `trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`. Only keys retired in events after `root_events_after` are known, and the gate trust store does not check it. Before upgrading, remove such approvers (see the CHANGELOG).
 - `scopes`: sorted, unique, 1–64 per approver. `*` matches every Skill name; `prefix*` matches names starting with `prefix`; anything else matches one exact name.
 
 ## Revocation list
@@ -75,6 +75,8 @@ Hand-edited JSON, read by hosts and the CLI. Paths are relative to the policy fi
 | `state_file` | no | Rollback protection (below). Strongly recommended on hosts. Must resolve to a file inside the policy file's directory |
 | `decision_log` | no | JSON Lines file of decisions, one JSON object per line. Must resolve to a file inside the policy file's directory (after following symbolic links); it is opened without following symbolic links and must be a regular file. Records are data, not shell syntax: do not source them |
 
+Policy `mago.policy/v2` adds `recovery`, `root_events`, `root_events_after` and `freshness` for root recovery; see [Host policy v2](root-recovery-v1.md#host-policy-v2). Without `recovery`, a v2 policy behaves exactly as v1. `root_events` and `freshness.timestamp` are inputs too: `state_file` and `decision_log` must not be either of them.
+
 The policy itself decides who is trusted, so it must live where the code under review cannot change it. The Pi host and the CLI read it only from `MAGO_SKI_POLICY` (an absolute path) or `~/.mago-ski/policy.json`, and the CLI also accepts an explicit `--policy FILE`; the GitHub Action reads it from the pull request's base revision.
 
 ## Host state (rollback protection)
@@ -87,6 +89,8 @@ Canonical JSON written by the host:
 
 The host records the highest versions it has accepted for each root and rejects older documents as `UNVERIFIABLE` (rollback). Without a state file, a host can be given an older, still-unexpired trust root or revocation list.
 
+With root recovery, the host writes `mago.host-state/v2`, which adds the root event progress per pinned root and the timestamp version per timestamp key ([Rollback and forks](root-recovery-v1.md#rollback-and-forks)). A host keeps writing v1 until it applies its first root event or timestamp, and never goes back to v1 once it has written v2.
+
 ## Decision log
 
 One JSON object per line:
@@ -97,7 +101,9 @@ One JSON object per line:
 
 `action` is `allow`, `block` or `would-block` (shadow mode). `certificate_id` is the SHA-256 of the certificate file.
 
+A failure of the trust documents (trust root, revocation list, root event log or timestamp) affects every Skill, so hosts write **one** record when it starts or changes, instead of one per Skill: `event` is `root-revoked` or `trust-unavailable`, `skill` and `skill_dir` are empty, `digest` and `certificate_id` are null, and `verdict` is `UNVERIFIABLE`. `root-revoked` is always `block`, in shadow mode too ([Revoked root](root-recovery-v1.md#revoked-root-blocked-in-every-mode)).
+
 ## Key rotation
 
 - **Approver keys:** add the new key (`root add-approver`), re-approve the Skills, then remove the old key (`root remove-approver`). Certificates from a removed approver stop verifying once a host reads the updated trust root; revoke the old key instead if it may be compromised.
-- **Root key:** not implemented in v1; replacing the root means distributing a new fingerprint to every host. Proposed design, which also covers a leaked root key: [Root recovery v1](root-recovery-v1.md).
+- **Root key:** with a v2 policy and a recovery set, the root key is revoked and replaced by root events signed by recovery keys, without editing host policies: [Root recovery v1](root-recovery-v1.md). After a rotate, `mago-ski root adopt` re-signs the trust documents with the new root. With a v1 policy, replacing the root still means distributing a new fingerprint to every host.
