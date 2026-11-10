@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: v12, 2b ready for implementation. Precedence: [Decisions for 2b (v12)](#decisions-for-2b-v12) > [2a code review fixes (v11)](#2a-code-review-fixes-v11) > [Decisions (v10)](#decisions-v10) > [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: v13, 2b ready for implementation. Precedence: [Decisions for 2b (v12)](#decisions-for-2b-v12) > [2a code review fixes (v11)](#2a-code-review-fixes-v11) > [Decisions (v10)](#decisions-v10) > [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -1500,3 +1500,30 @@ The refresh dialog's previous-expiry line reuses `admin.dialog.renew.lineFrom`.
 - They are added to `README.md` and `gui/README.md` after the approvers shot.
 
 **Order of the Sign timestamp and revoked-root checks (m3).** P5's order applies. The static check, freshness, comes before the root check.
+
+### P8. Corrections after the v12 confirmation (v13)
+
+These corrections win over P1–P7.
+
+1. **Root-event counter (P4 corrected).** The counter shown is `walk.count`. It is already the absolute sequence of the last event (`root-events.ts:430`), the same number `checkRootEvents` stores as `rootEvents[root].sequence`. Nothing is added to it. `firstSeen` compares `walk.count` with the memory snapshot's `sequence`.
+2. **Revoking a key that is not a current approver (P3 replaced).**
+   - **Why.** A certificate names only `approver_key_id`, not a public key, so the GUI cannot check that a certificate's key is genuine. Revoke targets are therefore **not** taken from certificates.
+   - **What TARGET offers:**
+     - every current approver in the trust root (label: the approver's name);
+     - digests reviewed by the armed key (V14);
+     - a button, `admin.p2.btn.revokeOtherKey`: `다른 키 폐기…` / `Revoke another key…`.
+   - **The button** opens the public-key picker (W11's `pickPublicKey` seam, counted as a dialog). The target is then that public key's id, labelled `admin.p2.label.otherKey`: `{keyId} · 현재 승인자가 아님` / `{keyId} · not a current approver`.
+   - **The revoke dialog** for such a key adds one line, `admin.dialog.revoke.lineCerts`: `이 키를 쓰는 인증서: {n}개` / `Certificates naming this key: {n}`. It counts the certificates found by the consequence's discovery whose `approver_key_id` equals the key id.
+   - **Refusals.** The picked key is refused as P3 says when it is the active root, recovery or timestamp key, or is already revoked.
+   - **Withdrawn:** `admin.p2.label.certTarget` (P6).
+   - **Why this is safe.** The admin chooses the key file deliberately, so a planted certificate cannot put a key on the list.
+3. **The TARGET Skill list (P5).**
+   - `AdminSessionOptions` gains `instances: () => Array<{ id: string; path: string; name: string }>`. `main.ts` passes `() => svc.view().instances.map((i) => ({ id: i.id, path: i.path, name: i.name }))`, the same source as `instance(id)`.
+   - `revocationSkills()` reads each instance with `readSkill(path)`. A row's `digest` is the tree digest, or `null` with `error` set to the read failure's message. `reviewed` is as P5 says. Rows are sorted by name, then id.
+4. **The dialog when `from` fails (P2 refined).** No head, lines, "more" or tooDeep lines are shown. The service clears `lines` and sets `changed` to 0 when `fromFailed` is set, as the type comment at `types.ts:286` says. Instead, the dialog shows:
+   - `consequenceFromFailed`;
+   - `admin.p2.policyCheck.done` with `{n}` = `afterCounts.VERIFIED` and `{m}` = all other `afterCounts` plus `tooDeep`;
+   - one `admin.p2.policyCheck.line` per other verdict.
+5. **Refusal key for T5.** The method's refusal message uses `admin.p2.notice.consequenceToFailed` with the reason, the same text as the notice. No separate `err` key is added.
+6. **Reason limits.** `checkReason(reason, max)` takes the limit as an argument. Approve passes `MAX_REASON` (1024, unchanged). Revoke passes 512.
+7. **The no-write test (P7).** The `admin-state.json` snapshot is taken after the first `pin()` read in the test. The test asserts that the preview, and a refused write, add nothing after that point.
