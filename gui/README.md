@@ -13,6 +13,7 @@ The header has a language switch, `한국어 | English`. It re-renders the page 
 ![The observation tab](../docs/images/gui-observe.png)
 ![The admin tab: organisation pin and templates](../docs/images/gui-admin-templates.png)
 ![The Approve template with an approver key loaded](../docs/images/gui-admin-approve.png)
+![The Manage approvers template: TRUST ROOT and POLICY CHECK](../docs/images/gui-admin-approvers.png)
 
 Screenshots are made with `node scripts/screenshots.ts` (see the header of that script; the admin shots need the demo organisation's pin installed at `/etc/mago-ski`). Native dialogs are drawn by the OS and are not shown.
 
