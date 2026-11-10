@@ -354,7 +354,7 @@ export type AdminTimestampView =
   | { ok: true; configured: true; path: string; keyId: string | null; version: number | null; expiresAt: string | null; matches: boolean; maxLifetime: string; readable: boolean }
   | { ok: false; message: string };
 export type AdminRevocationTarget =
-  | { kind: 'key'; keyId: string; label: string; source: 'approver' | 'certificate' }
+  | { kind: 'key'; keyId: string; label: string }
   | { kind: 'digest'; digest: string; skillName: string; instanceId: string };
 export interface AdminVerifyAllView { skills: number; counts: Partial<Record<Verdict, number>>; trustOk: boolean; trustNote: string | null; needsTimestamp: boolean }
 export type AdminWriteResult =
@@ -1512,7 +1512,7 @@ These corrections win over P1–P7.
      - every current approver in the trust root (label: the approver's name);
      - digests reviewed by the armed key (V14);
      - a button, `admin.p2.btn.revokeOtherKey`: `다른 키 폐기…` / `Revoke another key…`.
-   - **The button** opens the public-key picker (W11's `pickPublicKey` seam, counted as a dialog). The target is then that public key's id, labelled `admin.p2.label.otherKey`: `{keyId} · 현재 승인자가 아님` / `{keyId} · not a current approver`.
+   - **The button** only chooses the other-key target. The public-key picker (W11's `pickPublicKey` seam, counted as a dialog) opens when Revoke is pressed, after the refusals (no key armed, wrong role, dialog open, bad reason or lifetime, key checks, root walk, trust root and list). The target is then that public key's id, labelled `admin.p2.label.otherKey`: `{keyId} · 현재 승인자가 아님` / `{keyId} · not a current approver`.
    - **The revoke dialog** for such a key adds one line, `admin.dialog.revoke.lineCerts`: `이 키를 쓰는 인증서: {n}개` / `Certificates naming this key: {n}`. It counts the certificates found by the consequence's discovery whose `approver_key_id` equals the key id.
    - **Refusals.** The picked key is refused as P3 says when it is the active root, recovery or timestamp key, or is already revoked.
    - **Withdrawn:** `admin.p2.label.certTarget` (P6).
