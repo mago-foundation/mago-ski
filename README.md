@@ -120,6 +120,10 @@ The admin tab shows the organisation pin and the fixed templates an approver or 
 
 In the Approve template the approver's key is loaded (IDENTITY) and INSPECT shows the exact version of a Skill before anything is signed.
 
+![The Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK](docs/images/gui-admin-approvers.png)
+
+In the Manage approvers template TRUST ROOT shows the trust root's approvers, expiry and lifetime controls, and POLICY CHECK shows every Skill's verdict under the host's own loader.
+
 ## Verdicts
 
 `VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead). See [docs/spec/verification.md](docs/spec/verification.md).

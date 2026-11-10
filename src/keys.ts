@@ -195,7 +195,13 @@ export function loadPrivateKeyBytes(pem: Buffer): PrivateKeyInfo {
 }
 
 export async function loadPublicKey(filePath: string): Promise<PublicKeyInfo> {
-  const pem = await readRegularFile(filePath, 'Public key', MAX_KEY_FILE_BYTES);
+  return loadPublicKeyBytes(await readRegularFile(filePath, 'Public key', MAX_KEY_FILE_BYTES));
+}
+
+/** Parses an Ed25519 SPKI PEM from bytes the caller already read (at most 64 KiB). */
+export function loadPublicKeyBytes(pem: Buffer): PublicKeyInfo {
+  if (pem.byteLength > MAX_KEY_FILE_BYTES)
+    throw new Error('Public key is too large');
   let publicKey: KeyObject;
 
   try {

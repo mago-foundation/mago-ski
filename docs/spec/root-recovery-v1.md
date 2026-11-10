@@ -258,7 +258,9 @@ Walking the full log keeps hosts without state correct, but hosts load trust doc
 2. Check rollback and forks against the host state. Otherwise `UNVERIFIABLE`.
 3. If the active root is revoked, every Skill is blocked: see [Revoked root](#revoked-root-blocked-in-every-mode). Nothing else is read.
 4. With `freshness`, check the timestamp against the files. Otherwise `UNVERIFIABLE`.
-5. Check the trust root and the revocation list as in v1, except that they must be signed by the **active root** instead of `root_fingerprint`. The trust root is also `UNVERIFIABLE` if any approver's key is in the active recovery set or is the active timestamp key.
+5. Check the trust root and the revocation list as in v1, except that they must be signed by the **active root** instead of `root_fingerprint`. The trust root is also `UNVERIFIABLE` if any approver's key is in the active recovery set, is the active timestamp key, or is a key that has held the root or timestamp role in the walked events (`trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`). Only events after `root_events_after` are walked, so only keys retired in them are known. Hosts do not refuse a former recovery key listed as an approver; the GUI and `root add-approver --policy` refuse it as a new approver. The gate trust store (`src/gate/trust-store.ts`) does not run this check.
+
+Before upgrading hosts, an organisation removes such approvers; see the upgrade note in the CHANGELOG.
 6. Record the new state.
 
 ### Revoked root: blocked in every mode
@@ -381,6 +383,9 @@ mago-ski root-events sign proposal.json --key r1.pem
 mago-ski root-events sign proposal.json --key a.pem
 mago-ski root-events sign proposal.json --key b.pem
 mago-ski root-events append proposal.json --policy policy.json
+
+# Keep a key that held another role out of the trust root: pass the policy
+mago-ski root add-approver --policy policy.json --root-key r1.pem --trust-root trust-root.json --public-key alice.pub --name Alice --scope '*' --expires 180d
 
 # After a rotate: re-sign the trust root and revocation list with the new root (approvers and entries are kept)
 mago-ski root adopt --root-key r1.pem --from-root-fingerprint sha256:<R0> \

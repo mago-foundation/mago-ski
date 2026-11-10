@@ -1,7 +1,7 @@
 // Sandboxed preload: exposes exactly the RendererApi, nothing from Node or Electron itself.
 import type { IpcRendererEvent } from 'electron';
 import type { Lang } from '../i18n/messages.ts';
-import type { AdminLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
+import type { AdminApproverLifetime, AdminLifetime, AdminTrustRootLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
 
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
 
@@ -33,6 +33,11 @@ const api: RendererApi = {
     check:            (id: string) => ipcRenderer.invoke('admin:check', id),
     resetMemory:      () => ipcRenderer.invoke('admin:reset-memory'),
     dismissMemoryReset: () => ipcRenderer.invoke('admin:dismiss-memory-reset'),
+    trustRoot:        () => ipcRenderer.invoke('admin:trust-root'),
+    addApprover:      (o: { name: string; scopes: string[]; lifetime: AdminApproverLifetime; trustRootLifetime?: AdminTrustRootLifetime }) => ipcRenderer.invoke('admin:add-approver', o),
+    removeApprover:   (o: { keyId: string; trustRootLifetime?: AdminTrustRootLifetime }) => ipcRenderer.invoke('admin:remove-approver', o),
+    renewTrustRoot:   (o: { lifetime: AdminTrustRootLifetime }) => ipcRenderer.invoke('admin:renew-trust-root', o),
+    verifyAll:        () => ipcRenderer.invoke('admin:verify-all'),
   },
 };
 

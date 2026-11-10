@@ -1,8 +1,9 @@
 // Organization-side commands for root recovery: build the recovery set, prepare, sign and append root events,
 // sign timestamps, and move the trust documents to a new root key after a rotation.
 // `append` runs the same walk a host runs, so a log that append accepts is a log hosts accept.
+import { DocumentChangedError, StaleDocumentError } from './admin.ts';
 import { readRegularFile, writeFileAtomic, writeNewFile } from './fs-safe.ts';
-import { loadPrivateKey, loadPublicKey, type PublicKeyInfo } from './keys.ts';
+import { loadPrivateKey, loadPublicKey, type PrivateKeyInfo, type PublicKeyInfo } from './keys.ts';
 import type { Policy } from './policy.ts';
 import { readRevocationsForUpdate, signRevocations } from './revocations.ts';
 import {
@@ -11,11 +12,12 @@ import {
   rootEventLogBytes, unsignedEventEnvelope, walkRootEvents, type MultiEnvelope, type RecoverySet, type RootEvent, type RootWalk,
 } from './root-events.ts';
 import { addDuration, formatTimestamp, parseDuration, truncateToSecond } from './time.ts';
-import { MAX_TIMESTAMP_BYTES, readTimestampForUpdate, signTimestamp, type Timestamp } from './timestamp.ts';
+import { MAX_TIMESTAMP_BYTES, parseTimestampPayload, readTimestampForUpdate, signTimestamp, type Timestamp } from './timestamp.ts';
 import { sha256Hex } from './tree-digest.ts';
 import { readTrustRootForUpdate, signTrustRoot, type TrustRoot } from './trust-root.ts';
 import { canonicalBytes, parseCanonicalJsonBytes } from './canonical-json.ts';
 import { parseEnvelope } from './dsse.ts';
+import { loadTrustContext } from './verify.ts';
 
 const MAX_PROPOSAL_BYTES = 256 * 1024;
 
@@ -227,6 +229,199 @@ export async function appendRootEvent(options: { policy: Policy; proposalPath: s
   return { path: written, walk, event };
 }
 
+export interface PreparedTimestamp {
+  kind:       'timestamp';
+  path:       string;
+  /** `sha256:<hex>` of the timestamp file as read; null when it did not exist. */
+  baseSha256: string | null;
+  keyId:      string;
+  /** Exactly what commit signs. */
+  payload:    Timestamp;
+  /** The documents the payload names, `sha256:<hex>` as read at prepare. */
+  documents: {
+    rootEvents:  { path: string; sha256: string; count: number };
+    trustRoot:   { path: string; sha256: string; version: number };
+    revocations: { path: string; sha256: string; version: number };
+  };
+  /** An existing timestamp signed by another key (a rotated timestamp key), when it could be parsed. */
+  previousByOtherKey: { keyId: string; version: number } | null;
+}
+
+/** The existing timestamp could not be read and no version was given (GUI path). The GUI maps it by class. */
+export class TimestampUnreadableError extends Error {
+  constructor(reason: string) {
+    super(`The current timestamp cannot be read (${reason})`);
+    this.name = 'TimestampUnreadableError';
+  }
+}
+
+const prefixed = (hex: string): string => `sha256:${hex}`;
+
+/**
+ * Builds the policy's next timestamp without signing or writing: the digests of the root event log, trust root and
+ * revocation list as read now, with the next version. With `minimumVersions` (the GUI), the trust root and revocation
+ * list must not be older than the minimums, must load under the active root with expiry checked, and the version is
+ * `max(own version if signed by this key, minimums.timestamp) + 1`. Without it (the CLI), the rules of old.
+ * `walk`, when given, must be the walk of the log as it is now (the GUI passes its memory-checked one).
+ */
+export async function prepareTimestamp(o: {
+  policy:   Policy;
+  key:      PublicKeyInfo;
+  now:      Date;
+  expires?: string | undefined;
+  version?: number | undefined;
+  minimumVersions?: { trustRoot: number; revocations: number; timestamp: number } | undefined;
+  walk?:    RootWalk | undefined;
+}): Promise<PreparedTimestamp> {
+  const recovery  = requireRecovery(o.policy);
+  const freshness = recovery.freshness;
+  if (!freshness)
+    throw new Error(`Policy ${o.policy.path} has no "freshness" block`);
+  const logBytes = await readLog(o.policy);
+  let walk: RootWalk;
+  if (o.walk) {
+    if (o.walk.logSha256 !== sha256Hex(logBytes))
+      throw new DocumentChangedError('Root event log');
+    walk = o.walk;
+  } else {
+    try {
+      walk = walkFromPolicy(o.policy, logBytes, o.now);
+    } catch (error) {
+      throw new Error(`root event log: ${(error as Error).message}`);
+    }
+  }
+  const keyId = o.key.keyId;
+  if (keyId !== walk.timestampKeyId)
+    throw new Error(`Key ${keyId} is not the active timestamp key ${walk.timestampKeyId}`);
+
+  const trustRootBytes   = await readRegularFile(o.policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
+  const revocationsBytes = await readRegularFile(o.policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
+  // Only documents hosts would accept from the active root are timestamped.
+  const trustRoot   = readTrustRootForUpdate(trustRootBytes, walk.activeRootKeyId);
+  const revocations = readRevocationsForUpdate(revocationsBytes, walk.activeRootKeyId, trustRoot.root.publicKey);
+  const minimums = o.minimumVersions;
+  if (minimums) {
+    if (trustRoot.version < minimums.trustRoot)
+      throw new StaleDocumentError('Trust root', trustRoot.version, minimums.trustRoot);
+    if (revocations.version < minimums.revocations)
+      throw new StaleDocumentError('Revocation list', revocations.version, minimums.revocations);
+    const loaded = loadTrustContext({ trustRootBytes, revocationsBytes, rootKeyId: walk.activeRootKeyId, now: o.now });
+    if (!loaded.ok)
+      throw new Error(loaded.reason);
+  }
+
+  // Versions are per timestamp key: a missing timestamp, or one by an earlier timestamp key, starts at 1.
+  let ownVersion = 0;
+  let previousBytes: Buffer | null = null;
+  let previousByOtherKey: PreparedTimestamp['previousByOtherKey'] = null;
+  try {
+    previousBytes = await readRegularFile(freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      if (!minimums) throw error;
+      throw new TimestampUnreadableError((error as Error).message);
+    }
+  }
+  if (previousBytes) {
+    try {
+      ownVersion = readTimestampForUpdate(previousBytes, keyId).version;
+    } catch (error) {
+      let byOtherKey = false;
+      try {
+        const envelope = parseEnvelope(previousBytes, 'timestamp');
+        byOtherKey = envelope.signatures[0].keyid !== keyId;
+        if (byOtherKey) {
+          try {
+            previousByOtherKey = { keyId: envelope.signatures[0].keyid, version: parseTimestampPayload(envelope.payloadBytes).version };
+          } catch {
+            previousByOtherKey = null;
+          }
+        }
+      } catch {
+        byOtherKey = false;
+      }
+      if (!byOtherKey && o.version === undefined) {
+        if (minimums) throw new TimestampUnreadableError((error as Error).message);
+        throw new Error(`The current timestamp cannot be read (${(error as Error).message}); pass --version with a number above the last one published`);
+      }
+    }
+  }
+  let version = ownVersion + 1;
+  if (minimums)
+    version = Math.max(ownVersion, minimums.timestamp) + 1;
+  if (o.version !== undefined) {
+    if (!Number.isSafeInteger(o.version) || o.version < 1)
+      throw new Error('--version must be a positive integer');
+    if (o.version < version)
+      throw new Error(`--version ${o.version} is lower than the next version ${version}`);
+    version = o.version;
+  }
+
+  const issuedAt  = truncateToSecond(o.now);
+  const lifetime  = o.expires ?? '24h';
+  if (parseDuration(lifetime, 'timestamp lifetime') > freshness.maxLifetimeMs)
+    throw new Error('The timestamp lifetime is longer than the policy\'s freshness max_lifetime');
+  const rootEventsHex = sha256Hex(logBytes);
+  const payload: Timestamp = {
+    version,
+    issuedAt,
+    expiresAt:   addDuration(issuedAt, lifetime, 'timestamp lifetime'),
+    key:         o.key,
+    rootEvents:  { sha256: rootEventsHex, count: walk.count },
+    trustRoot:   { sha256: sha256Hex(trustRootBytes), version: trustRoot.version },
+    revocations: { sha256: sha256Hex(revocationsBytes), version: revocations.version },
+  };
+  return {
+    kind: 'timestamp',
+    path: freshness.timestampPath,
+    baseSha256: previousBytes ? prefixed(sha256Hex(previousBytes)) : null,
+    keyId,
+    payload,
+    documents: {
+      rootEvents:  { path: recovery.rootEventsPath, sha256: prefixed(rootEventsHex), count: walk.count },
+      trustRoot:   { path: o.policy.trustRootPath, sha256: prefixed(payload.trustRoot.sha256), version: trustRoot.version },
+      revocations: { path: o.policy.revocationsPath, sha256: prefixed(payload.revocations.sha256), version: revocations.version },
+    },
+    previousByOtherKey,
+  };
+}
+
+export function signPreparedTimestamp(p: PreparedTimestamp, key: PrivateKeyInfo): Buffer {
+  return signTimestamp(p.payload, key.privateKey);
+}
+
+async function hashOrNull(filePath: string, label: string, maxBytes: number): Promise<string | null> {
+  try {
+    return prefixed(sha256Hex(await readRegularFile(filePath, label, maxBytes)));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Re-hashes the three named documents and the timestamp file, signs `p.payload` unchanged, and writes it. */
+export async function commitTimestamp(
+  p: PreparedTimestamp,
+  key: PrivateKeyInfo,
+  o: { beforeWrite?: () => void | Promise<void> } = {},
+): Promise<{ path: string; timestamp: Timestamp }> {
+  if (key.keyId !== p.keyId)
+    throw new Error(`Key ${key.keyId} is not the prepared timestamp key ${p.keyId}`);
+  const checks: Array<[string, string, number, string | null]> = [
+    ['Root event log', p.documents.rootEvents.path, MAX_ROOT_EVENTS_BYTES, p.documents.rootEvents.sha256],
+    ['Trust root', p.documents.trustRoot.path, 4 * 1024 * 1024, p.documents.trustRoot.sha256],
+    ['Revocation list', p.documents.revocations.path, 8 * 1024 * 1024, p.documents.revocations.sha256],
+    ['Timestamp', p.path, MAX_TIMESTAMP_BYTES, p.baseSha256],
+  ];
+  for (const [label, file, max, expected] of checks)
+    if ((await hashOrNull(file, label, max)) !== expected)
+      throw new DocumentChangedError(label);
+  const bytes = signPreparedTimestamp(p, key);
+  await o.beforeWrite?.();
+  const written = await writeFileAtomic(p.path, bytes, 0o644, { expectSha256: p.baseSha256 });
+  return { path: written, timestamp: p.payload };
+}
+
 /**
  * Signs the policy's timestamp: the digests of the root event log, trust root and revocation list as published now,
  * with the next version. Run by the timestamp job, with the active timestamp key.
@@ -238,72 +433,9 @@ export async function signPolicyTimestamp(options: {
   expires?: string | undefined;
   version?: number | undefined;
 }): Promise<{ path: string; timestamp: Timestamp }> {
-  const recovery  = requireRecovery(options.policy);
-  const freshness = recovery.freshness;
-  if (!freshness)
-    throw new Error(`Policy ${options.policy.path} has no "freshness" block`);
-  const logBytes = await readLog(options.policy);
-  let walk: RootWalk;
-  try {
-    walk = walkFromPolicy(options.policy, logBytes, options.now);
-  } catch (error) {
-    throw new Error(`root event log: ${(error as Error).message}`);
-  }
-  const key = await loadPrivateKey(options.keyPath);
-  if (key.keyId !== walk.timestampKeyId)
-    throw new Error(`Key ${key.keyId} is not the active timestamp key ${walk.timestampKeyId}`);
-
-  const trustRootBytes   = await readRegularFile(options.policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
-  const revocationsBytes = await readRegularFile(options.policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
-  // Only documents hosts would accept from the active root are timestamped.
-  const trustRoot   = readTrustRootForUpdate(trustRootBytes, walk.activeRootKeyId);
-  const revocations = readRevocationsForUpdate(revocationsBytes, walk.activeRootKeyId, trustRoot.root.publicKey);
-
-  // Versions are per timestamp key: a missing timestamp, or one by an earlier timestamp key, starts at 1.
-  let version = 1;
-  let previousBytes: Buffer | null = null;
-  try {
-    previousBytes = await readRegularFile(freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
-  }
-  if (previousBytes) {
-    try {
-      version = readTimestampForUpdate(previousBytes, key.keyId).version + 1;
-    } catch (error) {
-      let byOtherKey = false;
-      try {
-        byOtherKey = parseEnvelope(previousBytes, 'timestamp').signatures[0].keyid !== key.keyId;
-      } catch {
-        byOtherKey = false;
-      }
-      if (!byOtherKey && options.version === undefined)
-        throw new Error(`The current timestamp cannot be read (${(error as Error).message}); pass --version with a number above the last one published`);
-    }
-  }
-  if (options.version !== undefined) {
-    if (!Number.isSafeInteger(options.version) || options.version < 1)
-      throw new Error('--version must be a positive integer');
-    if (options.version < version)
-      throw new Error(`--version ${options.version} is lower than the next version ${version}`);
-    version = options.version;
-  }
-
-  const issuedAt  = truncateToSecond(options.now);
-  const lifetime  = options.expires ?? '24h';
-  if (parseDuration(lifetime, 'timestamp lifetime') > freshness.maxLifetimeMs)
-    throw new Error('The timestamp lifetime is longer than the policy\'s freshness max_lifetime');
-  const timestamp: Timestamp = {
-    version,
-    issuedAt,
-    expiresAt:   addDuration(issuedAt, lifetime, 'timestamp lifetime'),
-    key,
-    rootEvents:  { sha256: sha256Hex(logBytes), count: walk.count },
-    trustRoot:   { sha256: sha256Hex(trustRootBytes), version: trustRoot.version },
-    revocations: { sha256: sha256Hex(revocationsBytes), version: revocations.version },
-  };
-  const written = await writeFileAtomic(freshness.timestampPath, signTimestamp(timestamp, key.privateKey));
-  return { path: written, timestamp };
+  const key      = await loadPrivateKey(options.keyPath);
+  const prepared = await prepareTimestamp({ policy: options.policy, key, now: options.now, expires: options.expires, version: options.version });
+  return await commitTimestamp(prepared, key);
 }
 
 /**

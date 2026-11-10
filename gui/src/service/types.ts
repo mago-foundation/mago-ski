@@ -264,20 +264,89 @@ export interface AdminReviewSummary {
   files:     number;
 }
 
-/** What the signing dialog (native, main process) shows. */
-export interface AdminSignSummary {
-  action:         'approve';
-  skillName:      string;
-  skillPath:      string;
-  reviewedDigest: string;
-  digest:         string;
-  lifetime:       AdminLifetime;
-  expiresAt:      string;
-  reason:         string;
-  role:           AdminRole;
-  keyName:        string | null;
-  keyId:          string;
+export type AdminApproverLifetime  = '90d' | '180d' | '365d';
+export type AdminTrustRootLifetime = '180d' | '365d';
+export type AdminListLifetime      = '7d' | '30d';
+export type AdminTimestampLifetime = '6h' | '12h' | '24h';
+
+/** A verdict as a consequence line shows it: `BLOCKED_UNTIL_TIMESTAMP` only on the `to` side of a freshness organisation. */
+export type AdminVerdictTo = Verdict | 'BLOCKED_UNTIL_TIMESTAMP';
+
+/** What a root or timestamp write does to the Skills this computer can see, computed with the hosts' own loader. */
+export interface AdminConsequence {
+  /** Skills in every configured folder (a folder too deep to search counts as one). */
+  skills:         number;
+  /** Skills whose verdict changes: `from !== after`. */
+  changed:        number;
+  /** At most 5 changed Skills, sorted by name. `to` is the verdict hosts would give right after signing. */
+  lines:          Array<{ name: string; from: Verdict; to: AdminVerdictTo; after: Verdict }>;
+  /** Folders too deep to check. */
+  tooDeep:        number;
+  freshnessBlock: boolean;
+  /** Why the current documents do not verify (then there are no lines), or null. */
+  fromFailed:     string | null;
+  /** Why the documents after signing would not verify for a reason a timestamp does not fix, or null. */
+  toFailed:       string | null;
+  /** Verdict counts of the Skills after signing (used by the timestamp dialog). */
+  afterCounts:    Partial<Record<Verdict, number>>;
 }
+
+interface AdminSignCommon {
+  role:     AdminRole;
+  keyName:  string | null;
+  keyId:    string;
+  document: { path: string; baseSha256: string | null; versionFrom: number | null; versionTo: number; expiresAt: string };
+  consequence:    AdminConsequence;
+  freshnessBlock: boolean;
+  /** The first root or timestamp signature since this computer's memory was reset. */
+  afterReset:     boolean;
+}
+
+/** What the signing dialog (native, main process) shows. */
+export type AdminSignSummary =
+  | {
+      action:         'approve';
+      skillName:      string;
+      skillPath:      string;
+      reviewedDigest: string;
+      digest:         string;
+      lifetime:       AdminLifetime;
+      expiresAt:      string;
+      reason:         string;
+      role:           AdminRole;
+      keyName:        string | null;
+      keyId:          string;
+    }
+  | (AdminSignCommon & { action: 'add-approver'; newKeyId: string; name: string; scopes: string[]; approverExpiresAt: string;
+      replaces: { name: string; scopes: string[]; expiresAt: string } | null })
+  | (AdminSignCommon & { action: 'remove-approver'; removedKeyId: string; name: string; lastApprover: boolean })
+  | (AdminSignCommon & { action: 'renew-trust-root'; expiresFrom: string })
+  | (AdminSignCommon & { action: 'revoke-key'; targetKeyId: string; label: string; reason: string })
+  | (AdminSignCommon & { action: 'revoke-digest'; digest: string; skillName: string; reason: string })
+  | (AdminSignCommon & { action: 'refresh-revocations'; expiresFrom: string })
+  | (AdminSignCommon & { action: 'sign-timestamp';
+      documents: Record<'rootEvents' | 'trustRoot' | 'revocations', { sha256: string; counter: number; firstSeen: boolean }>;
+      previousByOtherKey: { keyId: string; version: number } | null });
+
+export interface AdminApproverView { keyId: string; name: string; scopes: string[]; expiresAt: string; expired: boolean; forbidden: string | null }
+
+export type AdminTrustRootView =
+  | { ok: true; path: string; sha256: string; version: number; expiresAt: string; expired: boolean; approvers: AdminApproverView[];
+      stale: boolean; signedByPreviousRoot: boolean; note: string | null }
+  | { ok: false; message: string; signedByPreviousRoot: boolean };
+
+export interface AdminVerifyAllView {
+  skills:            number;
+  counts:            Partial<Record<Verdict, number>>;
+  trustOk:           boolean;
+  trustNote:         string | null;
+  /** The pin has `freshness` and the timestamp on disk does not name the documents now on disk. */
+  timestampMismatch: boolean;
+}
+
+export type AdminWriteResult =
+  | { ok: true; version: number; path: string; needsTimestamp: boolean; memoryWarning: boolean }
+  | { ok: false; message: string };
 
 export type AdminArmResult =
   | { ok: true; role: AdminRoleView }
@@ -345,5 +414,11 @@ export interface RendererApi {
     /** Opens a native confirmation, then moves this computer's admin memory aside. */
     resetMemory():                                                     Promise<AdminResetResult>;
     dismissMemoryReset():                                              Promise<AdminStatusView>;
+    trustRoot():                                                       Promise<AdminTrustRootView>;
+    /** Opens the public-key picker and the native signing dialog in the main process. */
+    addApprover(o: { name: string; scopes: string[]; lifetime: AdminApproverLifetime; trustRootLifetime?: AdminTrustRootLifetime }): Promise<AdminWriteResult>;
+    removeApprover(o: { keyId: string; trustRootLifetime?: AdminTrustRootLifetime }): Promise<AdminWriteResult>;
+    renewTrustRoot(o: { lifetime: AdminTrustRootLifetime }):           Promise<AdminWriteResult>;
+    verifyAll():                                                       Promise<AdminVerifyAllView>;
   };
 }

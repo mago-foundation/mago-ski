@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsConstants, type BigIntStats } from 'node:fs';
 import { lstat, open, realpath, rename, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -161,11 +161,40 @@ export async function writeNewFile(
   return target;
 }
 
-/** Writes via a temporary sibling and rename, so readers see the old or the new file, never a partial one. */
+/** The file a write was meant to replace was no longer the one that was read (see `writeFileAtomic`'s `expectSha256`). */
+export class FileChangedError extends Error {
+  constructor(message = 'File changed before it could be replaced') {
+    super(message);
+    this.name = 'FileChangedError';
+  }
+}
+
+/** `sha256:<hex>` of the regular file at `target`, or `null` when it does not exist. Anything else throws. */
+async function currentSha256(target: string): Promise<string | null> {
+  let bytes: Buffer;
+  try {
+    bytes = await readRegularFile(target, 'Document', Number.MAX_SAFE_INTEGER);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT')
+      return null;
+    throw new FileChangedError();
+  }
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+/**
+ * Writes via a temporary sibling and rename, so readers see the old or the new file, never a partial one.
+ *
+ * `options.expectSha256`: `undefined` checks nothing. A `sha256:<hex>` string requires the existing path to be a regular
+ * file with that SHA-256, `null` requires the path not to exist. The check runs after the temporary file is written and
+ * immediately before the rename; a mismatch removes the temporary file and throws `FileChangedError`. A process that can
+ * write the folder can still swap the file between that check and the rename.
+ */
 export async function writeFileAtomic(
   filePath: string,
   bytes: Uint8Array,
   mode = DEFAULT_FILE_MODE,
+  options: { expectSha256?: string | null } = {},
 ): Promise<string> {
   const target    = path.resolve(filePath);
   const randomHex = randomBytes(TEMP_RANDOM_BYTES).toString('hex');
@@ -185,6 +214,8 @@ export async function writeFileAtomic(
 
   await writeHandle(temporary, bytes, mode, flags);
   try {
+    if (options.expectSha256 !== undefined && (await currentSha256(target)) !== options.expectSha256)
+      throw new FileChangedError();
     await rename(temporary, target);
   } catch (error) {
     await unlink(temporary).catch(() => {});

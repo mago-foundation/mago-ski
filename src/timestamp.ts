@@ -17,6 +17,8 @@ const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 /** The timestamp is older than one this host has already seen; callers match on the class, not the message. */
 export class TimestampRollbackError extends Error {}
+/** The timestamp names other document digests than the files the host read. */
+export class TimestampBindingError extends Error {}
 
 export interface Timestamp {
   version:     number;
@@ -132,10 +134,10 @@ export function verifyTimestamp(bytes: Uint8Array, options: {
     throw new TimestampRollbackError(`timestamp version ${timestamp.version} is older than version ${options.minimumVersion} already seen (rollback)`);
   const { inputs } = options;
   if (timestamp.rootEvents.sha256 !== inputs.rootEvents.sha256 || timestamp.rootEvents.count !== inputs.rootEvents.count)
-    throw new Error('the root event log does not match the timestamp');
+    throw new TimestampBindingError('the root event log does not match the timestamp');
   if (timestamp.trustRoot.sha256 !== inputs.trustRoot.sha256)
-    throw new Error('the trust root does not match the timestamp');
+    throw new TimestampBindingError('the trust root does not match the timestamp');
   if (timestamp.revocations.sha256 !== inputs.revocations.sha256)
-    throw new Error('the revocation list does not match the timestamp');
+    throw new TimestampBindingError('the revocation list does not match the timestamp');
   return timestamp;
 }

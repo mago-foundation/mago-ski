@@ -1,14 +1,17 @@
 import { lstat, opendir, stat } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import path from 'node:path';
+import { StaleDocumentError } from './admin.ts';
 import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
-import { appendToRegularFile, isInside, readRegularFile, realpathAllowingMissing, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
+import { FileChangedError, appendToRegularFile, isInside, readRegularFile, realpathAllowingMissing, resolveInsideDirectory, writeFileAtomic } from './fs-safe.ts';
 import { validateKeyId } from './keys.ts';
+import { readRevocationsForUpdate } from './revocations.ts';
+import { readTrustRootForUpdate } from './trust-root.ts';
 import {
   MAX_ROOT_EVENTS_BYTES, parseRecoverySet, walkRootEventsCached, type RecoverySet, type RootWalk,
 } from './root-events.ts';
 import { formatTimestamp, parseDuration } from './time.ts';
-import { DEFAULT_MAX_TIMESTAMP_LIFETIME, MAX_TIMESTAMP_BYTES, MAX_TIMESTAMP_LIFETIME_MS, TimestampRollbackError, verifyTimestamp } from './timestamp.ts';
+import { DEFAULT_MAX_TIMESTAMP_LIFETIME, MAX_TIMESTAMP_BYTES, MAX_TIMESTAMP_LIFETIME_MS, TimestampBindingError, TimestampRollbackError, verifyTimestamp } from './timestamp.ts';
 import { CERTIFICATE_FILENAME, sha256Hex } from './tree-digest.ts';
 import {
   loadTrustContext, unverifiable, verifySkill, type CertificateSource, type MinimumVersions,
@@ -250,6 +253,11 @@ export class HostStateFormatError extends Error {
 
 const FORMAT_READ_ERROR = /(must be a regular, non-symlink file|exceeds the \d+-byte limit)$/;
 
+/** The host state file as it is now (a missing file is an empty state). The GUI memory uses this format too. */
+export async function readHostState(statePath: string): Promise<HostState> {
+  return await readState(statePath);
+}
+
 async function readState(statePath: string): Promise<HostState> {
   let bytes: Buffer;
   try {
@@ -422,8 +430,11 @@ function applyProgress(state: HostState, pinned: string, progress: RootProgress)
 }
 
 /**
- * Merges `state` with the state file as it is now and writes the result. An unreadable file is replaced by this
- * load's state, as before. Returns the merged state, or the reason the write failed.
+ * Merges `state` with the state file as it is now and writes the result, as a compare-and-swap: the raw bytes are read
+ * once, the merge is written only if the file still has those bytes, and a change in between (another process) means
+ * re-read, merge and retry, up to 5 times with 10 to 80 ms jittered waits. A counter is never lowered within that
+ * budget; when it runs out the write fails closed. A file that cannot be read or parsed fails the write.
+ * Returns the merged state, or the reason the write failed.
  */
 const persistChains = new Map<string, Promise<unknown>>();
 
@@ -440,27 +451,114 @@ async function persistState(statePath: string, state: HostState): Promise<{ stat
   }
 }
 
+const PERSIST_ATTEMPTS = 5;
+
 async function persistStateNow(statePath: string, state: HostState): Promise<{ state: HostState } | { error: string }> {
   try {
-    let disk: HostState | null = null;
-    try {
-      disk = await readState(statePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+    for (let attempt = 0; attempt < PERSIST_ATTEMPTS; attempt += 1) {
+      let raw: Buffer | null = null;
+      try {
+        raw = await readRegularFile(statePath, 'Host state file', 1024 * 1024);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+      const disk   = raw === null ? null : parseState(raw);
+      const merged = disk ? mergeHostState(state, disk) : state;
+      try {
+        await writeFileAtomic(statePath, stateBytes(merged), 0o600, { expectSha256: raw === null ? null : `sha256:${sha256Hex(raw)}` });
+        return { state: merged };
+      } catch (error) {
+        if (!(error instanceof FileChangedError)) throw error;
+      }
+      if (attempt < PERSIST_ATTEMPTS - 1)
+        await new Promise((resolve) => setTimeout(resolve, 10 + Math.random() * 70));
     }
-    const merged = disk ? mergeHostState(state, disk) : state;
-    await writeFileAtomic(statePath, stateBytes(merged), 0o600);
-    return { state: merged };
+    throw new Error('the file kept changing');
   } catch (error) {
     return { error: `cannot record trust versions in ${statePath}: ${(error as Error).message}` };
   }
+}
+
+/**
+ * Records document versions in a host state file (the GUI memory), merging with what is on disk: every counter keeps
+ * its highest value, so this never lowers anything within the retry budget of `persistState` (it fails closed otherwise). A root entry takes each given half and `1` (the lowest valid
+ * value) for a missing one. Throws when the file cannot be read or written.
+ */
+export async function recordDocumentVersions(
+  statePath: string,
+  v: { rootKeyId?: string; trustRoot?: number; revocations?: number; timestamp?: { keyId: string; version: number } },
+): Promise<void> {
+  if ((v.trustRoot !== undefined || v.revocations !== undefined) && v.rootKeyId === undefined)
+    throw new Error('rootKeyId is required to record a trust root or revocation list version');
+  await readState(statePath);
+  const ours: HostState = { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
+  if (v.rootKeyId !== undefined && (v.trustRoot !== undefined || v.revocations !== undefined))
+    ours.roots[v.rootKeyId] = { trust_root_version: v.trustRoot ?? 1, revocations_version: v.revocations ?? 1 };
+  if (v.timestamp) {
+    ours.timestamps[v.timestamp.keyId] = { version: v.timestamp.version };
+    ours.v2 = true;
+  }
+  const saved = await persistState(statePath, ours);
+  if ('error' in saved) throw new Error(saved.error);
+}
+
+/** The lowest versions this computer's memory allows for each document; 0 where nothing is recorded. */
+export function memoryMinimums(state: HostState, rootKeyId: string, timestampKeyId: string | null): { trustRoot: number; revocations: number; timestamp: number } {
+  const root = state.roots[rootKeyId];
+  return {
+    trustRoot:   root?.trust_root_version ?? 0,
+    revocations: root?.revocations_version ?? 0,
+    timestamp:   timestampKeyId === null ? 0 : (state.timestamps[timestampKeyId]?.version ?? 0),
+  };
+}
+
+export interface ForbiddenKey { keyId: string; why: 'root' | 'recovery' | 'timestamp' | 'retired' | 'formerRecovery' | 'revoked' }
+
+/**
+ * Keys that must not be approvers in this organisation: the root, the recovery set, the timestamp key, keys that left
+ * the root or timestamp role, keys that left a recovery set, and every revoked key. Neither reads nor writes host state.
+ * Throws when the root event log or the revocation list cannot be checked, and `StaleDocumentError` when the revocation
+ * list is older than `minimumRevocations` (the caller's memory; the CLI passes none).
+ */
+export async function forbiddenApproverKeys(policy: Policy, now: Date, o: { minimumRevocations?: number } = {}): Promise<ForbiddenKey[]> {
+  const rootResult = await loadPolicyRoot(policy, now, { recordVersions: false });
+  if (!rootResult.ok)
+    throw new Error(`Cannot check the root event log, so no approver is added: ${rootResult.reason}`);
+  const found = new Map<string, ForbiddenKey['why']>();
+  const add = (keyId: string | null | undefined, why: ForbiddenKey['why']) => {
+    if (keyId && !found.has(keyId)) found.set(keyId, why);
+  };
+  const { walk, activeRootKeyId } = rootResult;
+  add(activeRootKeyId, 'root');
+  add(policy.rootKeyId, 'retired');
+  if (walk) {
+    for (const keyId of walk.recovery.keyIds) add(keyId, 'recovery');
+    add(walk.timestampKeyId, 'timestamp');
+    for (const keyId of walk.retired) add(keyId, 'retired');
+    for (const keyId of walk.formerRecovery) add(keyId, 'formerRecovery');
+  } else if (policy.recovery) {
+    for (const keyId of policy.recovery.set.keyIds) add(keyId, 'recovery');
+    add(policy.recovery.freshness?.keyId, 'timestamp');
+  }
+  let stale: StaleDocumentError | null = null;
+  try {
+    const trust = readTrustRootForUpdate(await readRegularFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024), activeRootKeyId);
+    const list  = readRevocationsForUpdate(await readRegularFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024), activeRootKeyId, trust.root.publicKey);
+    if (o.minimumRevocations !== undefined && list.version < o.minimumRevocations)
+      stale = new StaleDocumentError('Revocation list', list.version, o.minimumRevocations);
+    for (const entry of list.keys) add(entry.keyId, 'revoked');
+  } catch (error) {
+    throw new Error(`Cannot read the revocation list, so no approver is added: ${(error as Error).message}`);
+  }
+  if (stale) throw stale;
+  return [...found].map(([keyId, why]) => ({ keyId, why }));
 }
 
 const stateErrorKind = (error: unknown): 'corrupt' | 'unreadable' => error instanceof HostStateFormatError ? 'corrupt' : 'unreadable';
 
 export type StateErrorKind = 'corrupt' | 'unreadable' | 'write';
 
-type FailureExtra = { rootRevoked?: boolean; rollback?: true; stateError?: StateErrorKind };
+type FailureExtra = { rootRevoked?: boolean; rollback?: true; stateError?: StateErrorKind; bindingMismatch?: true };
 
 const failure = (reason: string, extra: FailureExtra = {}): TrustContextResult =>
   ({ ok: false, verdict: 'UNVERIFIABLE', reason, ...extra });
@@ -512,7 +610,29 @@ export async function loadPolicyRoot(policy: Policy, now: Date, options: { recor
  * list against the active root, then record the new state.
  */
 export async function loadPolicyTrust(policy: Policy, now: Date, options: { recordVersions?: boolean } = {}): Promise<TrustContextResult> {
-  const record = options.recordVersions !== false && policy.statePath !== null;
+  return await loadTrustBody(policy, now, { record: options.recordVersions !== false });
+}
+
+/** Documents a preview substitutes for the files on disk (the GUI's "what would hosts say after this write"). */
+export interface PreviewOverride { trustRoot?: Buffer; revocations?: Buffer; timestamp?: Buffer }
+
+/**
+ * The host's own trust load, for a preview: never records versions, may replace the documents read from disk with
+ * in-memory bytes (`override`, subject to the same size limits), and with `skipFreshness` skips reading and checking
+ * the timestamp and its binding to the documents (`context.root.timestamp` is then null). Only the GUI service uses it.
+ */
+export async function loadTrustForPreview(policy: Policy, now: Date, o: { override?: PreviewOverride; skipFreshness?: boolean } = {}): Promise<TrustContextResult> {
+  return await loadTrustBody(policy, now, { record: false, ...(o.override ? { override: o.override } : {}), ...(o.skipFreshness ? { skipFreshness: true } : {}) });
+}
+
+function overridden(bytes: Buffer, label: string, maxBytes: number): Buffer {
+  if (bytes.byteLength > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
+  return bytes;
+}
+
+async function loadTrustBody(policy: Policy, now: Date, o: { record: boolean; override?: PreviewOverride; skipFreshness?: boolean }): Promise<TrustContextResult> {
+  const record = o.record && policy.statePath !== null;
+  const freshness = o.skipFreshness ? undefined : policy.recovery?.freshness;
   let state: HostState = { roots: {}, rootEvents: {}, timestamps: {}, v2: false };
   try {
     if (policy.statePath) state = await readState(policy.statePath);
@@ -563,22 +683,22 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
   let revocationsBytes: Buffer;
   let timestampBytes: Buffer | null = null;
   try {
-    trustRootBytes   = await readTrustFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
-    revocationsBytes = await readTrustFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
-    if (recovery?.freshness) timestampBytes = await readTrustFile(recovery.freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
+    trustRootBytes   = o.override?.trustRoot ? overridden(o.override.trustRoot, 'Trust root', 4 * 1024 * 1024) : await readTrustFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
+    revocationsBytes = o.override?.revocations ? overridden(o.override.revocations, 'Revocation list', 8 * 1024 * 1024) : await readTrustFile(policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
+    if (freshness) timestampBytes = o.override?.timestamp ? overridden(o.override.timestamp, 'Timestamp', MAX_TIMESTAMP_BYTES) : await readTrustFile(freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES);
   } catch (error) {
     return await saveState() ?? failure((error as Error).message);
   }
 
   let timestamp: ReturnType<typeof verifyTimestamp> | null = null;
-  if (recovery?.freshness) {
+  if (freshness) {
     // Freshness is configured, so a missing input fails closed instead of skipping the check.
     if (!walk || !logBytes || !timestampBytes || walk.timestampKeyId === null)
       return await saveState() ?? failure('freshness: the timestamp could not be checked');
     const timestampKeyId = walk.timestampKeyId;
     try {
       timestamp = verifyTimestamp(timestampBytes, {
-        keyId: timestampKeyId, now, maxLifetimeMs: recovery.freshness.maxLifetimeMs,
+        keyId: timestampKeyId, now, maxLifetimeMs: freshness.maxLifetimeMs,
         minimumVersion: state.timestamps[timestampKeyId]?.version,
         inputs: {
           rootEvents:  { sha256: walk.logSha256, count: walk.count },
@@ -587,7 +707,7 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
         },
       });
     } catch (error) {
-      return await saveState() ?? failure(`freshness: ${(error as Error).message}`, error instanceof TimestampRollbackError ? { rollback: true } : {});
+      return await saveState() ?? failure(`freshness: ${(error as Error).message}`, error instanceof TimestampRollbackError ? { rollback: true } : error instanceof TimestampBindingError ? { bindingMismatch: true } : {});
     }
   }
 
@@ -602,9 +722,12 @@ export async function loadPolicyTrust(policy: Policy, now: Date, options: { reco
     const collision = trustRoot.approvers.find((approver) => walk.recovery.keyIds.includes(approver.keyId) || approver.keyId === walk.timestampKeyId);
     if (collision)
       return await saveState() ?? failure(`trust root lists approver ${collision.keyId}, which is a recovery or timestamp key; no key may hold two roles`);
+    const retiredApprover = trustRoot.approvers.find((approver) => walk.retired.includes(approver.keyId));
+    if (retiredApprover)
+      return await saveState() ?? failure(`trust root lists approver ${retiredApprover.keyId}, which has held the root or timestamp role; a key that left those roles never takes another`);
   }
   if (timestamp && (timestamp.trustRoot.version !== trustRoot.version || timestamp.revocations.version !== revocations.version))
-    return await saveState() ?? failure('freshness: the trust root or revocation list version does not match the timestamp');
+    return await saveState() ?? failure('freshness: the trust root or revocation list version does not match the timestamp', { bindingMismatch: true });
 
   const next = { trust_root_version: trustRoot.version, revocations_version: revocations.version };
   if (!seen || next.trust_root_version > seen.trust_root_version || next.revocations_version > seen.revocations_version) {

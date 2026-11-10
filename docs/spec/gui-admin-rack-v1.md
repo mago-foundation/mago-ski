@@ -1,6 +1,6 @@
 # GUI administration rack v1
 
-Status: **draft.** Phase 1, hardened in phase 1.1 ([design](../design/gui-admin-hardening.md)), (the organisation pin, identity, the template framework and the *Approve a Skill version* template) is implemented in the GUI proof of concept (`gui/src/service/admin.ts`, `gui/src/renderer/admin.ts`, tests in `gui/tests/admin.test.ts`). Phases 2 and 3 are specified here and not yet implemented. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
+Status: **draft.** Phase 1, hardened in phase 1.1 ([design](../design/gui-admin-hardening.md)), (the organisation pin, identity, the template framework and the *Approve a Skill version* template) and phase 2a ([design](../design/gui-admin-phase2.md): the engine for every root and timestamp write, and the *Manage approvers* template) are implemented in the GUI proof of concept (`gui/src/service/admin.ts`, `gui/src/renderer/admin.ts`, tests in `gui/tests/admin.test.ts`). Phase 2b (*Revoke*, *Refresh revocation list*, *Sign timestamp*) and phase 3 are specified here and not yet implemented. The CLI stays the reference for every operation: each device calls the same engine functions as the CLI command it names.
 
 The [GUI](../../gui/README.md) began as a read-only companion: it showed how installed Skills change and what the host policy decides, and never signed anything. This document adds an **administration rack**, so approvers and administrators can do in the GUI everything they can do with the CLI, in fixed chains of devices (templates), next to the observation rack.
 
@@ -87,7 +87,7 @@ Every administration template starts with an IDENTITY device. It is the only pla
 
 **Lifetime.** The lifetime check uses the approver's expiry as the status re-check has just refreshed it, not the expiry seen at arming. Key load errors are fixed text and never carry the file's path.
 
-**Root and recovery keys.** The root key's protection is that it stays offline. Templates that need a root or recovery key show, before arming: *use this on an offline administration machine.* They do not refuse an online machine, but an organisation should not load its root key on a machine used for everyday work.
+**Root and recovery keys.** The root key's protection is that it stays offline. Arming a root or recovery key asks, in a native dialog, whether this is the offline administration computer; answering no or closing it does not arm the key. The dialog is shown after proof of possession and the role check, and before the key is armed. It counts as a dialog for the one-dialog and cooldown rules. A computer cannot prove it is offline: the dialog is a prompt, and an organisation should not load its root key on a machine used for everyday work.
 
 ## Templates
 
@@ -106,9 +106,10 @@ Changing an input (another Skill, a new digest) resets every device after it.
 | Template | Chain | Role | CLI | Phase |
 |---|---|---|---|---|
 | **Approve a Skill version** | IDENTITY → INSPECT → APPROVE → POLICY CHECK | Approver | `digest --explain`, `diff`, `inspect`, `approve --expect-digest`, `verify` | 1 |
-| **Manage approvers** | IDENTITY → TRUST ROOT → POLICY CHECK | Root | `root show`, `root add-approver`, `root remove-approver`, `policy check` | 2 |
-| **Revoke** | IDENTITY → INSPECT → REVOKE → POLICY CHECK | Root | `inspect`, `revoke key`, `revoke digest`, `policy check` | 2 |
-| **Publish** | IDENTITY → REVOCATION REFRESH → TIMESTAMP → POLICY CHECK | Root, then timestamp signer | `revoke refresh`, `timestamp sign`, `policy check`, `verify-all` | 2 |
+| **Manage approvers** | IDENTITY → TRUST ROOT → POLICY CHECK | Root | `root show`, `root add-approver`, `root remove-approver`, `root renew`, `policy check` | 2a |
+| **Revoke** | IDENTITY → TARGET → REVOKE → POLICY CHECK | Root | `revoke key`, `revoke digest`, `policy check` | 2b |
+| **Refresh revocation list** | IDENTITY → REVOCATION REFRESH → POLICY CHECK | Root | `revoke refresh`, `policy check` | 2b |
+| **Sign timestamp** | IDENTITY → TIMESTAMP → POLICY CHECK | Timestamp signer | `timestamp sign`, `policy check`, `verify-all` | 2b |
 | **Set up an organisation** | KEYS → ROOT INIT → RECOVERY SET → POLICY CHECK | none (creates the keys) | `keygen`, `root init`, `recovery init`, `root-events init`, `policy check` | 3 |
 | **Root incident** | IDENTITY → ROOT EVENT → ADOPT → POLICY CHECK | Recovery trustees, then the new root | `root-events prepare-revoke`, `prepare-rotate`, `show`, `sign`, `append`, `root adopt`, `policy check` | 3 |
 
@@ -140,6 +141,37 @@ The digest, the name and the verdict are taken from one read of the Skill; if th
 
 **POLICY CHECK** verifies the Skill under the pin's policy, without recording versions, and shows the verdict. After a successful APPROVE it should be `VERIFIED`; anything else is shown with the engine's reason. It also shows the policy's trust status.
 
+## Manage approvers (phase 2a)
+
+Chain: IDENTITY → TRUST ROOT → POLICY CHECK. It needs the root role, which is also the role that may *review* (the review record format is the approve one: armed key, generation, instance). The online timestamp key is never armed in this session, which is why timestamps are their own template.
+
+**Prepare, confirm, commit.** Every root and timestamp write is two engine calls. `prepare*` reads the current document once, verifies it under the active root, applies the change and returns the exact unsigned payload (version, `issued_at`, `expires_at` included), the SHA-256 of the bytes it read and what the dialog needs; it never signs or writes. After the native dialog, `commit*` re-reads the document and refuses if its SHA-256 changed (*The document changed in the meantime. Prepare it again.*), signs exactly the prepared payload, awaits the generation and role re-check (`beforeWrite`), and writes with `writeFileAtomic(..., { expectSha256 })`, which hashes the current file immediately before the rename. The documents named in the dialog are bound at commit. The GUI also hashes the pin, trust root, revocation list, root event log and timestamp when it prepares and again in `beforeWrite`.
+
+**The remaining window.** A process that can write the document folder can still replace the file in the instant between the last hash check and the rename. Its write is then lost, or a later write replaces it. Hosts verify every document's signature and version, so the result is never an unsigned or older-than-memory document being accepted by this computer.
+
+**TRUST ROOT** shows the approvers (name, scopes, expiry, key id), the version and the expiry, read directly from the file under the active root (no expiry check, so an expired trust root can be renewed). It offers:
+
+- **Add**: the public key is chosen in a native open dialog (*Choose the approver's public key (PEM)*; it counts as a dialog), then name, scopes and a lifetime (90, 180 or 365 days, default 90). A key that is already an approver is *replaced*, and the dialog says so with the old and new name, scopes and expiry. A scope `*` adds *This scope lets the approver approve every Skill*.
+- **Remove**: removing the last approver asks a second native confirmation (*No approvers will remain...*).
+- **Renew**: re-signs the trust root with a new expiry (180 or 365 days, default 365) and the same approvers (`root renew` in the CLI).
+- **Trust root lifetime** for add and remove: *Keep* (the default while the trust root has not expired), 180 or 365 days. While the trust root has expired, *Keep* is not offered, no value is preselected, and Add and Remove stay disabled until a lifetime is picked (the engine refuses a request without one). The choice returns to *Keep* after every successful write.
+
+**Role separation.** The trust root may not list the root key, a recovery key, the timestamp key, a key that left the root or timestamp role in the walked root events, a key that left a recovery set in them, or a revoked key. The GUI computes this list (`forbiddenApproverKeys`) and refuses an add, a remove of another approver and a renew while such a key is listed; TRUST ROOT marks it (*<why>: this approver must be removed*) and offers only Remove for it. The CLI's `root add-approver --policy FILE` computes the same list; without `--policy` it behaves as before. When the root event log cannot be walked (rollback, fork, unreadable log, revoked root), every trust-root, revocation and timestamp write is refused before any dialog (*Cannot check the root event log, so the trust root is not changed* / *The root key is revoked...*).
+
+**Versions and memory.** `prepare*` refuses a document older than this computer's memory (*This document is older than one this computer has already seen...*); an equal version is the normal case. The new version is the document's version plus one. After a successful commit the GUI records the new version in its memory (`recordDocumentVersions`), even when the organisation's trust cannot fully load yet. A failure to record gives *The signature was made, but this computer's memory could not be updated.* The memory reset dialog says that root document writes then take the documents now on disk as their base, and the first root or timestamp signature after a reset adds *This is the first signature since this computer's memory was reset...* to its dialog.
+
+**Consequence.** Before signing, the dialog shows what the change does to the Skills this computer can see, computed the way hosts compute verdicts: one `loadPolicyTrust`-equivalent load of the current documents (*from*), one with the prepared document substituted in memory (*to*), and, when the pin has `freshness`, a third with the timestamp check skipped (the result once a new timestamp exists). The Skill set is every discovery root, the pin's `skill_dirs` and the host policy's `skill_dirs`, plus certificates from the pin's `certificate_dirs` and each Skill's own folder. The head reads *Skills affected: N (of M)*, followed by at most 5 lines `name: from → to` sorted by name and *and K more*. In an organisation with `freshness`, every Skill is blocked until a new timestamp: each line reads `name: from → blocked until a timestamp (after the timestamp: X)`, and the dialog adds *This organisation uses timestamps: hosts in enforce mode block every Skill until a new timestamp is signed.* When the current documents do not verify, the dialog shows *The current documents do not verify: <reason>* instead and Sign stays enabled. When the documents after the change would not verify for a reason a timestamp does not fix, the dialog is not opened and the write is refused with *After signing, the documents would not verify: <reason>*. Removing the last forbidden approver makes the *to* side pass, so this never blocks that fix.
+
+**Dialog texts** are quoted in Korean in [the design](../design/gui-admin-phase2.md#decisions-v8); the English values are in the catalog. The signing dialog's lines, in order: document, current SHA-256, version, expiry, the action lines, the key line, the consequence, the permanence line (revoke only) and the freshness line.
+
+**Expired and previous-root states.** An expired trust root shows *The trust root has expired* and Renew first. Documents signed by a previous root key (after a rotation they were not adopted) disable every writer before any dialog: *These documents are signed by a previous root key. Move them to the new root key with root adopt in the CLI. (GUI support comes in phase 3.)*
+
+**POLICY CHECK** shows the counts by verdict over the same Skill set, the trust note, and, in an organisation with `freshness` whose timestamp does not name the new documents, *The timestamp does not name the new documents. Run mago-ski timestamp sign in the CLI.* (until phase 2b adds the template).
+
+## Revoke, Refresh revocation list and Sign timestamp (phase 2b)
+
+The engine for these is complete in phase 2a (`prepareRevocationsChange`, `commitRevocations`, `prepareTimestamp`, `commitTimestamp`, `signPrepared*`). The templates follow [the design](../design/gui-admin-phase2.md): revocation targets are limited to a digest the armed key reviewed this generation, a current approver, or the key of a certificate found in a configured folder; a revocation states its permanence; *Sign timestamp* is its own template because the online timestamp key must not be armed in the offline root session, and it refuses when the trust root or revocation list is expired, older than this computer's memory, or does not load under the active root.
+
 ## Replay and this computer's memory
 
 Signed documents say what was true when they were signed; a genuine older copy still verifies. A third party who can replace the documents (a share, a mirror) could replay an older trust root, revocation list or root event log, and bring back a removed approver or a rotated-out root key.
@@ -149,11 +181,12 @@ The GUI therefore keeps its own memory of the highest versions it has seen: `<us
 - **First run.** The folder is created with mode `0700`; the first load records whatever the documents are.
 - **Corrupt memory.** A memory file that does not parse, has the wrong format or counters, is over the size limit or is not a regular file is *corrupt*: it is renamed to `admin-state.json.unreadable-<time>`, the 관리 tab shows "이 컴퓨터의 관리 기록을 읽을 수 없어서 따로 보관하고 새로 시작했어요 (<path>)" until dismissed (`admin:dismiss-memory-reset`), and loading starts again with an empty memory.
 - **Unreadable memory.** Any other read error (an I/O error, a permission error, a file that changes while being read) is *unreadable*, and nothing is renamed. The whole read is retried 3 times, after 50, 100 and 200 ms; if it still fails, the pin is invalid with "이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요."
+- **Writes record versions.** After a successful trust root, revocation list or timestamp write the GUI records the new version in the memory (`recordDocumentVersions`: merge before write; a counter is not lowered within the retry budget described under *Writes*, and the write fails closed otherwise), so the next write starts from it. Admin checks use this memory (`loadPolicyTrust` with the memory as state file), not "without recording versions". A reset says that root document writes then take the documents now on disk as their base, and the next root or timestamp signature after it shows a warning in its dialog.
 - **Legitimate reset.** If an organisation is re-initialised with the same root key, versions restart and the documents look older. The tab then says "이 컴퓨터가 이미 본 것보다 오래된 문서예요. 조직이 문서를 다시 만들었다면 기록을 초기화하세요." with a 기록 초기화 button, which asks in a native dialog and renames the memory aside.
 - **A memory that cannot be written** makes the pin unusable ("이 컴퓨터의 기록을 저장하지 못했어요") and drops the armed key.
 - **What it protects.** Accidental replay and replay by someone who can change the documents but not this user's profile. It does not protect against the user, who can delete or move it (including with `MAGO_SKI_GUI_DATA`). With `freshness` in the pin, the timestamp bounds replay for everyone.
-- **Writes.** Writes to one memory file are serialised within the process (keyed by the file's canonical path, so two spellings of one file share a queue), and each write re-reads, merges and writes. Only a missing file counts as no memory when writing; any other read error fails the write.
-- **Known limit.** Two processes that load at the same moment while a document changes can lower a recorded version until the newer document is loaded again. Within one process, an unqueued status poll that overlaps a load while the root event log grows can report a transient rollback.
+- **Writes.** Writes to one memory file are serialised within the process (keyed by the file's canonical path, so two spellings of one file share a queue). Across processes each write is a compare-and-swap: it reads the raw bytes once, merges, and replaces the file only if it still has those bytes; if another process changed it, the write re-reads, merges and retries, up to 5 times with 10 to 80 ms jittered waits, then fails (the pin is unusable, as for any memory that cannot be written). Only a missing file counts as no memory when writing; any other read error fails the write.
+- **Known limit.** The retry budget can run out under sustained contention from other processes; the write then fails rather than lowering a recorded version. Within one process, an unqueued status poll that overlaps a load while the root event log grows can report a transient rollback.
 
 ## Process boundaries
 
@@ -170,6 +203,11 @@ The window is sandboxed as before (context isolation, no Node integration, CSP `
 | `admin:check` | instance id | POLICY CHECK for that Skill |
 | `admin:reset-memory` | none | Opens a native confirmation, then moves this computer's admin memory aside, drops an armed key; a refusal returns its message; `ok` means "not refused", so a cancel is `ok: true` |
 | `admin:dismiss-memory-reset` | none | Clears the notice that the memory was moved aside |
+| `admin:trust-root` | none | The TRUST ROOT view (unqueued; does not extend the idle time) |
+| `admin:add-approver` | `{ name ≤ 128, scopes (1 to 64, each valid per the engine's scope rules), lifetime: 90d \| 180d \| 365d, trustRootLifetime?: 180d \| 365d }` | Opens the public-key picker, then the native signing dialog; writes the trust root only after it is confirmed |
+| `admin:remove-approver` | `{ keyId, trustRootLifetime? }` | The same, for a removal (a second dialog for the last approver) |
+| `admin:renew-trust-root` | `{ lifetime: 180d \| 365d }` | The same, for a renewal |
+| `admin:verify-all` | none | POLICY CHECK over every Skill (unqueued) |
 
 The renderer cannot name a file, a key or a directory in any of them. A compromised renderer cannot cause a signature without both native dialogs being answered by a human: it can ask for them, and after a cancel or a timeout it is refused for 10 seconds.
 
@@ -182,10 +220,16 @@ The renderer cannot name a file, a key or a directory in any of them. A compromi
 - **The user-namespace check is a hurdle**, not a boundary (see [Organisation pin](#organisation-pin)); Flatpak, rootless containers and user-namespace CI runners are unsupported.
 - **A copy or hard link of the key inside a Skill is not detected.** A moved key fails the stored-path check at signing. The private-key scan at signing covers the files the digest covers, as in the CLI.
 - **The memory does not protect against the user** (see above).
+- **Retired keys are known only from walked events.** A key retired before `root_events_after` is not known to a host or to the GUI. The host check refuses a trust root that lists a key retired in the events the host walked (`trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`); the gate's trust store (`src/gate/trust-store.ts`) calls `loadTrustContext` directly and does not check this.
+- **Former recovery keys.** The GUI and `root add-approver --policy` refuse a key that left a recovery set in the walked events as an approver; hosts do not check this. For former recovery keys, no host refuses a document it accepted before. While a former recovery key is listed as an approver, the GUI marks it and allows only removing it, hosts keep accepting the trust root, and `root renew` and `root remove-approver` in the CLI do not check it.
+- **Upgrade note for retired keys.** The host check for retired root and timestamp keys is the one deliberate exception to "no host refuses a document it accepted before":
+
+> Before upgrading hosts, open the TRUST ROOT view in a GUI of the new version: it marks any approver whose key has held the root or timestamp role. Remove those approvers (`mago-ski root remove-approver`), and in an organisation that uses timestamps, sign a new timestamp afterwards (`mago-ski timestamp sign`). In an organisation that uses timestamps, remove the approvers and sign the new timestamp in one sitting: between the two, hosts block every Skill. Hosts that use `loadPolicyTrust` (the CLI, Pi, the GitHub Action and the gate's verifier) refuse a trust root that still lists such an approver, and in enforce mode block every Skill. The gate's trust store does not check this.
+- **The consequence is a preview.** The consequence shown before signing is computed when the change is prepared, from the Skill folders and certificates found then, and with this computer's memory as the version minimums. A host with its own newer state, or with other certificate folders, can report different verdicts. Only the documents named in the dialog are bound at commit.
 - **No hardware keys yet.** Keys are PEM files, as for the CLI.
 
 ## Phases
 
 1. This document; the organisation pin; IDENTITY; the template framework; *Approve a Skill version*.
-2. *Manage approvers*, *Revoke*, *Publish*.
+2. **2a:** the engine for every root and timestamp write (prepare, commit, `root renew`, `root add-approver --policy`, retired-key host check), these spec changes, and *Manage approvers*. **2b:** *Revoke*, *Refresh revocation list*, *Sign timestamp* (GUI only; the engine is complete in 2a).
 3. *Set up an organisation*, *Root incident*.

@@ -44,7 +44,7 @@ Anyone can install this version for free. It runs on Linux and macOS.
 **Desktop app (early preview, separate download)**
 
 - The desktop app watches the Skills installed on a computer, shows what changed, and shows whether each one is approved.
-- (Built, not released) In the desktop app's administration tab, an approver can approve a Skill version: load their approver key, look at the exact version, write why it is approved, and sign. The app checks that the key really is one of the organisation's approvers, using the organisation's settings file that only the administrator can change. Managing approvers, taking approvals back and the rest of the administration come later.
+- (Built, not released) In the desktop app's administration tab, an approver can approve a Skill version: load their approver key, look at the exact version, write why it is approved, and sign. The app checks that the key really is one of the organisation's approvers, using the organisation's settings file that only the administrator can change. (Built, not released) With the root key, in the same tab, an administrator can add, replace, remove and renew approvers: the app shows which Skills would stop verifying before it asks for a signature. Taking approvals back and the rest of the administration come later.
 
 ## Built, not released yet (the company gate)
 

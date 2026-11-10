@@ -7,7 +7,8 @@
 //   (as root) install DIR/pin/ as /etc/mago-ski/ - a root-owned folder, bind-mounted or copied - because the admin rack reads
 //   the organisation only from there. Without it the admin shots show "Not installed" and the script says so.
 //   node scripts/screenshots.ts shoot DIR OUT    window 1280x800 at device scale factor 2: OUT/gui-observe.png,
-//                                                gui-admin-templates.png and gui-admin-approve.png
+//                                                gui-admin-templates.png, gui-admin-approve.png and gui-admin-approvers.png
+//                                                (the Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK)
 //
 // The native key dialog cannot be clicked by Playwright; the script answers it in the main process with DIR/keys/alice.pem,
 // the approver key of the demo organisation. Nothing is signed.
@@ -95,8 +96,22 @@ if (pinInstalled) {
   await page.evaluate(() => document.querySelector('#tab-admin .tpl-grid')?.scrollIntoView());
   await page.waitForTimeout(300);
   await shot('gui-admin-approve.png');
+
+  // 4. Manage approvers: TRUST ROOT with the approver list, POLICY CHECK beside it. Reading the document needs no key.
+  await page.click('[data-template="approvers"]');
+  await page.click('[data-admin-device="trustroot"]');
+  await page.waitForSelector('#tab-admin tr[data-approver]');
+  // The tab reads the document and runs POLICY CHECK on its own when the template opens.
+  await page.waitForSelector('#tab-admin .admin-dev[data-admin-device="policy"]:not(.waiting)');
+  await page.waitForTimeout(500);
+  // Taller window so the chain and the approver list are both in the shot.
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]!.setContentSize(1280, 1000); });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => document.querySelector('#tab-admin .rack-wrap')?.scrollIntoView());
+  await page.waitForTimeout(300);
+  await shot('gui-admin-approvers.png');
 } else {
-  console.warn(`${PIN_PATH} is not ${pinFile}: install the pin first; gui-admin-approve.png was not taken and the templates shot shows no pin`);
+  console.warn(`${PIN_PATH} is not ${pinFile}: install the pin first; gui-admin-approve.png and gui-admin-approvers.png were not taken and the templates shot shows no pin`);
 }
 await app.close();
 if (errors.length) console.warn('page errors:', errors);
