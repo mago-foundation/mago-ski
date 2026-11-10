@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: draft v6, for Goldfish review. Precedence: [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: draft v7, for Goldfish review. Precedence: [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -889,3 +889,110 @@ Minor points:
 - **Revoking a current approver's key.** It leaves the approver in the trust root. TRUST ROOT then marks it forbidden (`revoked`) and offers Remove.
 - **Old test line.** The v2 §Tests line "same-version restore refused" is deleted.
 - **First seen.** A counter missing from the memory snapshot counts as first seen (`firstSeen = true`).
+
+## Decisions (v7)
+
+These decisions resolve the v6 readiness check (gaps 1–7) and the v6 comprehension check (B1–B3, m1–m7). Where v7 differs from an earlier section, v7 wins.
+
+### R1. The preview has its own function (readiness 1, 2)
+
+- **No new host options.** `loadPolicyTrust`'s public options stay `{ recordVersions?, override? }`. A1's `skipFreshness` option on that function is withdrawn.
+- **New function.** `src/policy.ts` adds `loadTrustForPreview(policy, now, o: { override?: { trustRoot?: Buffer; revocations?: Buffer; timestamp?: Buffer }; skipFreshness?: boolean }): Promise<TrustContextResult>`. It shares one body with `loadPolicyTrust` and never records versions.
+  - With `skipFreshness`, it skips the timestamp read and verify (`policy.ts:574-592`) and the binding check (`:606-607`), and it sets `context.root.timestamp` to `null`.
+  - Override buffers are subject to the same size limits as files.
+- **Only the GUI may import it.** A test (`tests/preview-import.test.ts`) asserts that no file under `src/` other than `src/policy.ts` imports `loadTrustForPreview`. Under `gui/`, only `gui/src/service/admin.ts` may.
+- **How each side of the preview is computed.**
+  - `from` is one `loadTrustForPreview(memoryPolicy(pin), now)` call.
+  - `to` is one call with the override.
+  - "Result after timestamp" is one call with the override and `skipFreshness: true`.
+  - Each Skill's verdict is `verifyWithPolicy(policy, dir, { now, context })` with the context from that side's single load. Nothing reloads per Skill.
+
+### R2. Scope of "former recovery key" (readiness 4, comprehension B1)
+
+- **What it holds.** `formerRecovery` holds keys that left a recovery set in walked events, after `root_events_after`. That is the same scope as `retired` (V2).
+- **Wiring.**
+  1. Add a `WalkState.formerRecovery` field.
+  2. In the rotate branch (`root-events.ts:323`, where `newRecovery` is known), add `current.keyIds.filter((k) => !newRecovery.keyIds.includes(k))`.
+  3. Add it to the explicit rotate `next` literal (`:359-366`).
+  4. Return it in `RootWalk` (`:408-416`).
+  5. Copy it in `cloneWalk` (`:441-447`).
+- **Test.** A key rotated out of the recovery set is in `formerRecovery`, including on a walk-cache hit, and `forbiddenApproverKeys` refuses it.
+- **Deliberate strictness (B1).** The GUI, and `root add-approver --policy`, are stricter than hosts on purpose. While a former recovery key is listed as an approver:
+  - the GUI marks it and allows only removing it;
+  - hosts keep accepting the trust root;
+  - CLI `root renew` and `root remove-approver` do not check it.
+
+  The spec states this.
+
+### R3. Upgrade note for retired keys (comprehension B2)
+
+A2's sentence becomes: "For former recovery keys, no host refuses a document it accepted before."
+
+The V2 check, which refuses a trust root that lists a retired root or timestamp key, is the one deliberate exception. The 0.3.0 CHANGELOG entry and the spec's Limits section say:
+
+> Before upgrading hosts, remove any approver whose key has held the root or timestamp role (`mago-ski root remove-approver`). After the upgrade, a trust root that still lists one stops loading, and enforce-mode hosts block every Skill until it is removed. The GUI's TRUST ROOT view marks such approvers.
+
+### R4. Every phase 2 security text, both languages, with catalog keys (readiness 3, 7; comprehension B3)
+
+This table **replaces** A3 and is complete for phase 2. `gui/tests/dialog-text.test.ts`, and a new `gui/tests/p2-texts.test.ts` for non-dialog texts, assert the exact `en` and `ko` values for every key below. The other phase 2 texts (device states, labels) follow the glossary and the catalog parity test.
+
+| Key | ko | en |
+|---|---|---|
+| `admin.p2.permanence.key` | 폐기는 되돌릴 수 없어요. 이 키가 서명한 모든 인증서가 영구히 검증되지 않아요. | Revocation cannot be undone. Every certificate this key signed will permanently fail verification. |
+| `admin.p2.permanence.digest` | 폐기는 되돌릴 수 없어요. 이 버전의 모든 인증서가 영구히 검증되지 않아요. | Revocation cannot be undone. Every certificate for this version will permanently fail verification. |
+| `admin.p2.freshnessBlock` | 이 조직은 타임스탬프를 써요: 새 타임스탬프를 서명할 때까지 enforce 모드의 호스트는 모든 Skill을 막아요. | This organisation uses timestamps: hosts in enforce mode block every Skill until a new timestamp is signed. |
+| `admin.dialog.lastApprover.title` | 마지막 승인자 | Last approver |
+| `admin.dialog.lastApprover.message` | 남는 승인자가 없어요. 지금 승인된 모든 Skill이 검증되지 않게 되고(UNTRUSTED_SIGNER), 새 승인자를 추가할 때까지 어떤 Skill도 승인할 수 없어요. 계속할까요? | No approvers will remain. Every approved Skill will stop verifying (UNTRUSTED_SIGNER), and no Skill can be approved until you add a new approver. Continue? |
+| `admin.dialog.lastApprover.action` | 계속 | Continue |
+| `admin.dialog.offline.title` | 오프라인 확인 | Offline check |
+| `admin.dialog.offline.message` | 루트 키와 복구 키는 오프라인 관리용 컴퓨터에서만 써야 해요. 이 컴퓨터가 그런 컴퓨터인가요? | Root and recovery keys must only be used on an offline administration computer. Is this such a computer? |
+| `admin.dialog.offline.action` | 예, 오프라인 관리용이에요 | Yes, it is offline |
+| `admin.dialog.publicKey.title` | 승인자 공개 키 선택 (PEM) | Choose the approver's public key (PEM) |
+| `admin.p2.err.previousRoot` | 문서가 이전 루트 키로 서명돼 있어요. CLI에서 root adopt로 새 루트 키로 옮기세요. (GUI 지원은 3단계) | These documents are signed by a previous root key. Move them to the new root key with root adopt in the CLI. (GUI support comes in phase 3.) |
+| `admin.p2.err.changed` | 문서가 그 사이에 바뀌었어요. 다시 준비하세요. | The document changed in the meantime. Prepare it again. |
+| `admin.p2.err.stale` | 이 컴퓨터가 본 것보다 오래된 문서예요. 최신 문서를 되돌려 놓으세요. | This document is older than one this computer has already seen. Put the newest document back. |
+| `admin.p2.err.noFreshness` | 이 조직은 타임스탬프를 쓰지 않아요. | This organisation does not use timestamps. |
+| `admin.p2.err.rootRevoked` | 루트 키가 폐기됐어요. 루트 사고 대응이 필요해요 (3단계). | The root key is revoked. A root incident response is needed (phase 3). |
+| `admin.p2.err.rolesUnknown` | 승인자 역할을 확인할 수 없어요: {reason} | The approver roles could not be checked: {reason} |
+| `admin.p2.err.trustRootUnchanged` | 루트 이벤트 기록을 확인할 수 없어서 신뢰 루트를 바꾸지 않았어요: {reason} | Cannot check the root event log, so the trust root is not changed: {reason} |
+| `admin.p2.memoryWarning` | 서명은 됐지만 이 컴퓨터의 기록을 갱신하지 못했어요. | The signature was made, but this computer's memory could not be updated. |
+| `admin.p2.afterReset` | 이 컴퓨터의 기록을 초기화한 뒤 첫 서명이에요: 디스크의 문서가 최신인지 확인하세요. | This is the first signature since this computer's memory was reset: make sure the documents on disk are the newest. |
+| `admin.p2.consequence.head` | 영향받는 Skill: {changed}개 (전체 {skills}개) | Skills affected: {changed} (of {skills}) |
+| `admin.p2.consequence.blocked` | 타임스탬프 전까지 차단 | blocked until a timestamp |
+| `admin.p2.consequence.after` | 서명 후 결과(타임스탬프 뒤): {verdict} | Result after the timestamp: {verdict} |
+| `admin.p2.consequence.fromFailed` | 현재 문서로는 검증할 수 없어요: {reason} | The current documents do not verify: {reason} |
+| `admin.p2.freshnessCli` (2a) | 타임스탬프가 새 문서를 가리키지 않아요. CLI에서 mago-ski timestamp sign을 실행하세요. | The timestamp does not name the new documents. Run mago-ski timestamp sign in the CLI. |
+| `admin.p2.freshnessTemplate` (2b) | 타임스탬프가 새 문서를 가리키지 않아요. 타임스탬프 서명 템플릿을 실행하세요. | The timestamp does not name the new documents. Run the Sign timestamp template. |
+| `admin.p2.forbidden.root` | 루트 키 | the root key |
+| `admin.p2.forbidden.recovery` | 복구 키 | a recovery key |
+| `admin.p2.forbidden.timestamp` | 타임스탬프 키 | the timestamp key |
+| `admin.p2.forbidden.retired` | 예전에 루트나 타임스탬프 역할을 했던 키 | a key that held the root or timestamp role |
+| `admin.p2.forbidden.formerRecovery` | 예전 복구 키 | a former recovery key |
+| `admin.p2.forbidden.revoked` | 폐기된 키 | a revoked key |
+| `admin.p2.forbidden.mustRemove` | {why}: 이 승인자는 빼야 해요 | {why}: this approver must be removed |
+| `admin.p2.timestamp.otherKey` | 이전 타임스탬프는 다른 키({keyId})가 서명했어요 (버전 {version}). | The previous timestamp was signed by another key ({keyId}), version {version}. |
+| `admin.p2.timestamp.doc.rootEvents` | 루트 이벤트 | Root events |
+| `admin.p2.timestamp.doc.trustRoot` | 신뢰 루트 | Trust root |
+| `admin.p2.timestamp.doc.revocations` | 폐기 목록 | Revocation list |
+| `admin.p2.timestamp.firstSeen` | (이 컴퓨터가 처음 보는 버전) | (first seen by this computer) |
+| `admin.dialog.reset.detailP2` | 초기화하면 루트 문서를 쓸 때 지금 디스크에 있는 문서를 기준으로 삼아요. | After a reset, root document writes take the documents now on disk as their base. |
+
+The `retired` why text stays "root or timestamp" (m2): A2 keeps `retired` to those roles. The host message is V2's original text: `trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`. W6's change to that text is withdrawn.
+
+### R5. Limits text (readiness 5, comprehension m5)
+
+The spec's `## Limits` section gains:
+
+> The consequence shown before signing is computed when the change is prepared, from the Skill folders and certificates found then, and with this computer's memory as the version minimums. A host with its own newer state, or with other certificate folders, can report different verdicts. Only the documents named in the dialog are bound at commit.
+
+### R6. Sign timestamp without freshness (readiness 6)
+
+- **The template.** It is disabled with `admin.p2.err.noFreshness` (V16).
+- **The engine.** `prepareTimestamp` throws `The policy has no freshness timestamp`. The preview never builds a timestamp for such a pin.
+
+### R7. Minor points
+
+- **m1.** Hosts report a freshness failure as `UNVERIFIABLE`, with a reason starting `freshness:`. `from` shows exactly that. `BLOCKED_UNTIL_TIMESTAMP` is used only for `to`, as a label for "will fail freshness until a timestamp is signed".
+- **m4.** Root review uses the hardening D10 record format (armed key, generation, instance). `review()` accepts the root role as well as the approver role. Tests cover a root review followed by revoke-digest, and an approver review that is **not** usable for revoke when another key is armed.
+- **m6.** `admin.p2.timestamp.otherKey` shows the previous version (R4).
+- **m7.** `setupRecoveryOrg`'s `rotate` is the recovery rotate threshold (`tests/helpers.ts:152`). The re-enrolment recipe uses the rotate-then-adopt test pattern from `tests/root-recovery.test.ts`, as A9 says.
