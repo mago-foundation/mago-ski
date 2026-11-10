@@ -122,6 +122,12 @@ In the Approve template the approver's key is loaded (IDENTITY) and INSPECT show
 
 ![The Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK](docs/images/gui-admin-approvers.png)
 
+![Revoke: TARGET with the current approvers and a reviewed Skill](docs/images/gui-admin-revoke.png)
+
+![Refresh revocation list: REVOCATION REFRESH](docs/images/gui-admin-refresh.png)
+
+![Sign timestamp: TIMESTAMP](docs/images/gui-admin-timestamp.png)
+
 In the Manage approvers template TRUST ROOT shows the trust root's approvers, expiry and lifetime controls, and POLICY CHECK shows every Skill's verdict under the host's own loader.
 
 ## Verdicts

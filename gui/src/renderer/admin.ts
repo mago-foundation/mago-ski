@@ -2,7 +2,8 @@
 // the "Approve a Skill version" template. Key material never reaches this page: the main process holds the armed key
 // and decides every signature; this module only shows state and sends instance ids, digests and text.
 import type {
-  AdminApproverLifetime, AdminCheckView, AdminInspectView, AdminLifetime, AdminPinView, AdminRole, AdminStatusView, AdminTrustRootLifetime,
+  AdminApproverLifetime, AdminCheckView, AdminInspectView, AdminLifetime, AdminListLifetime, AdminPinView, AdminRevocationsView, AdminRevocationSkill,
+  AdminRevocationTarget, AdminRevokeRequest, AdminRole, AdminStatusView, AdminTimestampLifetime, AdminTimestampView, AdminTrustRootLifetime,
   AdminTrustRootView, AdminVerifyAllView, ChangeView, RendererApi, ServiceView,
 } from '../service/types.ts';
 import { t, type MessageKey } from '../i18n/messages.ts';
@@ -11,8 +12,8 @@ import { h } from './dom.ts';
 import { noteText, tr, type Note } from './lang.ts';
 
 type TemplateKey = 'approve' | 'approvers' | 'revoke' | 'refresh' | 'timestamp' | 'setup' | 'incident';
-type DeviceKey = 'identity' | 'inspect' | 'approve' | 'check' | 'trustroot' | 'policy';
-/** 1 and 2a are built; 2b and 3 are shown as planned. */
+type DeviceKey = 'identity' | 'inspect' | 'approve' | 'check' | 'trustroot' | 'policy' | 'target' | 'revoke' | 'refresh' | 'timestamp';
+/** 1, 2a and 2b are built; 3 is shown as planned. */
 type Phase = '1' | '2a' | '2b' | '3';
 type DeviceState = 'locked' | 'waiting' | 'ready' | 'done' | 'failed';
 
@@ -74,6 +75,23 @@ let trustLifetime: '' | AdminTrustRootLifetime = '';
 let renewLifetime: AdminTrustRootLifetime = '365d';
 const APPROVER_LIFETIMES: AdminApproverLifetime[] = ['90d', '180d', '365d'];
 const TRUST_LIFETIMES: AdminTrustRootLifetime[] = ['180d', '365d'];
+const REVOCATION_LIFETIMES: AdminListLifetime[] = ['7d', '30d'];
+const MAX_REVOKE_REASON = 512;
+// Revoke, Refresh revocation list and Sign timestamp (phase 2b)
+type Target =
+  | { kind: 'key'; keyId: string; label: string }
+  | { kind: 'digest'; digest: string; instanceId: string; label: string }
+  | { kind: 'other'; label: string };
+let revView: AdminRevocationsView | null = null;
+let revSkills: AdminRevocationSkill[] = [];
+let revTargets: AdminRevocationTarget[] = [];
+let tsView: AdminTimestampView | null = null;
+let docsLoading = false;
+let target: Target | null = null;
+let revokeReason = '';
+let revokeLifetime: AdminListLifetime = '30d';
+let refreshLifetime: AdminListLifetime = '30d';
+let tsLifetime: AdminTimestampLifetime | null = null;
 
 const short = (digest: string | null | undefined): string => (digest ? `${digest.slice(0, 13)}…${digest.slice(-4)}` : '—');
 
@@ -103,7 +121,10 @@ export function setAdminPolling(on: boolean, renderer: RendererApi): void {
 export function refreshAdminStatus(): void {
   if (api && !statusLoading) void refreshStatus();
   if (api && template === 'approvers') void loadTrustView();
+  if (api && is2b(template)) void loadDocs();
 }
+
+const is2b = (key: TemplateKey): boolean => key === 'revoke' || key === 'refresh' || key === 'timestamp';
 
 export function renderAdmin(target: HTMLElement, next: ServiceView, renderer: RendererApi): void {
   api = renderer;
@@ -117,6 +138,7 @@ export function renderAdmin(target: HTMLElement, next: ServiceView, renderer: Re
   }
   if (!status && !statusLoading) void refreshStatus();
   if (template === 'approvers' && trustView === null && !trustLoading) void loadTrustView();
+  if (is2b(template) && verifyView === null && !docsLoading) void loadDocs();
   draw();
 }
 
@@ -163,6 +185,8 @@ function adoptStatus(next: AdminStatusView): void {
     // The main process dropped the key (pin or role change, idle, or a disarm): nothing recorded for it stands.
     resetFrom('inspect');
     message ??= { ok: false, text: () => tr('admin.msg.keyDropped') };
+    // Reviews died with the key: TARGET's list must not keep showing them.
+    if (template === 'revoke' && !docsLoading) void loadDocs();
   } else if (previous && JSON.stringify(previous) === JSON.stringify(next)) {
     return;
   }
@@ -170,7 +194,7 @@ function adoptStatus(next: AdminStatusView): void {
 }
 
 function resetFrom(step: 'inspect' | 'approve'): void {
-  if (step === 'inspect') { inspected = null; change = null; rootWritten = null; }
+  if (step === 'inspect') { inspected = null; change = null; rootWritten = null; if (target?.kind === 'digest') target = null; }
   signed = null;
   checked = null;
 }
@@ -223,8 +247,8 @@ function draw(): void {
     status?.hostPolicyDiffers ? h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.hostDiffers')) : null,
     h('h2', {}, tr('admin.templates')),
     h('div', { class: 'tpl-grid' }, ...TEMPLATES.map(templateCard)),
-    tpl.phase === '1' ? approveRack() : tpl.phase === '2a' ? approversRack() : h('div', { class: 'empty-state' }, tr('admin.tpl.later', { title: tr(TEMPLATE_TITLE[tpl.key]), n: tpl.phase })),
-    tpl.phase === '1' ? deviceDetail() : tpl.phase === '2a' ? approversDetail() : null,
+    tpl.phase === '1' ? approveRack() : tpl.phase === '3' ? h('div', { class: 'empty-state' }, tr('admin.tpl.later', { title: tr(TEMPLATE_TITLE[tpl.key]), n: tpl.phase })) : chainRack(tpl.key),
+    tpl.phase === '1' ? deviceDetail() : tpl.phase === '3' ? null : chainDetail(tpl.key),
   ];
   container.replaceChildren(...parts.filter((part): part is HTMLElement => part !== null));
 }
@@ -268,7 +292,7 @@ function pinPanel(pin: AdminPinView | null): HTMLElement {
 }
 
 function templateCard(t: (typeof TEMPLATES)[number]): HTMLElement {
-  const disabled = t.phase !== '1' && t.phase !== '2a';
+  const disabled = t.phase === '3';
   const card = h('button', { class: 'tpl', 'aria-pressed': String(t.key === template), 'aria-disabled': String(disabled), 'data-template': t.key },
     h('span', { class: 'tpl-title' }, tr(TEMPLATE_TITLE[t.key])),
     h('span', { class: 'tpl-chain' }, t.chain),
@@ -282,7 +306,9 @@ function templateCard(t: (typeof TEMPLATES)[number]): HTMLElement {
     trustView = null;
     verifyView = null;
     rootWritten = null;
+    revView = null; revSkills = []; revTargets = []; tsView = null; target = null; revokeReason = ''; tsLifetime = null;
     if (t.key === 'approvers') void loadTrustView();
+    if (is2b(t.key)) void loadDocs();
     // Changing the template drops the armed key (spec: armed key lifetime).
     void run(async () => { if (status?.armed) { await statusFrom(() => api.admin.disarm()); message = { ok: true, text: () => tr('admin.tpl.switched') }; } });
   });
@@ -338,7 +364,7 @@ function approveRack(): HTMLElement {
 function deviceDetail(): HTMLElement {
   const pane = h('section', { class: 'admin-detail' });
   const titles: Record<'identity' | 'inspect' | 'approve' | 'check', string> = { identity: tr('admin.dev.identity'), inspect: tr('admin.dev.inspect'), approve: tr('admin.dev.approve'), check: tr('admin.dev.check') };
-  const shown = device === 'trustroot' || device === 'policy' ? 'identity' : device;
+  const shown = device === 'identity' || device === 'inspect' || device === 'approve' || device === 'check' ? device : 'identity';
   pane.append(h('h2', {}, titles[shown]));
   if (device === 'identity') identityDetail(pane);
   if (device === 'inspect') inspectDetail(pane);
@@ -499,22 +525,28 @@ async function loadTrustView(): Promise<void> {
 
 type Dev = { state: DeviceState; why: string };
 
-function approverStates(): Record<'identity' | 'trustroot' | 'policy', Dev> {
+function identityDev(role: 'root' | 'timestamp'): Dev {
   const armed = status?.armed ?? null;
+  if (status?.pin.kind !== 'loaded') return { state: 'locked', why: tr('admin.p2.why.noPin') };
+  if (armed?.role === role) return { state: 'done', why: roleName(role) };
+  if (armed) return { state: 'failed', why: tr(role === 'root' ? 'admin.p2.why.wrongRole' : 'admin.p2.why.wrongRoleTimestamp', { role: roleName(armed.role) }) };
+  return { state: 'ready', why: tr(role === 'root' ? 'admin.p2.why.needRoot' : 'admin.p2.why.needTimestamp') };
+}
+
+function policyDev(): Dev {
+  if (status?.pin.kind !== 'loaded') return { state: 'locked', why: tr('admin.p2.why.noPin') };
+  if (!verifyView) return { state: 'waiting', why: tr('admin.p2.policyCheck.ready') };
+  return { state: verifyView.trustOk && Object.keys(verifyView.counts).every((v) => v === 'VERIFIED') ? 'done' : 'failed', why: countsText(verifyView) };
+}
+
+function approverStates(): Record<'identity' | 'trustroot' | 'policy', Dev> {
   const pinOk = status?.pin.kind === 'loaded';
-  const identity: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
-    : armed?.role === 'root' ? { state: 'done', why: roleName('root') }
-    : armed ? { state: 'failed', why: tr('admin.p2.why.wrongRole', { role: roleName(armed.role) }) }
-    : { state: 'ready', why: tr('admin.p2.why.needRoot') };
   const trustroot: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
     : !trustView ? { state: 'waiting', why: tr('admin.p2.policyCheck.ready') }
     : !trustView.ok ? { state: 'failed', why: trustView.message }
     : rootWritten ? { state: 'done', why: tr('admin.p2.trustRoot.done', { v: rootWritten.version }) }
     : { state: 'ready', why: tr('admin.p2.trustRoot.ready', { n: trustView.approvers.length, v: trustView.version, date: trustView.expiresAt }) };
-  const policy: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
-    : !verifyView ? { state: 'waiting', why: tr('admin.p2.policyCheck.ready') }
-    : { state: verifyView.trustOk && Object.keys(verifyView.counts).every((v) => v === 'VERIFIED') ? 'done' : 'failed', why: countsText(verifyView) };
-  return { identity, trustroot, policy };
+  return { identity: identityDev('root'), trustroot, policy: policyDev() };
 }
 
 function countsText(v: AdminVerifyAllView): string {
@@ -523,39 +555,66 @@ function countsText(v: AdminVerifyAllView): string {
   return tr('admin.p2.policyCheck.done', { n: verified, m: others });
 }
 
-function approversRack(): HTMLElement {
-  const s = approverStates();
-  const armed = status?.armed ?? null;
-  const link = (on: boolean) => h('div', { class: `link${on ? ' live' : ''}` });
-  return h('section', { class: 'rack-wrap', style: 'margin:14px 0 0' },
-    h('div', { class: 'rack-head' }, tr('admin.p2.chain.approvers'), h('div', { class: 'spacer' }),
-      h('div', { class: 'legend' }, h('span', {}, tr('admin.chain.legend')))),
-    h('div', { class: 'chain' },
-      faceplate('identity', 'SKI / IDENTITY', s.identity,
-        h('div', { class: 'sec-label' }, 'KEY SLOT'),
-        screen(armed ? ROLE_LABEL[armed.role] : 'EMPTY', armed ? short(armed.keyId) : tr('admin.screen.noKey'), armed?.role === 'root' ? 'verified' : armed ? 'warn' : '')),
-      link(s.identity.state === 'done'),
-      faceplate('trustroot', 'SKI / TRUST ROOT', s.trustroot,
-        h('div', { class: 'sec-label' }, tr('admin.p2.screen.trustRoot').toUpperCase()),
-        screen(trustView?.ok ? `v${trustView.version}` : '—', trustView?.ok ? tr('admin.p2.trustRoot.ready', { n: trustView.approvers.length, v: trustView.version, date: trustView.expiresAt }) : tr('admin.p2.screen.noDoc'),
-          rootWritten ? 'verified' : trustView?.ok && (trustView.expired || trustView.stale) ? 'warn' : '')),
-      link(s.trustroot.state === 'done'),
-      faceplate('policy', 'SKI / POLICY CHECK', s.policy,
-        h('div', { class: 'sec-label' }, 'VERDICTS'),
-        screen(verifyView ? `${verifyView.counts.VERIFIED ?? 0}/${verifyView.skills}` : '—', verifyView ? (verifyView.trustOk ? tr('admin.screen.trustOk') : tr('admin.screen.trustFail')) : tr('admin.screen.pinBasis'),
-          verifyView ? (s.policy.state === 'done' ? 'verified' : 'problem') : ''))));
+function chainRack(key: TemplateKey): HTMLElement {
+  if (key === 'revoke') return revokeRack();
+  if (key === 'refresh') return refreshRack();
+  if (key === 'timestamp') return timestampRack();
+  return approversRack();
 }
 
-function approversDetail(): HTMLElement {
+function chainDetail(key: TemplateKey): HTMLElement {
   const pane = h('section', { class: 'admin-detail' });
-  const titles: Record<'identity' | 'trustroot' | 'policy', string> = { identity: tr('admin.dev.identity'), trustroot: tr('admin.p2.dev.trustRoot'), policy: tr('admin.p2.dev.policyCheck') };
-  const key = device === 'trustroot' || device === 'policy' ? device : 'identity';
-  pane.append(h('h2', {}, titles[key]));
-  if (key === 'identity') identityDetail(pane);
-  if (key === 'trustroot') trustRootDetail(pane);
-  if (key === 'policy') policyDetail(pane);
+  const titles: Partial<Record<DeviceKey, string>> = {
+    identity: tr('admin.dev.identity'), trustroot: tr('admin.p2.dev.trustRoot'), policy: tr('admin.p2.dev.policyCheck'), target: tr('admin.p2.dev.target'),
+    revoke: tr('admin.p2.dev.revoke'), refresh: tr('admin.p2.dev.refresh'), timestamp: tr('admin.p2.dev.timestamp'),
+  };
+  const own: Record<string, DeviceKey> = { approvers: 'trustroot', refresh: 'refresh', timestamp: 'timestamp' };
+  const devices: DeviceKey[] = key === 'revoke' ? ['identity', 'target', 'revoke', 'policy'] : ['identity', own[key]!, 'policy'];
+  const shown: DeviceKey = devices.includes(device) ? device : 'identity';
+  pane.append(h('h2', {}, titles[shown] ?? ''));
+  if (shown === 'identity') identityDetail(pane);
+  if (shown === 'trustroot') trustRootDetail(pane);
+  if (shown === 'policy') policyDetail(pane);
+  if (shown === 'target') targetDetail(pane);
+  if (shown === 'revoke') revokeDetail(pane);
+  if (shown === 'refresh') refreshDetail(pane);
+  if (shown === 'timestamp') timestampDetail(pane);
   if (message) pane.append(h('div', { class: `result ${message.ok ? 'ok' : 'err'}` }, noteText(message)));
   return pane;
+}
+
+const link = (on: boolean): HTMLElement => h('div', { class: `link${on ? ' live' : ''}` });
+
+function keySlot(role: 'root' | 'timestamp'): HTMLElement {
+  const armed = status?.armed ?? null;
+  return faceplate('identity', 'SKI / IDENTITY', identityDev(role),
+    h('div', { class: 'sec-label' }, 'KEY SLOT'),
+    screen(armed ? ROLE_LABEL[armed.role] : 'EMPTY', armed ? short(armed.keyId) : tr('admin.screen.noKey'), armed?.role === role ? 'verified' : armed ? 'warn' : ''));
+}
+
+function policySlot(): HTMLElement {
+  const dev = policyDev();
+  return faceplate('policy', 'SKI / POLICY CHECK', dev,
+    h('div', { class: 'sec-label' }, 'VERDICTS'),
+    screen(verifyView ? `${verifyView.counts.VERIFIED ?? 0}/${verifyView.skills}` : '—', verifyView ? (verifyView.trustOk ? tr('admin.screen.trustOk') : tr('admin.screen.trustFail')) : tr('admin.screen.pinBasis'),
+      verifyView ? (dev.state === 'done' ? 'verified' : 'problem') : ''));
+}
+
+function rackShell(titleKey: MessageKey, ...devices: HTMLElement[]): HTMLElement {
+  return h('section', { class: 'rack-wrap', style: 'margin:14px 0 0' },
+    h('div', { class: 'rack-head' }, tr(titleKey), h('div', { class: 'spacer' }), h('div', { class: 'legend' }, h('span', {}, tr('admin.chain.legend')))),
+    h('div', { class: 'chain' }, ...devices));
+}
+
+function approversRack(): HTMLElement {
+  const s = approverStates();
+  return rackShell('admin.p2.chain.approvers',
+    keySlot('root'), link(s.identity.state === 'done'),
+    faceplate('trustroot', 'SKI / TRUST ROOT', s.trustroot,
+      h('div', { class: 'sec-label' }, tr('admin.p2.screen.trustRoot').toUpperCase()),
+      screen(trustView?.ok ? `v${trustView.version}` : '—', trustView?.ok ? tr('admin.p2.trustRoot.ready', { n: trustView.approvers.length, v: trustView.version, date: trustView.expiresAt }) : tr('admin.p2.screen.noDoc'),
+        rootWritten ? 'verified' : trustView?.ok && (trustView.expired || trustView.stale) ? 'warn' : '')),
+    link(s.trustroot.state === 'done'), policySlot());
 }
 
 function chips<T extends string>(values: readonly T[], current: T, label: (v: T) => string, pick: (v: T) => void): HTMLElement {
@@ -566,20 +625,26 @@ function chips<T extends string>(values: readonly T[], current: T, label: (v: T)
   }));
 }
 
-function writeResult(result: { ok: true; version: number; needsTimestamp: boolean; memoryWarning: boolean } | { ok: false; message: string }): boolean {
+function writeResult(result: { ok: true; version: number; needsTimestamp: boolean; memoryWarning: boolean } | { ok: false; message: string },
+  done: MessageKey = 'admin.p2.trustRoot.done'): boolean {
   if (!result.ok) { message = { ok: false, text: result.message }; return false; }
   trustLifetime = '';
   rootWritten = { version: result.version };
-  const extra = [
-    result.memoryWarning ? tr('admin.p2.notice.memoryWarning') : '',
-    result.needsTimestamp ? tr('admin.p2.notice.freshnessCli') : '',
-  ].filter(Boolean).join(' ');
-  message = { ok: true, text: () => `${tr('admin.p2.trustRoot.done', { v: result.version })}${extra ? ` ${extra}` : ''}` };
+  // The notes are built when the message is shown, so a language switch re-renders them.
+  message = {
+    ok: true,
+    text: () => [tr(done, { v: result.version }), result.memoryWarning ? tr('admin.p2.notice.memoryWarning') : '', result.needsTimestamp ? tr('admin.p2.notice.freshnessTemplate') : ''].filter(Boolean).join(' '),
+  };
   return true;
 }
 
 async function afterWrite(): Promise<void> {
-  trustView = await api.admin.trustRoot();
+  if (template === 'approvers') trustView = await api.admin.trustRoot();
+  else if (template === 'timestamp') tsView = await api.admin.timestamp();
+  else {
+    revView = await api.admin.revocations();
+    if (template === 'revoke') { revTargets = await api.admin.revocationTargets(); revSkills = await api.admin.revocationSkills(); }
+  }
   verifyView = await api.admin.verifyAll();
   await fetchStatus();
 }
@@ -599,6 +664,10 @@ function trustRootDetail(pane: HTMLElement): void {
   if (v.stale) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.stale')));
   if (v.note) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, v.note));
 
+  // An expired trust root has no Keep and nothing preselected: Add and Remove wait for a lifetime to be picked.
+  const trustChoices: Array<'' | AdminTrustRootLifetime> = v.expired ? [...TRUST_LIFETIMES] : ['', ...TRUST_LIFETIMES];
+  const needsLifetime = v.expired && trustLifetime === '';
+
   pane.append(h('h2', {}, tr('admin.p2.label.approvers')));
   if (v.approvers.length === 0) pane.append(h('p', { class: 'hint' }, tr('admin.p2.notice.noApprovers')));
   else pane.append(h('table', { class: 'tbl' },
@@ -614,9 +683,6 @@ function trustRootDetail(pane: HTMLElement): void {
         h('td', { class: 'mono' }, short(a.keyId)), h('td', {}, remove));
     })));
 
-  // An expired trust root has no Keep and nothing preselected: Add and Remove wait for a lifetime to be picked.
-  const trustChoices: Array<'' | AdminTrustRootLifetime> = v.expired ? [...TRUST_LIFETIMES] : ['', ...TRUST_LIFETIMES];
-  const needsLifetime = v.expired && trustLifetime === '';
   pane.append(h('h2', {}, tr('admin.p2.label.trustRootLifetime')),
     chips(trustChoices, trustLifetime, (value) => value === '' ? tr('admin.p2.label.keep') : lifetimeLabel(value), (value) => { trustLifetime = value; }));
 
@@ -658,5 +724,228 @@ function policyDetail(pane: HTMLElement): void {
   rows.push(h('dt', {}, tr('admin.p2.notice.skillsCount', { n: v.skills })), h('dd', {}, countsText(v)));
   for (const [verdict, k] of Object.entries(v.counts)) if (verdict !== 'VERIFIED') rows.push(h('dt', {}, ''), h('dd', {}, tr('admin.p2.policyCheck.line', { verdict, k: k ?? 0 })));
   pane.append(h('dl', { class: 'kv', style: 'margin-top:12px' }, ...rows));
-  if (v.timestampMismatch) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.freshnessCli')));
+  if (v.timestampMismatch) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.freshnessTemplate')));
+}
+
+
+// ------------------------------------------------------------------ Revoke, Refresh revocation list, Sign timestamp (phase 2b)
+
+/** The read-only views of the active 2b template. The main process answers them without the key. */
+async function loadDocs(): Promise<void> {
+  if (!api || docsLoading) return;
+  docsLoading = true;
+  const forTemplate = template;
+  try {
+    if (forTemplate === 'timestamp') tsView = await api.admin.timestamp();
+    else {
+      revView = await api.admin.revocations();
+      if (forTemplate === 'revoke') { revTargets = await api.admin.revocationTargets(); revSkills = await api.admin.revocationSkills(); }
+    }
+    verifyView = await api.admin.verifyAll();
+  } catch (error) {
+    const failed = tr('admin.p2.err.rolesUnknown', { reason: dialogSafe(error instanceof Error ? error.message : String(error)) });
+    if (forTemplate === 'timestamp') tsView = { ok: false, message: failed };
+    else revView = { ok: false, message: failed, signedByPreviousRoot: false };
+    verifyView ??= { skills: 0, counts: {}, trustOk: false, trustNote: failed, timestampMismatch: false };
+  } finally {
+    docsLoading = false;
+  }
+  // A template switch while this load was in flight: load again for the template now shown.
+  if (forTemplate !== template && is2b(template)) { void loadDocs(); return; }
+  draw();
+}
+
+const requestOf = (chosen: Target): AdminRevokeRequest =>
+  chosen.kind === 'key' ? { kind: 'key', keyId: chosen.keyId } : chosen.kind === 'digest' ? { kind: 'digest', digest: chosen.digest, instanceId: chosen.instanceId } : { kind: 'other' };
+
+/** The same rule as the main process, for the Revoke button only: 1 to 512 characters and at least three letters or digits. */
+function reasonValid(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length >= 1 && trimmed.length <= MAX_REVOKE_REASON && [...trimmed].filter((c) => /[\p{L}\p{N}]/u.test(c)).length >= 3;
+}
+
+const listLifetimeLabel = (value: string): string => (value.endsWith('h') ? tr('admin.p2.label.hours', { n: Number.parseInt(value, 10) }) : lifetimeLabel(value));
+
+function revokeRack(): HTMLElement {
+  const pinOk = status?.pin.kind === 'loaded';
+  const identity = identityDev('root');
+  const targetDev: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
+    : !revView ? { state: 'waiting', why: tr('admin.p2.policyCheck.ready') }
+    : !revView.ok ? { state: 'failed', why: revView.message }
+    : target ? { state: 'done', why: tr('admin.p2.target.done', { label: dialogSafe(target.label) }) }
+    : { state: 'ready', why: tr('admin.p2.target.ready') };
+  const revokeDev: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
+    : rootWritten ? { state: 'done', why: tr('admin.p2.revoke.done', { v: rootWritten.version }) }
+    : identity.state !== 'done' ? { state: 'waiting', why: tr('admin.p2.why.needRoot') }
+    : !target ? { state: 'waiting', why: tr('admin.p2.why.noTarget') }
+    : { state: 'ready', why: tr('admin.p2.revoke.ready') };
+  return rackShell('admin.p2.chain.revoke',
+    keySlot('root'), link(identity.state === 'done'),
+    faceplate('target', 'SKI / TARGET', targetDev,
+      h('div', { class: 'sec-label' }, 'TARGET'),
+      screen(target ? (target.kind === 'digest' ? short(target.digest) : target.kind === 'key' ? short(target.keyId) : '…') : '—', target ? dialogSafe(target.label) : tr('admin.p2.target.ready'), target ? 'verified' : '')),
+    link(targetDev.state === 'done'),
+    faceplate('revoke', 'SKI / REVOKE', revokeDev,
+      h('div', { class: 'sec-label' }, tr('admin.p2.label.revocationLifetime').toUpperCase()),
+      screen(rootWritten ? 'REVOKED' : lifetimeLabel(revokeLifetime), rootWritten ? `v${rootWritten.version}` : tr('admin.screen.lifetime'), rootWritten ? 'verified' : '')),
+    link(revokeDev.state === 'done'), policySlot());
+}
+
+function refreshRack(): HTMLElement {
+  const pinOk = status?.pin.kind === 'loaded';
+  const identity = identityDev('root');
+  const dev: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
+    : !revView ? { state: 'waiting', why: tr('admin.p2.policyCheck.ready') }
+    : !revView.ok ? { state: 'failed', why: revView.message }
+    : rootWritten ? { state: 'done', why: tr('admin.p2.refresh.done', { v: rootWritten.version }) }
+    : { state: 'ready', why: tr('admin.p2.refresh.ready', { v: revView.version, date: revView.expiresAt }) };
+  return rackShell('admin.p2.chain.refresh',
+    keySlot('root'), link(identity.state === 'done'),
+    faceplate('refresh', 'SKI / REVOCATION REFRESH', dev,
+      h('div', { class: 'sec-label' }, tr('admin.p2.screen.revocations').toUpperCase()),
+      screen(revView?.ok ? `v${revView.version}` : '—', revView?.ok ? tr('admin.p2.refresh.ready', { v: revView.version, date: revView.expiresAt }) : tr('admin.p2.screen.noDoc'),
+        rootWritten ? 'verified' : revView?.ok && (revView.expired || revView.stale) ? 'warn' : '')),
+    link(dev.state === 'done'), policySlot());
+}
+
+function timestampRack(): HTMLElement {
+  const pinOk = status?.pin.kind === 'loaded';
+  const identity = identityDev('timestamp');
+  const none = tr('admin.p2.label.none');
+  const dev: Dev = !pinOk ? { state: 'locked', why: tr('admin.p2.why.noPin') }
+    : !tsView ? { state: 'waiting', why: tr('admin.p2.policyCheck.ready') }
+    : !tsView.ok ? { state: 'failed', why: tsView.message }
+    : !tsView.configured ? { state: 'locked', why: tr('admin.p2.err.noFreshness') }
+    : tsView.disabled ? { state: 'locked', why: tsView.disabled }
+    : rootWritten ? { state: 'done', why: tr('admin.p2.timestamp.done', { v: rootWritten.version }) }
+    : { state: 'ready', why: tr('admin.p2.timestamp.ready', { v: tsView.version ?? none, date: tsView.expiresAt ?? none }) };
+  const view = tsView?.ok && tsView.configured ? tsView : null;
+  return rackShell('admin.p2.chain.timestamp',
+    keySlot('timestamp'), link(identity.state === 'done'),
+    faceplate('timestamp', 'SKI / TIMESTAMP', dev,
+      h('div', { class: 'sec-label' }, tr('admin.p2.screen.timestamp').toUpperCase()),
+      screen(view ? (view.version === null ? none : `v${view.version}`) : '—', view ? view.expiresAt ?? tr('admin.p2.notice.timestampUnreadableView') : tr('admin.p2.screen.noDoc'),
+        rootWritten ? 'verified' : view && !view.matches ? 'warn' : view ? 'verified' : '')),
+    link(dev.state === 'done'), policySlot());
+}
+
+function targetDetail(pane: HTMLElement): void {
+  pane.append(h('p', { class: 'hint' }, tr('admin.p2.hint.target')));
+  if (!revView) { pane.append(h('p', { class: 'hint' }, tr('admin.p2.policyCheck.ready'))); return; }
+  if (!revView.ok) { pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, revView.message)); return; }
+  const isRoot = status?.armed?.role === 'root';
+  const pick = (chosen: Target) => { target = chosen; message = null; draw(); };
+  const approvers = revTargets.filter((x): x is Extract<AdminRevocationTarget, { kind: 'key' }> => x.kind === 'key');
+  pane.append(h('h2', {}, tr('admin.p2.label.targetApprovers')));
+  if (approvers.length === 0) pane.append(h('p', { class: 'hint' }, tr('admin.p2.notice.noApprovers')));
+  else pane.append(h('table', { class: 'tbl' },
+    h('tr', {}, h('th', {}, tr('admin.p2.label.name')), h('th', {}, tr('admin.p2.label.keyId')), h('th', {}, '')),
+    ...approvers.map((a) => h('tr', { 'data-target-key': a.label },
+      h('td', {}, dialogSafe(a.label)), h('td', { class: 'mono' }, short(a.keyId)),
+      h('td', {}, button(tr('admin.p2.btn.choose'), () => pick({ kind: 'key', keyId: a.keyId, label: a.label }), { id: `target-${a.keyId.slice(7, 15)}` }))))));
+
+  pane.append(h('h2', {}, tr('admin.p2.label.targetSkills')));
+  const reviewedPairs = new Set(revTargets.filter((x) => x.kind === 'digest').map((x) => { const d = x as { digest: string; instanceId: string }; return `${d.digest}|${d.instanceId}`; }));
+  if (revSkills.length === 0) pane.append(h('p', { class: 'hint' }, tr('admin.screen.noSkill')));
+  else pane.append(h('table', { class: 'tbl' },
+    h('tr', {}, h('th', {}, 'Skill'), h('th', {}, tr('admin.inspect.version')), h('th', {}, ''), h('th', {}, '')),
+    ...revSkills.map((row) => {
+      const usable = row.reviewed && row.digest !== null && reviewedPairs.has(`${row.digest}|${row.instanceId}`);
+      const action = row.digest === null ? null
+        : usable ? button(tr('admin.p2.btn.choose'), () => pick({ kind: 'digest', digest: row.digest!, instanceId: row.instanceId, label: `${row.name} · ${short(row.digest)}` }), { id: `target-skill-${row.name}` })
+        : row.reviewed ? h('span', { class: 'hint', style: 'margin:0' }, tr('admin.p2.err.alreadyRevoked'))
+        : button(tr('admin.p2.btn.review'), () => void run(async () => {
+            // The page only asks; the native window shows the exact version and records the answer.
+            const result = await api.admin.review(row.instanceId);
+            if (!result.ok) { message = { ok: false, text: result.message }; await fetchStatus(); return; }
+            revSkills = await api.admin.revocationSkills();
+            revTargets = await api.admin.revocationTargets();
+          }), { disabled: !isRoot, id: `review-${row.name}` });
+      return h('tr', { 'data-skill': row.name },
+        h('td', {}, dialogSafe(row.name)),
+        h('td', { class: 'mono' }, row.digest ?? tr('admin.p2.notice.skillUnreadable', { error: dialogSafe(row.error ?? '') })),
+        h('td', {}, row.digest === null ? '' : row.reviewed ? tr('admin.p2.label.reviewed') : tr('admin.p2.label.notReviewed')),
+        h('td', {}, action));
+    })));
+  pane.append(h('div', { class: 'cmd', style: 'margin-top:12px' },
+    button(tr('admin.p2.btn.revokeOtherKey'), () => pick({ kind: 'other', label: tr('admin.p2.btn.revokeOtherKey') }), { id: 'target-other' })));
+  if (!isRoot) pane.append(h('p', { class: 'hint' }, tr('admin.p2.why.needRoot')));
+}
+
+function revokeDetail(pane: HTMLElement): void {
+  pane.append(h('p', { class: 'hint' }, tr('admin.p2.hint.revoke')));
+  if (!target) { pane.append(h('p', { class: 'hint' }, tr('admin.p2.why.noTarget'))); return; }
+  const chosen = target;
+  const isRoot = status?.armed?.role === 'root';
+  const area = h('textarea', { class: 'reason', rows: 3, maxlength: MAX_REVOKE_REASON, 'data-field': 'revoke-reason', placeholder: tr('admin.approve.placeholder') }) as HTMLTextAreaElement;
+  area.value = revokeReason;
+  let revokeButton: HTMLButtonElement;
+  pane.append(h('dl', { class: 'kv' }, h('dt', {}, tr('admin.p2.dev.target')), h('dd', {}, dialogSafe(chosen.label))),
+    ...(chosen.kind === 'other' ? [h('p', { class: 'hint' }, tr('admin.p2.notice.otherKeyChosen'))] : []),
+    h('h2', {}, tr('admin.p2.label.reason')), area,
+    h('h2', {}, tr('admin.p2.label.revocationLifetime')), chips(REVOCATION_LIFETIMES, revokeLifetime, lifetimeLabel, (value) => { revokeLifetime = value; }),
+    h('div', { class: 'cmd', style: 'margin-top:8px' }, revokeButton = button(tr('admin.p2.btn.revoke'), () => void run(async () => {
+      const result = await api.admin.revoke({ target: requestOf(chosen), reason: revokeReason.trim(), lifetime: revokeLifetime });
+      if (writeResult(result, 'admin.p2.revoke.done')) { revokeReason = ''; target = null; }
+      await afterWrite();
+    }), { primary: true, disabled: !isRoot || !reasonValid(revokeReason), id: 'revoke' })));
+  // Typing must enable the button without redrawing the pane (a redraw would drop the focus and the caret).
+  area.addEventListener('input', () => { revokeReason = area.value; revokeButton.disabled = busy || !isRoot || !reasonValid(revokeReason); });
+  if (!isRoot) pane.append(h('p', { class: 'hint' }, tr('admin.p2.why.needRoot')));
+}
+
+function documentRows(v: { path: string; sha256: string; version: number; expiresAt: string; expired: boolean }, pathLabel: MessageKey): HTMLElement {
+  return h('dl', { class: 'kv' },
+    h('dt', {}, tr('admin.p2.label.version')), h('dd', {}, String(v.version)),
+    h('dt', {}, tr('admin.p2.label.expires')), h('dd', {}, `${v.expiresAt}${v.expired ? ` · ${tr('admin.p2.err.revocationsExpired')}` : ''}`),
+    h('dt', {}, tr('admin.p2.label.sha256')), h('dd', { class: 'mono' }, v.sha256),
+    h('dt', {}, tr(pathLabel)), h('dd', {}, v.path));
+}
+
+function refreshDetail(pane: HTMLElement): void {
+  pane.append(h('p', { class: 'hint' }, tr('admin.p2.hint.refresh')));
+  if (!revView) { pane.append(h('p', { class: 'hint' }, tr('admin.p2.policyCheck.ready'))); return; }
+  if (!revView.ok) { pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, revView.message)); return; }
+  const v = revView;
+  const isRoot = status?.armed?.role === 'root';
+  pane.append(documentRows(v, 'admin.p2.label.revocationsPath'),
+    h('dl', { class: 'kv' },
+      h('dt', {}, tr('admin.p2.label.revokedKeys')), h('dd', {}, String(v.keys.length)),
+      h('dt', {}, tr('admin.p2.label.revokedDigests')), h('dd', {}, String(v.digests.length))));
+  if (v.stale) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.stale')));
+  pane.append(h('h2', {}, tr('admin.p2.label.revocationLifetime')), chips(REVOCATION_LIFETIMES, refreshLifetime, lifetimeLabel, (value) => { refreshLifetime = value; }),
+    h('div', { class: 'cmd', style: 'margin-top:8px' }, button(tr('admin.p2.btn.resign'), () => void run(async () => {
+      writeResult(await api.admin.refreshRevocations({ lifetime: refreshLifetime }), 'admin.p2.refresh.done');
+      await afterWrite();
+    }), { primary: v.expired, disabled: !isRoot || v.signedByPreviousRoot, id: 'refresh-revocations' })));
+  if (!isRoot) pane.append(h('p', { class: 'hint' }, tr('admin.p2.why.needRoot')));
+}
+
+function timestampDetail(pane: HTMLElement): void {
+  pane.append(h('p', { class: 'hint' }, tr('admin.p2.hint.timestamp')));
+  if (!tsView) { pane.append(h('p', { class: 'hint' }, tr('admin.p2.policyCheck.ready'))); return; }
+  if (!tsView.ok) { pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tsView.message)); return; }
+  if (!tsView.configured) { pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.err.noFreshness'))); return; }
+  const v = tsView;
+  const none = tr('admin.p2.label.none');
+  const armed = status?.armed ?? null;
+  const isSigner = armed?.role === 'timestamp';
+  pane.append(h('dl', { class: 'kv' },
+    h('dt', {}, tr('admin.p2.label.version')), h('dd', {}, v.version === null ? none : String(v.version)),
+    h('dt', {}, tr('admin.p2.label.expires')), h('dd', {}, v.expiresAt ?? none),
+    h('dt', {}, tr('admin.p2.label.timestampKey')), h('dd', { class: 'mono' }, v.keyId ?? none),
+    h('dt', {}, tr('admin.p2.label.maxLifetime')), h('dd', {}, v.maxLifetime),
+    h('dt', {}, tr('admin.p2.label.timestampPath')), h('dd', {}, v.path)));
+  if (!v.readable) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.timestampUnreadableView')));
+  else pane.append(h('p', { class: 'hint' }, v.matches ? tr('admin.p2.notice.timestampMatches') : tr('admin.p2.notice.freshnessTemplate')));
+  if (v.disabled) { pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, v.disabled)); return; }
+  // The default is the largest lifetime the organisation allows.
+  if (tsLifetime === null || !v.lifetimes.includes(tsLifetime)) tsLifetime = v.lifetimes.at(-1) ?? null;
+  pane.append(h('h2', {}, tr('admin.p2.label.timestampLifetime')),
+    chips(v.lifetimes, tsLifetime ?? v.lifetimes[0]!, listLifetimeLabel, (value) => { tsLifetime = value; }),
+    h('div', { class: 'cmd', style: 'margin-top:8px' }, button(tr('admin.p2.btn.sign'), () => void run(async () => {
+      writeResult(await api.admin.signTimestamp({ lifetime: tsLifetime! }), 'admin.p2.timestamp.done');
+      await afterWrite();
+    }), { primary: !v.matches, disabled: !isSigner || tsLifetime === null, id: 'sign-timestamp' })));
+  if (!isSigner) pane.append(h('p', { class: 'hint' }, tr('admin.p2.why.needTimestamp')));
 }

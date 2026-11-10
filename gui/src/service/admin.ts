@@ -8,28 +8,32 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, open, readFile, realpath, rename } from 'node:fs/promises';
 import path from 'node:path';
 import {
-  approveSkill, commitTrustRoot, DocumentChangedError, prepareTrustRootChange, signPreparedTrustRoot, StaleDocumentError,
-  type PreparedTrustRoot, type TrustRootChange,
+  approveSkill, commitRevocations, commitTrustRoot, DocumentChangedError, prepareRevocationsChange, prepareTrustRootChange, signPreparedRevocations,
+  signPreparedTrustRoot, StaleDocumentError, type RevocationChange, type TrustRootChange,
 } from '../../../src/admin.ts';
 import { parseCertificate } from '../../../src/certificate.ts';
+import { parseEnvelope } from '../../../src/dsse.ts';
+import { commitTimestamp, prepareTimestamp, signPreparedTimestamp, TimestampUnreadableError } from '../../../src/recovery-admin.ts';
+import { readRevocationsForUpdate, type Revocations } from '../../../src/revocations.ts';
+import { MAX_TIMESTAMP_BYTES, parseTimestampPayload, readTimestampForUpdate } from '../../../src/timestamp.ts';
 import { FileChangedError, isInside, readRegularFile, realpathAllowingMissing, resolveOutside } from '../../../src/fs-safe.ts';
 import { loadPrivateKeyBytes, type PrivateKeyInfo } from '../../../src/keys.ts';
 import { scopeMatches, validateScope } from '../../../src/names.ts';
 import {
-  DiscoveryBudgetError, findSkillDirs, forbiddenApproverKeys, loadPolicy, loadPolicyRoot, loadPolicyTrust, loadTrustForPreview, memoryMinimums,
+  discoverCertificates, DiscoveryBudgetError, findSkillDirs, forbiddenApproverKeys, loadPolicy, loadPolicyRoot, loadPolicyTrust, loadTrustForPreview, memoryMinimums,
   readHostState, recordDocumentVersions, tooDeepResult, verifyWithPolicy, type ForbiddenKey, type Policy, type PolicyRootResult, type PreviewOverride,
 } from '../../../src/policy.ts';
 import { readTrustRootForUpdate, type TrustRoot } from '../../../src/trust-root.ts';
 import { requireDisplaySafeText } from '../../../src/root-events.ts';
 import { t, type Lang, type MessageKey } from '../i18n/messages.ts';
-import { addDuration, formatTimestamp } from '../../../src/time.ts';
+import { addDuration, formatTimestamp, parseDuration } from '../../../src/time.ts';
 import { collectSkillTree, SKILL_FILENAME, sha256Hex } from '../../../src/tree-digest.ts';
 import type { TrustContextResult, Verdict } from '../../../src/verify.ts';
 import { skillNameFromSkillFile } from '../../../src/verify.ts';
 import type {
-  AdminActionResult, AdminApproverLifetime, AdminArmResult, AdminCheckView, AdminConsequence, AdminInspectView, AdminLifetime, AdminPinView,
-  AdminReviewSummary, AdminRoleView, AdminResetResult, AdminSignSummary, AdminStatusView, AdminTrustRootLifetime, AdminTrustRootView,
-  AdminVerifyAllView, AdminWriteResult,
+  AdminActionResult, AdminApproverLifetime, AdminArmResult, AdminCheckView, AdminConsequence, AdminInspectView, AdminLifetime, AdminListLifetime, AdminPinView,
+  AdminReviewSummary, AdminRevocationSkill, AdminRevocationsView, AdminRevocationTarget, AdminRevokeRequest, AdminRoleView, AdminResetResult,
+  AdminSignSummary, AdminStatusView, AdminTimestampLifetime, AdminTimestampView, AdminTrustRootLifetime, AdminTrustRootView, AdminVerifyAllView, AdminWriteResult,
 } from './types.ts';
 import type { PublicKeyInfo } from '../../../src/keys.ts';
 
@@ -45,6 +49,10 @@ export const MEMORY_FILE = 'admin-state.json';
 export const APPROVER_LIFETIMES: readonly AdminApproverLifetime[] = ['90d', '180d', '365d'];
 export const TRUST_ROOT_LIFETIMES: readonly AdminTrustRootLifetime[] = ['180d', '365d'];
 export const MAX_APPROVER_NAME = 128;
+export const REVOCATION_LIFETIMES: readonly AdminListLifetime[] = ['7d', '30d'];
+export const TIMESTAMP_LIFETIMES: readonly AdminTimestampLifetime[] = ['6h', '12h', '24h'];
+/** The engine's limit for a revocation reason. */
+export const MAX_REVOKE_REASON = 512;
 const IDENTITY_CONTEXT = 'mago-ski gui identity v1';
 
 // Refusal texts are in the message catalog (admin.err.*); a session reads its language when it builds each one.
@@ -336,6 +344,8 @@ export interface AdminSessionOptions {
   now?: () => Date;
   /** The Skill a discovered instance id names, from the observation service. */
   instance: (id: string) => { path: string; name: string } | null;
+  /** Every discovered instance, from the same source as `instance` (TARGET lists them). */
+  instances: () => Array<{ id: string; path: string; name: string }>;
   /** The observation service's policy path, to say when it differs from the pin. */
   hostPolicyPath?: () => string | null;
   /** Native dialogs, answered by a human in the main process. Each resolves true only for the confirming button. */
@@ -377,6 +387,7 @@ interface Armed {
 }
 
 interface Review {
+  instanceId: string;
   digest:     string;
   name:       string;
   keyId:      string;
@@ -763,7 +774,7 @@ export class AdminSession {
           this.startCooldown();
           return { ok: false, message: this.msg('admin.err.reviewNotRecorded') };
         }
-        this.reviews.set(`${op.keyId}|${op.generation}|${instanceId}`, { digest: read.tree.digest, name: read.name, keyId: op.keyId, generation: op.generation });
+        this.reviews.set(`${op.keyId}|${op.generation}|${instanceId}`, { instanceId, digest: read.tree.digest, name: read.name, keyId: op.keyId, generation: op.generation });
         return { ok: true };
       } catch (error) {
         return { ok: false, message: (error as Error).message };
@@ -789,7 +800,7 @@ export class AdminSession {
         const record = this.reviews.get(recordKey);
         if (!record || record.digest !== digest) throw new AdminError(this.msg('admin.err.needReview'));
 
-        const text = this.checkReason(reason);
+        const text = this.checkReason(reason, MAX_REASON);
         if (!LIFETIMES.includes(lifetime)) throw new AdminError('choose a lifetime of 30, 90 or 180 days');
         const now = this.now();
         const expires = addDuration(now, lifetime, 'certificate lifetime');
@@ -823,39 +834,46 @@ export class AdminSession {
         // Claim the record before the dialog, so a second approve cannot use it while this one waits for the human.
         this.requireNoDialog();
         this.reviews.delete(recordKey);
-        const summary: AdminSignSummary = {
-          action: 'approve', skillName: read.name, skillPath: skill.path, reviewedDigest: record.digest, digest: read.tree.digest,
-          lifetime, expiresAt: formatTimestamp(expires), reason: text, role: armed.role.role, keyName: armed.role.name, keyId: op.keyId,
-        };
-        const confirmed = await this.ask(() => this.options.confirmSign(summary), false);
-        if (!confirmed) {
-          if (op.generation === this.generation) this.reviews.set(recordKey, record);
-          this.startCooldown();
-          return { ok: false, message: this.msg('admin.err.signCancelled') };
-        }
-        if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
-
-        const dir = pin.policy.certificateDirs[0];
+        // A claimed record is given back when the signing fails or is cancelled and the key is still this generation's.
+        const restore = (): void => { if (op.generation === this.generation) this.reviews.set(recordKey, record); };
         try {
-          const issued = await approveSkill({
-            skillDir: skill.path, approverKey: armed.key, now, expires: lifetime, reason: text,
-            expectDigest: record.digest, expectName: record.name, ...(dir ? { outDir: dir } : {}),
-            beforeSign: async (info) => {
-              await this.options.hooks?.beforeSign?.();
-              // Last look before the file is written: the key must still be this generation's and still hold its role.
-              const latest = await this.current('approver', op);
-              await this.requireSameKeyFile(latest.armed);
-              const latestScopes = latest.armed.role.scopes ?? [];
-              if (!latestScopes.some((scope) => scopeMatches(scope, info.skillName)))
-                throw new AdminError(this.msg('admin.err.scope', { scopes: latestScopes.join(', '), name: info.skillName }));
-              if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
-              if (await this.keyInsideSkills(latest.armed.keyPath, latest.pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
-            },
-          });
-          return { ok: true, certificateId: issued.certificateId, certificatePath: issued.path, digest: issued.digest, expiresAt: formatTimestamp(issued.expiresAt) };
+          const summary: AdminSignSummary = {
+            action: 'approve', skillName: read.name, skillPath: skill.path, reviewedDigest: record.digest, digest: read.tree.digest,
+            lifetime, expiresAt: formatTimestamp(expires), reason: text, role: armed.role.role, keyName: armed.role.name, keyId: op.keyId,
+          };
+          const confirmed = await this.ask(() => this.options.confirmSign(summary), false);
+          if (!confirmed) {
+            restore();
+            this.startCooldown();
+            return { ok: false, message: this.msg('admin.err.signCancelled') };
+          }
+          if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+
+          const dir = pin.policy.certificateDirs[0];
+          try {
+            const issued = await approveSkill({
+              skillDir: skill.path, approverKey: armed.key, now, expires: lifetime, reason: text,
+              expectDigest: record.digest, expectName: record.name, ...(dir ? { outDir: dir } : {}),
+              beforeSign: async (info) => {
+                await this.options.hooks?.beforeSign?.();
+                // Last look before the file is written: the key must still be this generation's and still hold its role.
+                const latest = await this.current('approver', op);
+                await this.requireSameKeyFile(latest.armed);
+                const latestScopes = latest.armed.role.scopes ?? [];
+                if (!latestScopes.some((scope) => scopeMatches(scope, info.skillName)))
+                  throw new AdminError(this.msg('admin.err.scope', { scopes: latestScopes.join(', '), name: info.skillName }));
+                if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+                if (await this.keyInsideSkills(latest.armed.keyPath, latest.pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
+              },
+            });
+            return { ok: true, certificateId: issued.certificateId, certificatePath: issued.path, digest: issued.digest, expiresAt: formatTimestamp(issued.expiresAt) };
+          } catch (error) {
+            if (error instanceof AdminError) throw error;
+            throw new AdminError(safeMessage(error, this.msg('admin.err.signFailed')));
+          }
         } catch (error) {
-          if (error instanceof AdminError) throw error;
-          throw new AdminError(safeMessage(error, this.msg('admin.err.signFailed')));
+          restore();
+          throw error;
         }
       } catch (error) {
         return { ok: false, message: (error as Error).message };
@@ -863,12 +881,12 @@ export class AdminSession {
     });
   }
 
-  /** Trim; at most 1024 units; display-safe; and real letters or digits, not fillers. */
-  private checkReason(reason: string): string {
+  /** Trim; at most `max` units (approve 1024, revoke 512); display-safe; and real letters or digits, not fillers. */
+  private checkReason(reason: string, max: number): string {
     const text = reason.trim();
     if (text === '') throw new AdminError(this.msg('admin.err.needReason'));
-    if (text.length > MAX_REASON) throw new AdminError(this.msg('admin.err.reasonTooLong'));
-    requireDisplaySafeText(text, 'Reason', MAX_REASON);
+    if (text.length > max) throw new AdminError(this.msg('admin.err.reasonTooLong', { max }));
+    requireDisplaySafeText(text, 'Reason', max);
     const real = [...text].filter((c) => /[\p{L}\p{N}]/u.test(c) && !'ᅟᅠㅤﾠ⠀'.includes(c));
     if (real.length < 3) throw new AdminError(this.msg('admin.err.needReason'));
     return text;
@@ -915,7 +933,7 @@ export class AdminSession {
     try {
       bytes = await readRegularFile(pin.policy.trustRootPath, 'Trust root', 4 * 1024 * 1024);
     } catch (error) {
-      return fail(dialogSafe(safeMessage(error, this.msg('admin.p2.why.documents'))));
+      return fail(this.msg('admin.p2.err.rolesUnknown', { reason: dialogSafe(safeMessage(error, this.msg('admin.p2.why.documents'))) }));
     }
     const activeRootKeyId = pin.root.activeRootKeyId;
     try {
@@ -923,7 +941,7 @@ export class AdminSession {
     } catch (error) {
       const claimed = unverifiedRootKeyId(bytes);
       if (claimed !== null && pin.root.walk?.retired.includes(claimed)) return fail(this.msg('admin.p2.err.previousRoot'), true);
-      return fail(dialogSafe((error as Error).message));
+      return fail(this.msg('admin.p2.err.rolesUnknown', { reason: dialogSafe((error as Error).message) }));
     }
   }
 
@@ -1008,8 +1026,9 @@ export class AdminSession {
     const toFailed = after.ok ? null : after.reason;
     return {
       skills: rows.length + set.tooDeep.length,
-      changed: changed.length,
-      lines: changed.slice(0, 5).map((row) => ({ name: row.name, from: row.from, to: blocks ? 'BLOCKED_UNTIL_TIMESTAMP' as const : row.after, after: row.after })),
+      // When the current documents do not verify there is nothing to compare: no changed count and no lines (design P8.4).
+      changed: from.ok ? changed.length : 0,
+      lines: !from.ok ? [] : changed.slice(0, 5).map((row) => ({ name: row.name, from: row.from, to: blocks ? 'BLOCKED_UNTIL_TIMESTAMP' as const : row.after, after: row.after })),
       tooDeep: set.tooDeep.length,
       freshnessBlock: blocks,
       fromFailed: from.ok ? null : from.reason,
@@ -1216,6 +1235,403 @@ export class AdminSession {
           memoryWarning = true;
         }
         return { ok: true, version: written.version, path: written.path, needsTimestamp: pin.policy.recovery?.freshness !== undefined, memoryWarning };
+      } catch (error) {
+        return { ok: false, message: this.writeMessage(error) };
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------ phase 2b: revocations and the timestamp
+
+  /**
+   * The active root, recovery and timestamp keys, from the walk of the same operation: never revocable here. Former keys
+   * (a pinned root, recovery or timestamp key that a rotation replaced) are revocable. With no walk, the pinned policy
+   * is the active state.
+   */
+  private roleKeyIds(pin: LoadedPin, root: Pick<Extract<PolicyRootResult, { ok: true }>, 'walk' | 'activeRootKeyId'>): Set<string> {
+    const ids = new Set<string>([root.activeRootKeyId]);
+    if (root.walk) {
+      for (const keyId of root.walk.recovery.keyIds) ids.add(keyId);
+      if (root.walk.timestampKeyId) ids.add(root.walk.timestampKeyId);
+    } else {
+      ids.add(pin.policy.rootKeyId);
+      for (const keyId of pin.policy.recovery?.set.keyIds ?? []) ids.add(keyId);
+      if (pin.policy.recovery?.freshness) ids.add(pin.policy.recovery.freshness.keyId);
+    }
+    return ids;
+  }
+
+  /**
+   * The root walk as a write sees it: memory-checked and never recording (design U1). When it does not load, the write is
+   * refused with the text for a revoked root or with the reason.
+   */
+  private async requireRootWalk(pin: LoadedPin, now: Date): Promise<Extract<PolicyRootResult, { ok: true }>> {
+    const root = await loadPolicyRoot(memoryPolicy(pin), now, { recordVersions: false });
+    if (!root.ok) throw new AdminError(root.rootRevoked ? this.msg('admin.p2.err.rootRevoked') : this.msg('admin.p2.err.trustRootUnchanged', { reason: dialogSafe(root.reason) }));
+    return root;
+  }
+
+  /** The revocation list under the active root, with no expiry check (an expired list is refreshed, not refused). */
+  private async revocationsDocument(found: Extract<Awaited<ReturnType<AdminSession['trustRootDocument']>>, { ok: true }>): Promise<
+    { ok: true; document: Revocations; bytes: Buffer } | { ok: false; message: string; signedByPreviousRoot: boolean }> {
+    const fail = (message: string, signedByPreviousRoot = false) => ({ ok: false as const, message, signedByPreviousRoot });
+    let bytes: Buffer;
+    try {
+      bytes = await readRegularFile(found.pin.policy.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
+    } catch (error) {
+      return fail(dialogSafe(safeMessage(error, this.msg('admin.p2.why.documents'))));
+    }
+    try {
+      return { ok: true, document: readRevocationsForUpdate(bytes, found.activeRootKeyId, found.document.root.publicKey), bytes };
+    } catch (error) {
+      let claimed: string | null = null;
+      try {
+        claimed = parseEnvelope(bytes, 'revocation list').signatures[0].keyid;
+      } catch {
+        claimed = null;
+      }
+      if (claimed !== null && found.pin.root.walk?.retired.includes(claimed)) return fail(this.msg('admin.p2.err.previousRoot'), true);
+      return fail(dialogSafe((error as Error).message));
+    }
+  }
+
+  /** REVOCATIONS: the list as it is, whether or not the organisation's trust fully loads. Unqueued; not use. */
+  async revocations(): Promise<AdminRevocationsView> {
+    const pin = await this.pin();
+    const found = await this.trustRootDocument(pin);
+    if (!found.ok) return found;
+    const list = await this.revocationsDocument(found);
+    if (!list.ok) return list;
+    const now = this.now();
+    const state = await readHostState(found.pin.memoryFile).catch(() => null);
+    const minimum = state ? memoryMinimums(state, found.activeRootKeyId, null).revocations : 0;
+    const document = list.document;
+    return {
+      ok: true, path: found.pin.policy.revocationsPath, sha256: `sha256:${sha256Hex(list.bytes)}`, version: document.version,
+      expiresAt: formatTimestamp(document.expiresAt), expired: document.expiresAt <= now,
+      keys: document.keys.map((entry) => ({ keyId: entry.keyId, reason: entry.reason, revokedAt: formatTimestamp(entry.revokedAt) })),
+      digests: document.digests.map((entry) => ({ digest: entry.digest, reason: entry.reason, revokedAt: formatTimestamp(entry.revokedAt) })),
+      stale: document.version < minimum, signedByPreviousRoot: false,
+    };
+  }
+
+  /** TARGET's Skill list: every discovered instance with its digest and whether the armed key reviewed that digest. Unqueued; not use. */
+  async revocationSkills(): Promise<AdminRevocationSkill[]> {
+    const armed = this.armed;
+    const generation = this.generation;
+    const rows: AdminRevocationSkill[] = [];
+    for (const instance of this.options.instances()) {
+      try {
+        const read = await this.readSkill(instance.path);
+        const reviewed = armed !== null && generation === this.generation && this.reviews.get(`${armed.key.keyId}|${generation}|${instance.id}`)?.digest === read.tree.digest;
+        rows.push({ instanceId: instance.id, name: read.name, digest: read.tree.digest, reviewed, error: null });
+      } catch (error) {
+        rows.push({ instanceId: instance.id, name: instance.name, digest: null, reviewed: false, error: dialogSafe(safeMessage(error, this.msg('admin.err.skillUnreadable'))) });
+      }
+    }
+    return rows.sort((a, b) => a.name.localeCompare(b.name) || a.instanceId.localeCompare(b.instanceId));
+  }
+
+  /** What REVOKE accepts without the picker: current approvers that are not already revoked, and digests the armed key reviewed. */
+  async revocationTargets(): Promise<AdminRevocationTarget[]> {
+    const pin = await this.pin();
+    const found = await this.trustRootDocument(pin);
+    if (!found.ok) return [];
+    const list = await this.revocationsDocument(found);
+    const revokedKeys = new Set(list.ok ? list.document.keys.map((entry) => entry.keyId) : []);
+    const revokedDigests = new Set(list.ok ? list.document.digests.map((entry) => entry.digest) : []);
+    let roles: Set<string>;
+    try {
+      roles = this.roleKeyIds(found.pin, await this.requireRootWalk(found.pin, this.now()));
+    } catch {
+      return [];
+    }
+    const targets: AdminRevocationTarget[] = found.document.approvers
+      .filter((entry) => !roles.has(entry.keyId) && !revokedKeys.has(entry.keyId))
+      .map((entry) => ({ kind: 'key' as const, keyId: entry.keyId, label: entry.name }));
+    const armed = this.armed;
+    if (armed) {
+      for (const record of this.reviews.values()) {
+        if (record.keyId === armed.key.keyId && record.generation === this.generation && !revokedDigests.has(record.digest))
+          targets.push({ kind: 'digest', digest: record.digest, skillName: record.name, instanceId: record.instanceId });
+      }
+    }
+    return targets;
+  }
+
+  /** Certificates in the configured folders (the pin's `certificate_dirs` and each Skill's own folder) that name `keyId`. */
+  private async certificatesNaming(pin: LoadedPin, keyId: string): Promise<number> {
+    const set = await this.skillSet(pin);
+    let count = 0;
+    for (const dir of set.dirs) {
+      try {
+        const name = skillNameFromSkillFile(dir, await readRegularFile(path.join(dir, SKILL_FILENAME), 'Skill file', 4 * 1024 * 1024));
+        for (const source of await discoverCertificates(name, dir, pin.policy.certificateDirs)) {
+          try {
+            if (parseCertificate(source.bytes).approverKeyId === keyId) count += 1;
+          } catch {
+            // A candidate that does not parse names no key.
+          }
+        }
+      } catch {
+        // A Skill that cannot be read has no certificates to count.
+      }
+    }
+    return count;
+  }
+
+  revoke(o: { target: AdminRevokeRequest; reason: string; lifetime: AdminListLifetime }): Promise<AdminWriteResult> {
+    return this.writeRevocations(o.target, o.reason, o.lifetime);
+  }
+
+  refreshRevocations(lifetime: AdminListLifetime): Promise<AdminWriteResult> {
+    return this.writeRevocations({ kind: 'refresh' }, '', lifetime);
+  }
+
+  /**
+   * Revoke (key, digest or a picked key) and refresh. Order: D9 refusals and capture, role, review record (digest), reason
+   * and lifetime, key checks, input snapshot, root walk, trust root and list, the public-key picker (other key), target
+   * refusals, prepare, consequence, claim, dialog, commit with the checks repeated in beforeWrite, record.
+   */
+  private writeRevocations(request: AdminRevokeRequest | { kind: 'refresh' }, reason: string, lifetime: AdminListLifetime): Promise<AdminWriteResult> {
+    return this.serial(async () => {
+      let restore: () => void = () => {};
+      try {
+        const first = this.armed;
+        if (!first) throw new AdminError(this.msg('admin.p2.why.needRoot'));
+        const op = { keyId: first.key.keyId, generation: this.generation };
+        this.requireNoDialog();
+        if (first.role.role !== 'root') throw new AdminError(this.msg('admin.p2.err.notRoot', { role: this.msg(`admin.role.${first.role.role}` as MessageKey) }));
+
+        let record: Review | null = null;
+        const recordKey = request.kind === 'digest' ? `${op.keyId}|${op.generation}|${request.instanceId}` : '';
+        if (request.kind === 'digest') {
+          record = this.reviews.get(recordKey) ?? null;
+          if (!record || record.digest !== request.digest) throw new AdminError(this.msg('admin.err.needReview'));
+        }
+        const text = request.kind === 'refresh' ? '' : this.checkReason(reason, MAX_REVOKE_REASON);
+        if (!REVOCATION_LIFETIMES.includes(lifetime)) throw new AdminError(this.msg('admin.p2.err.badInput'));
+
+        const { pin, armed } = await this.current('root', op);
+        await this.requireSameKeyFile(armed);
+        if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
+
+        const inputs = await this.inputsOf(pin);
+        const now = this.now();
+        const rootWalk = await this.requireRootWalk(pin, now);
+        const found = await this.trustRootDocument(pin);
+        if (!found.ok) throw new AdminError(found.message);
+        const list = await this.revocationsDocument(found);
+        if (!list.ok) throw new AdminError(list.message);
+        const memory = await readHostState(pin.memoryFile);
+        const minimums = memoryMinimums(memory, found.activeRootKeyId, null);
+
+        let target: { keyId: string; label: string; certificates: number | null } | null = null;
+        if (request.kind === 'key') {
+          const approver = found.document.approvers.find((entry) => entry.keyId === request.keyId);
+          if (!approver) throw new AdminError(this.msg('admin.p2.err.notATarget'));
+          target = { keyId: approver.keyId, label: approver.name, certificates: null };
+        } else if (request.kind === 'other') {
+          this.requireNoDialog();
+          const picked = await this.ask(() => this.options.pickPublicKey(), { ok: false as const, reason: 'cancelled' });
+          if (!picked.ok) {
+            this.startCooldown();
+            throw new AdminError(picked.reason === 'cancelled' ? this.msg('admin.p2.err.cancelled') : this.msg('admin.p2.err.publicKeyUnreadable'));
+          }
+          if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+          // A picked key that is a current approver is named as one; any other is labelled as not a current approver.
+          const known = found.document.approvers.find((entry) => entry.keyId === picked.key.keyId);
+          target = { keyId: picked.key.keyId, label: known ? known.name : this.msg('admin.p2.label.otherKey', { keyId: picked.key.keyId }), certificates: null };
+        }
+        if (target) {
+          if (this.roleKeyIds(pin, rootWalk).has(target.keyId)) throw new AdminError(this.msg('admin.p2.err.cannotRevokeRole'));
+          if (list.document.keys.some((entry) => entry.keyId === target!.keyId)) throw new AdminError(this.msg('admin.p2.err.alreadyRevoked'));
+          if (request.kind === 'other' && !found.document.approvers.some((entry) => entry.keyId === target!.keyId)) target.certificates = await this.certificatesNaming(pin, target.keyId);
+        }
+        if (request.kind === 'digest' && list.document.digests.some((entry) => entry.digest === request.digest)) throw new AdminError(this.msg('admin.p2.err.alreadyRevoked'));
+
+        const change: RevocationChange = request.kind === 'refresh' ? { kind: 'refresh' }
+          : request.kind === 'digest' ? { kind: 'digest', digest: record!.digest, reason: text }
+          : { kind: 'key', keyId: target!.keyId, reason: text };
+        const prepared = await prepareRevocationsChange({
+          rootKeyId: found.activeRootKeyId, rootPublicKey: found.document.root.publicKey, revocationsPath: pin.policy.revocationsPath, now, expires: lifetime,
+          change, minimumVersion: minimums.revocations,
+        });
+        const consequence = await this.consequence(pin, now, { revocations: signPreparedRevocations(prepared, armed.key) }, 'document');
+        if (consequence.toFailed !== null) throw new AdminError(this.msg('admin.p2.notice.consequenceToFailed', { reason: dialogSafe(consequence.toFailed) }));
+
+        const document = {
+          path: pin.policy.revocationsPath, baseSha256: prepared.baseSha256, versionFrom: prepared.current.version,
+          versionTo: prepared.payload.version, expiresAt: formatTimestamp(prepared.payload.expiresAt),
+        };
+        const common = { role: armed.role.role, keyName: armed.role.name, keyId: op.keyId, document, consequence, freshnessBlock: consequence.freshnessBlock, afterReset: this.resetPending };
+        const summary: AdminSignSummary = request.kind === 'refresh'
+          ? { ...common, action: 'refresh-revocations', expiresFrom: formatTimestamp(prepared.current.expiresAt) }
+          : request.kind === 'digest'
+            ? { ...common, action: 'revoke-digest', digest: record!.digest, skillName: record!.name, reason: text }
+            : { ...common, action: 'revoke-key', targetKeyId: target!.keyId, label: target!.label, reason: text, certificates: target!.certificates };
+
+        await this.requireSameKeyFile(armed);
+        this.requireNoDialog();
+        // Claim the review record before the dialog, so a second revoke cannot use it while this one waits for the human.
+        if (record) {
+          this.reviews.delete(recordKey);
+          restore = () => { if (op.generation === this.generation) this.reviews.set(recordKey, record!); };
+        }
+        const confirmed = await this.ask(() => this.options.confirmSign(summary), false);
+        if (!confirmed) {
+          restore();
+          this.startCooldown();
+          return { ok: false, message: this.msg('admin.err.signCancelled') };
+        }
+        if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+
+        const written = await commitRevocations(prepared, armed.key, { beforeWrite: async () => { await this.guardBeforeWrite('root', op, inputs); } });
+        restore = () => {};
+        this.resetPending = false;
+        let memoryWarning = false;
+        try {
+          await this.options.hooks?.afterCommit?.();
+          await recordDocumentVersions(pin.memoryFile, { rootKeyId: found.activeRootKeyId, revocations: written.version });
+        } catch {
+          memoryWarning = true;
+        }
+        return { ok: true, version: written.version, path: written.path, needsTimestamp: pin.policy.recovery?.freshness !== undefined, memoryWarning };
+      } catch (error) {
+        restore();
+        return { ok: false, message: this.writeMessage(error) };
+      }
+    });
+  }
+
+  /** The timestamp lifetimes (6h, 12h, 24h) that are not above the policy's maximum. */
+  private allowedTimestampLifetimes(pin: LoadedPin): AdminTimestampLifetime[] {
+    const max = pin.policy.recovery?.freshness?.maxLifetimeMs ?? 0;
+    return TIMESTAMP_LIFETIMES.filter((value) => parseDuration(value, 'timestamp lifetime') <= max);
+  }
+
+  /** TIMESTAMP: the file as it is, parsed without any key check. Unqueued; not use. */
+  async timestamp(): Promise<AdminTimestampView> {
+    const pin = await this.pin();
+    if (pin.kind !== 'loaded') return { ok: false, message: pinView(pin).reason ?? `organisation pin: ${pin.kind}` };
+    const freshness = pin.policy.recovery?.freshness;
+    if (!freshness) return { ok: true, configured: false };
+    const now = this.now();
+    let keyId: string | null = null;
+    let version: number | null = null;
+    let expiresAt: string | null = null;
+    let readable = false;
+    try {
+      const envelope = parseEnvelope(await readRegularFile(freshness.timestampPath, 'Timestamp', MAX_TIMESTAMP_BYTES), 'timestamp');
+      const payload = parseTimestampPayload(envelope.payloadBytes);
+      keyId = envelope.signatures[0].keyid;
+      version = payload.version;
+      expiresAt = formatTimestamp(payload.expiresAt);
+      readable = true;
+    } catch {
+      readable = false;
+    }
+    const matches = (await loadTrustForPreview(memoryPolicy(pin), now, { skipFreshness: false })).ok;
+    const lifetimes = this.allowedTimestampLifetimes(pin);
+    const disabled = !pin.root.ok && pin.root.rootRevoked ? this.msg('admin.p2.err.rootRevoked') : lifetimes.length === 0 ? this.msg('admin.p2.err.maxLifetimeShort') : null;
+    const ms = freshness.maxLifetimeMs;
+    const maxLifetime = ms % 86_400_000 === 0 ? `${ms / 86_400_000}d` : ms % 3_600_000 === 0 ? `${ms / 3_600_000}h` : `${Math.round(ms / 60_000)}m`;
+    return { ok: true, configured: true, path: freshness.timestampPath, keyId, version, expiresAt, readable, matches, maxLifetime, lifetimes, disabled };
+  }
+
+  /**
+   * Sign timestamp. The refusals run in this order and the first that fails decides (design P5): the armed key's role,
+   * no freshness, a revoked root (or a root walk that does not load), an expired trust root, an expired revocation list,
+   * no allowed lifetime, prepare with the memory's minimums, the documents after signing.
+   */
+  signTimestamp(lifetime: AdminTimestampLifetime): Promise<AdminWriteResult> {
+    return this.serial(async () => {
+      try {
+        const first = this.armed;
+        if (!first) throw new AdminError(this.msg('admin.err.needKey'));
+        const op = { keyId: first.key.keyId, generation: this.generation };
+        this.requireNoDialog();
+        // This computer's memory as it was before this operation read the pin (reads record), for the first-seen marks.
+        const snapshot = await readHostState(this.memoryFile);
+        const { pin, armed } = await this.current('timestamp', op);
+        await this.requireSameKeyFile(armed);
+        if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
+        const inputs = await this.inputsOf(pin);
+        const now = this.now();
+
+        const freshness = pin.policy.recovery?.freshness;
+        if (!freshness) throw new AdminError(this.msg('admin.p2.err.noFreshness'));
+        const root = await this.requireRootWalk(pin, now);
+        const walk = root.walk!;
+        const found = await this.trustRootDocument(pin);
+        if (!found.ok) throw new AdminError(found.message);
+        if (found.document.expiresAt <= now) throw new AdminError(this.msg('admin.p2.err.trustRootExpiredRenew'));
+        const list = await this.revocationsDocument(found);
+        if (!list.ok) throw new AdminError(list.message);
+        if (list.document.expiresAt <= now) throw new AdminError(this.msg('admin.p2.err.revocationsExpiredRefresh'));
+        const allowed = this.allowedTimestampLifetimes(pin);
+        if (allowed.length === 0) throw new AdminError(this.msg('admin.p2.err.maxLifetimeShort'));
+        if (!allowed.includes(lifetime)) throw new AdminError(this.msg('admin.p2.err.badInput'));
+
+        const minimums = memoryMinimums(await readHostState(pin.memoryFile), found.activeRootKeyId, armed.key.keyId);
+        let prepared;
+        try {
+          prepared = await prepareTimestamp({ policy: memoryPolicy(pin), key: armed.key, now, expires: lifetime, minimumVersions: minimums, walk });
+        } catch (error) {
+          if (error instanceof TimestampUnreadableError) throw new AdminError(this.msg('admin.p2.err.timestampUnreadable'));
+          throw error;
+        }
+        const consequence = await this.consequence(pin, now, { timestamp: signPreparedTimestamp(prepared, armed.key) }, 'timestamp');
+        if (consequence.toFailed !== null) throw new AdminError(this.msg('admin.p2.notice.consequenceToFailed', { reason: dialogSafe(consequence.toFailed) }));
+
+        // The version of the file now on disk, when this key signed it; none when absent or signed by another key.
+        let versionFrom: number | null = null;
+        try {
+          versionFrom = readTimestampForUpdate(await readRegularFile(prepared.path, 'Timestamp', MAX_TIMESTAMP_BYTES), armed.key.keyId).version;
+        } catch {
+          versionFrom = null;
+        }
+        const seenRoot = snapshot.roots[found.activeRootKeyId];
+        const documents = {
+          rootEvents: { sha256: prepared.documents.rootEvents.sha256, counter: prepared.documents.rootEvents.count, firstSeen: prepared.documents.rootEvents.count > 0 && (snapshot.rootEvents[pin.policy.rootKeyId]?.sequence ?? -1) < prepared.documents.rootEvents.count },
+          trustRoot: { sha256: prepared.documents.trustRoot.sha256, counter: prepared.documents.trustRoot.version, firstSeen: (seenRoot?.trust_root_version ?? 0) < prepared.documents.trustRoot.version },
+          revocations: { sha256: prepared.documents.revocations.sha256, counter: prepared.documents.revocations.version, firstSeen: (seenRoot?.revocations_version ?? 0) < prepared.documents.revocations.version },
+        };
+        const summary: AdminSignSummary = {
+          action: 'sign-timestamp', role: armed.role.role, keyName: armed.role.name, keyId: op.keyId,
+          document: { path: prepared.path, baseSha256: prepared.baseSha256, versionFrom, versionTo: prepared.payload.version, expiresAt: formatTimestamp(prepared.payload.expiresAt) },
+          consequence, freshnessBlock: false, afterReset: this.resetPending, documents, previousByOtherKey: prepared.previousByOtherKey,
+        };
+
+        await this.requireSameKeyFile(armed);
+        this.requireNoDialog();
+        const confirmed = await this.ask(() => this.options.confirmSign(summary), false);
+        if (!confirmed) {
+          this.startCooldown();
+          return { ok: false, message: this.msg('admin.err.signCancelled') };
+        }
+        if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+
+        const written = await commitTimestamp(prepared, armed.key, {
+          beforeWrite: async () => {
+            await this.guardBeforeWrite('timestamp', op, inputs);
+            // The walk the timestamp names must still be the memory-checked one.
+            const again = await loadPolicyRoot(memoryPolicy(pin), this.now(), { recordVersions: false });
+            if (!again.ok || again.walk?.logSha256 !== walk.logSha256) throw new DocumentChangedError('Root event log');
+          },
+        });
+        this.resetPending = false;
+        let memoryWarning = false;
+        try {
+          await this.options.hooks?.afterCommit?.();
+          await recordDocumentVersions(pin.memoryFile, { timestamp: { keyId: armed.key.keyId, version: written.timestamp.version } });
+          // Root-event progress, once, with the ordinary rule: the first-seen mark for the log clears (design U3).
+          const progress = await loadPolicyRoot(memoryPolicy(pin), now, { recordVersions: true });
+          if (!progress.ok) memoryWarning = true;
+        } catch {
+          memoryWarning = true;
+        }
+        return { ok: true, version: written.timestamp.version, path: written.path, needsTimestamp: false, memoryWarning };
       } catch (error) {
         return { ok: false, message: this.writeMessage(error) };
       }

@@ -14,7 +14,7 @@ import {
   cancelLabel, keyPickerAllFiles, keyPickerTitle, lastApproverDialog, notificationGrouped, notificationImmediate, offlineDialog, publicKeyPickerTitle,
   resetDialog, reviewDialog, rootPickerTitle, signDialog, startFailure, type DialogText,
 } from './dialog-text.ts';
-import { parseAddApprover, parseRemoveApprover, parseRenew } from './ipc-args.ts';
+import { parseAddApprover, parseRefresh, parseRemoveApprover, parseRenew, parseRevoke, parseSignTimestamp } from './ipc-args.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererIndex = path.join(here, '..', 'renderer', 'index.html');
@@ -158,6 +158,7 @@ function registerAdminIpc(svc: ObservationService): void {
       const found = svc.view().instances.find((i) => i.id === id);
       return found ? { path: found.path, name: found.name } : null;
     },
+    instances: () => svc.view().instances.map((i) => ({ id: i.id, path: i.path, name: i.name })),
     hostPolicyPath: () => svc.view().host.policy.path,
     confirmReview, confirmSign, confirmReset, confirmOffline, confirmLastApprover, pickPublicKey,
     stateDir: app.getPath('userData'),
@@ -198,6 +199,13 @@ function registerAdminIpc(svc: ObservationService): void {
   handle('admin:remove-approver', (arg) => { const o = parseRemoveApprover(arg); return session.removeApprover(o.keyId, o.trustRootLifetime); });
   handle('admin:renew-trust-root', (arg) => session.renewTrustRoot(parseRenew(arg).lifetime));
   handle('admin:verify-all', () => session.verifyAll());
+  handle('admin:revocations', () => session.revocations());
+  handle('admin:revocation-skills', () => session.revocationSkills());
+  handle('admin:revocation-targets', () => session.revocationTargets());
+  handle('admin:revoke', (arg) => session.revoke(parseRevoke(arg)));
+  handle('admin:refresh-revocations', (arg) => session.refreshRevocations(parseRefresh(arg).lifetime));
+  handle('admin:timestamp', () => session.timestamp());
+  handle('admin:sign-timestamp', (arg) => session.signTimestamp(parseSignTimestamp(arg).lifetime));
 }
 
 function createWindow(): BrowserWindow {

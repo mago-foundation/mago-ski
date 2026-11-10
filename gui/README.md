@@ -15,6 +15,12 @@ The header has a language switch, `한국어 | English`. It re-renders the page 
 ![The Approve template with an approver key loaded](../docs/images/gui-admin-approve.png)
 ![The Manage approvers template: TRUST ROOT and POLICY CHECK](../docs/images/gui-admin-approvers.png)
 
+![Revoke: TARGET with the current approvers and a reviewed Skill](../docs/images/gui-admin-revoke.png)
+
+![Refresh revocation list: REVOCATION REFRESH](../docs/images/gui-admin-refresh.png)
+
+![Sign timestamp: TIMESTAMP](../docs/images/gui-admin-timestamp.png)
+
 Screenshots are made with `node scripts/screenshots.ts` (see the header of that script; the admin shots need the demo organisation's pin installed at `/etc/mago-ski`). Native dialogs are drawn by the OS and are not shown.
 
 ## What it does

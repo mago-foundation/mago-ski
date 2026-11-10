@@ -20,7 +20,6 @@ const TEXTS: Array<[MessageKey, string, string]> = [
   ['admin.p2.notice.consequenceTooDeep', '너무 깊어서 확인하지 않은 폴더: {n}개', 'Folders too deep to check: {n}'],
   ['admin.p2.notice.consequenceFromFailed', '현재 문서로는 검증할 수 없어요: {reason}', 'The current documents do not verify: {reason}'],
   ['admin.p2.notice.consequenceToFailed', '서명 후 문서가 검증되지 않아요: {reason}', 'After signing, the documents would not verify: {reason}'],
-  ['admin.p2.notice.freshnessCli', '타임스탬프가 새 문서를 가리키지 않아요. CLI에서 mago-ski timestamp sign을 실행하세요.', 'The timestamp does not name the new documents. Run mago-ski timestamp sign in the CLI.'],
   ['admin.p2.notice.freshnessTemplate', '타임스탬프가 새 문서를 가리키지 않아요. 타임스탬프 서명 템플릿을 실행하세요.', 'The timestamp does not name the new documents. Run the Sign timestamp template.'],
   ['admin.p2.forbidden.root', '루트 키', 'the root key'],
   ['admin.p2.forbidden.recovery', '복구 키', 'a recovery key'],
@@ -34,7 +33,7 @@ const TEXTS: Array<[MessageKey, string, string]> = [
   ['admin.p2.err.timestampUnreadable', '현재 타임스탬프를 읽을 수 없어요. CLI에서 --version으로 서명하세요.', 'The current timestamp cannot be read. Sign it in the CLI with --version.'],
   ['admin.p2.err.tooManyFolders', '폴더가 너무 많아서 영향을 계산할 수 없어요. 폴더 수를 줄이세요.', 'There are too many folders to work out the effect. Reduce the number of folders.'],
   ['admin.p2.err.cannotRevokeRole', '루트·복구·타임스탬프 키는 여기서 폐기할 수 없어요.', 'Root, recovery and timestamp keys cannot be revoked here.'],
-  ['admin.p2.err.notATarget', '현재 승인자나 찾은 인증서의 키만 폐기할 수 있어요', 'Only the keys of current approvers or of certificates found can be revoked'],
+  ['admin.p2.err.notATarget', '현재 승인자, 검토한 버전, 또는 직접 고른 공개 키만 폐기할 수 있어요', 'Only current approvers, versions you reviewed, or a public key you chose can be revoked'],
   ['admin.p2.err.alreadyRevoked', '이미 폐기됐어요', 'Already revoked'],
   ['admin.p2.err.trustRootExpired', '신뢰 루트가 만료됐어요', 'The trust root has expired'],
   ['admin.p2.err.revocationsExpired', '폐기 목록이 만료됐어요', 'The revocation list has expired'],
@@ -69,6 +68,15 @@ const TEXTS: Array<[MessageKey, string, string]> = [
   ['admin.p2.notice.permanenceDigest', '폐기는 되돌릴 수 없어요. 이 버전의 모든 인증서가 영구히 검증되지 않아요.', 'Revocation cannot be undone. Every certificate for this version will permanently fail verification.'],
   ['admin.p2.notice.freshnessBlock', '이 조직은 타임스탬프를 써요: 새 타임스탬프를 서명할 때까지 enforce 모드의 호스트는 모든 Skill을 막아요.', 'This organisation uses timestamps: hosts in enforce mode block every Skill until a new timestamp is signed.'],
   ['admin.dialog.reset.detail', '초기화하면 루트 문서를 쓸 때 지금 디스크에 있는 문서를 기준으로 삼아요.', 'After a reset, root document writes take the documents now on disk as their base.'],
+  ['admin.p2.label.revocationLifetime', '폐기 목록 기간', 'Revocation list lifetime'],
+  ['admin.p2.label.timestampLifetime', '타임스탬프 기간', 'Timestamp lifetime'],
+  ['admin.p2.label.reason', '사유', 'Reason'],
+  ['admin.p2.label.otherKey', '{keyId} · 현재 승인자가 아님', '{keyId} · not a current approver'],
+  ['admin.p2.dev.target', 'TARGET', 'TARGET'], ['admin.p2.dev.revoke', 'REVOKE', 'REVOKE'],
+  ['admin.p2.dev.refresh', 'REVOCATION REFRESH', 'REVOCATION REFRESH'], ['admin.p2.dev.timestamp', 'TIMESTAMP', 'TIMESTAMP'],
+  ['admin.p2.btn.revokeOtherKey', '다른 키 폐기…', 'Revoke another key…'],
+  ['admin.dialog.revoke.lineCerts', '이 키를 쓰는 인증서: {n}개', 'Certificates naming this key: {n}'],
+  ['admin.err.reasonTooLong', '이유는 {max}자 이하여야 해요', 'The reason must be {max} characters or fewer'],
 ];
 
 test('every phase 2 text has exactly the design values in both languages', () => {
@@ -79,7 +87,8 @@ test('every phase 2 text has exactly the design values in both languages', () =>
 });
 
 test('the old Publish and approvers/revoke title keys are gone, and t fills the placeholders', () => {
-  for (const gone of ['admin.tpl.publish.title', 'admin.tpl.approvers.title', 'admin.tpl.revoke.title']) assert.equal(gone in MESSAGES.ko, false, gone);
+  for (const gone of ['admin.tpl.publish.title', 'admin.tpl.approvers.title', 'admin.tpl.revoke.title', 'admin.p2.notice.freshnessCli', 'admin.p2.label.certTarget']) assert.equal(gone in MESSAGES.ko, false, gone);
+  assert.equal(t('en', 'admin.err.reasonTooLong', { max: 512 }), 'The reason must be 512 characters or fewer');
   assert.equal(t('en', 'admin.p2.policyCheck.done', { n: 3, m: 1 }), 'VERIFIED 3 · other 1');
   assert.equal(t('ko', 'admin.p2.forbidden.mustRemove', { why: '루트 키' }), '루트 키: 이 승인자는 빼야 해요');
 });

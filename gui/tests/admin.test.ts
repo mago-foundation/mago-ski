@@ -53,6 +53,7 @@ function fakes(base: string, procDir: string) {
     confirmOffline: async () => { calls.offline += 1; return await handlers.offline(); },
     confirmLastApprover: async () => { calls.lastApprover += 1; return await handlers.lastApprover(); },
     pickPublicKey: async () => { calls.pick += 1; return await handlers.pick(); },
+    instances: () => [] as Array<{ id: string; path: string; name: string }>,
     discoveryRoots: () => [] as string[],
     skillFolders: () => [] as string[],
     hostSkillDirs: () => hostSkillDirs,
@@ -86,6 +87,7 @@ async function world(t: TestContext, options: { scopes?: string[]; now?: Date; i
     ...(options.cooldownMs === undefined ? {} : { cooldownMs: options.cooldownMs }),
     ...(options.dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs: options.dialogTimeoutMs }),
     instance: (id) => instances[id] ?? null,
+    instances: () => Object.entries(instances).map(([id, i]) => ({ id, path: i.path, name: i.name })),
     discoveryRoots: () => [skills, ...extraRoots],
     skillFolders: () => Object.values(instances).map((i) => i.path),
   });

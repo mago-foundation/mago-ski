@@ -171,13 +171,15 @@ test('consequence block, freshness line, reset line, permanence lines (exact Eng
   ]);
   assert.deepEqual(consequenceLines('ko', blocked).slice(0, 2), ['영향받는 Skill: 7개 (전체 9개)', 'a: VERIFIED → 타임스탬프 전까지 차단 (타임스탬프 뒤 UNTRUSTED_SIGNER)']);
   assert.deepEqual(consequenceLines('ko', blocked).slice(-2), ['외 2개', '너무 깊어서 확인하지 않은 폴더: 2개']);
-  assert.deepEqual(consequenceLines('en', { ...emptyConsequence, fromFailed: 'freshness: stale' }), ['The current documents do not verify: freshness: stale']);
-  assert.deepEqual(consequenceLines('ko', { ...emptyConsequence, fromFailed: 'x' }), ['현재 문서로는 검증할 수 없어요: x']);
+  assert.deepEqual(consequenceLines('en', { ...emptyConsequence, fromFailed: 'freshness: stale' }), ['The current documents do not verify: freshness: stale', 'VERIFIED 0 · other 0']);
+  assert.deepEqual(consequenceLines('ko', { ...emptyConsequence, fromFailed: 'x' }), ['현재 문서로는 검증할 수 없어요: x', 'VERIFIED 0개 · 그 외 0개']);
   assert.deepEqual(consequenceLines('en', { ...emptyConsequence, toFailed: 'bad' }), ['After signing, the documents would not verify: bad']);
   assert.deepEqual(consequenceLines('ko', { ...emptyConsequence, toFailed: 'bad' }), ['서명 후 문서가 검증되지 않아요: bad']);
-  // A timestamp that restores a stale one shows what signing restores (U4).
-  assert.deepEqual(consequenceLines('en', { ...emptyConsequence, fromFailed: 'f', afterCounts: { VERIFIED: 3, REVOKED: 1 } }, true),
-    ['The current documents do not verify: f', 'VERIFIED 3 · other 1', 'REVOKED 1']);
+  // When the current documents do not verify, every dialog shows what signing produces and no head or lines (P8.4).
+  assert.deepEqual(consequenceLines('en', { ...emptyConsequence, fromFailed: 'f', changed: 4, lines: blocked.lines, tooDeep: 1, afterCounts: { VERIFIED: 3, REVOKED: 1, UNVERIFIABLE: 1 } }),
+    ['The current documents do not verify: f', 'VERIFIED 3 · other 2', 'REVOKED 1', 'UNVERIFIABLE 1']);
+  assert.deepEqual(consequenceLines('ko', { ...emptyConsequence, fromFailed: 'f', afterCounts: { VERIFIED: 3, REVOKED: 1 } }),
+    ['현재 문서로는 검증할 수 없어요: f', 'VERIFIED 3개 · 그 외 1개', 'REVOKED 1개']);
 
   const renew: AdminSignSummary = { ...common, action: 'renew-trust-root', expiresFrom: 'x', freshnessBlock: true, afterReset: true };
   const ko = signDialog('ko', renew).detail.split('\n');
@@ -190,7 +192,7 @@ test('consequence block, freshness line, reset line, permanence lines (exact Eng
     "This is the first signature since this computer's memory was reset: make sure the documents on disk are the newest.",
   ]);
 
-  const revokeKey: AdminSignSummary = { ...common, action: 'revoke-key', targetKeyId: OTHER, label: 'Eve', reason: 'lost laptop' };
+  const revokeKey: AdminSignSummary = { ...common, action: 'revoke-key', targetKeyId: OTHER, label: 'Eve', reason: 'lost laptop', certificates: null };
   const revokeDigest: AdminSignSummary = { ...common, action: 'revoke-digest', digest: OTHER, skillName: 'docs', reason: 'bad' };
   assert.deepEqual(signDialog('ko', revokeKey).detail.split('\n').slice(4, 6), [`폐기할 키: Eve ${OTHER}`, '사유: lost laptop']);
   assert.equal(signDialog('ko', revokeKey).message, '폐기할까요? 되돌릴 수 없어요.');
@@ -202,6 +204,11 @@ test('consequence block, freshness line, reset line, permanence lines (exact Eng
   assert.equal(signDialog('en', revokeKey).detail.split('\n').at(-1), 'Revocation cannot be undone. Every certificate this key signed will permanently fail verification.');
   assert.equal(signDialog('en', revokeDigest).detail.split('\n').at(-1), 'Revocation cannot be undone. Every certificate for this version will permanently fail verification.');
   assert.ok(signDialog('en', revokeDigest).detail.includes(`Version to revoke: docs ${OTHER}`));
+  // A key chosen with the picker adds the certificate count after the reason (P8.2); an approver does not.
+  const other: AdminSignSummary = { ...revokeKey, label: `${OTHER} · not a current approver`, certificates: 3 };
+  assert.deepEqual(signDialog('en', other).detail.split('\n').slice(4, 7), [`Key to revoke: ${OTHER} · not a current approver`, 'Reason: lost laptop', 'Certificates naming this key: 3']);
+  assert.ok(signDialog('ko', other).detail.split('\n').includes('이 키를 쓰는 인증서: 3개'));
+  assert.ok(!signDialog('en', revokeKey).detail.includes('Certificates naming'));
 
   const stamp: AdminSignSummary = {
     ...common, action: 'sign-timestamp', freshnessBlock: true,
@@ -217,7 +224,7 @@ test('consequence block, freshness line, reset line, permanence lines (exact Eng
 });
 
 test('inserted names, paths and reasons go through dialogSafe', () => {
-  const evil: AdminSignSummary = { ...common, action: 'revoke-key', targetKeyId: OTHER, label: 'a‮b', reason: 'x\ny', document: { ...common.document, path: '/p q' } };
+  const evil: AdminSignSummary = { ...common, action: 'revoke-key', targetKeyId: OTHER, label: 'a‮b', reason: 'x\ny', certificates: null, document: { ...common.document, path: '/p q' } };
   const detail = signDialog('en', evil).detail;
   assert.ok(detail.includes('a⟨U+202E⟩b') && detail.includes('x⟨U+000A⟩y') && detail.includes('/p⟨U+2028⟩q'));
 });
