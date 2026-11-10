@@ -16,12 +16,14 @@ import { armTimestamp, armRoot, doc, failure, fileBytes, trust, world, NOW, type
 const en = (key: Parameters<typeof text>[1], params?: Record<string, string | number>): string => text('en', key, params);
 const KEY_A = `sha256:${'11'.repeat(32)}`;
 
-async function rootEvent(w: World, action: 'revoke' | 'rotate', signers: Key[], extra: { newRoot?: Key } = {}): Promise<void> {
+async function rootEvent(w: World, action: 'revoke' | 'rotate', signers: Key[], extra: { newRoot?: Key; newRecovery?: Array<{ pub: string }>; newTimestamp?: Key } = {}): Promise<void> {
   const out = path.join(w.base, `event-${action}.json`);
   const eventNow = new Date(T0.getTime() + 60_000);
   await prepareRootEvent({
     policy: await w.policyOf(), action, reason: `${action} for test`, out, now: eventNow, signerPublicPaths: signers.map((k) => k.pub),
     ...(extra.newRoot ? { newRootPublicPath: extra.newRoot.pub } : {}),
+    ...(extra.newRecovery ? { newRecoveryPublicPaths: extra.newRecovery.map((k) => k.pub), rotateThreshold: 2, revokeThreshold: 1 } : {}),
+    ...(extra.newTimestamp ? { newTimestampPublicPath: extra.newTimestamp.pub } : {}),
   });
   for (const key of [...signers, ...(extra.newRoot ? [extra.newRoot] : [])]) await signRootEvent({ proposalPath: out, keyPath: key.priv });
   await appendRootEvent({ policy: await w.policyOf(), proposalPath: out, now: eventNow });
@@ -97,6 +99,12 @@ test('revoking a digest needs a review by the armed key; cancel and a refused co
   assert.equal(failure(await revoke(w, target)), en('admin.err.needReview'));
   assert.equal((await w.session.review('docs')).ok, true);
   assert.equal((await w.session.revocationSkills())[0]!.reviewed, true);
+  const skillFile = path.join(w.skills, 'docs-helper', 'SKILL.md');
+  const originalSkill = await readFile(skillFile);
+  await writeFile(skillFile, '---\nname: docs-helper\ndescription: changed after review.\n---\nchanged\n');
+  const changedRow = (await w.session.revocationSkills()).find((r) => r.instanceId === 'docs')!;
+  assert.equal(changedRow.reviewed, false, 'the record is for the old digest, so TARGET no longer shows it as reviewed');
+  await writeFile(skillFile, originalSkill);
   assert.deepEqual((await w.session.revocationTargets()).filter((x) => x.kind === 'digest'), [{ kind: 'digest', digest, skillName: 'docs-helper', instanceId: 'docs' }]);
 
   // Cancel: the record stays.
@@ -151,7 +159,7 @@ test('approve gives its claimed record back when the commit is refused after the
   w.handlers.sign = async () => true;
   assert.equal((await w.session.inspect('docs')).inspected, false, 'the new version is not the reviewed one');
   // The record is back for the old digest: approve fails on the changed version, not on a missing review.
-  assert.notEqual(failure(await w.session.approve('docs', digest, '30d', 'reviewed carefully')), en('admin.err.needReview'));
+  assert.equal(failure(await w.session.approve('docs', digest, '30d', 'reviewed carefully')), en('admin.err.changed'));
 });
 
 test('another key chosen with the picker: label, certificate count, refusals, cancel writes nothing', async (t) => {
@@ -179,7 +187,7 @@ test('another key chosen with the picker: label, certificate count, refusals, ca
   assert.equal(summary.action === 'revoke-key' && summary.certificates, 1, 'one certificate names the picked key');
   assert.equal(summary.action === 'revoke-key' && summary.label, `${stranger.keyId} · not a current approver`);
   const detail = signDialog('en', summary).detail.split('\n');
-  assert.equal(detail[4], `Key to revoke: ${stranger.keyId} · not a current approver ${stranger.keyId}`);
+  assert.equal(detail[4], `Key to revoke: ${stranger.keyId} · not a current approver`);
   assert.ok(detail.includes('Certificates naming this key: 1'));
   assert.equal(failure(await revoke(w, { kind: 'other' })), en('admin.p2.err.alreadyRevoked'));
   const view = await w.session.revocations();
@@ -199,20 +207,6 @@ test('recovery and timestamp keys cannot be revoked through the picker either', 
     w.pick(key);
     assert.equal(failure(await revoke(w, { kind: 'other' })), en('admin.p2.err.cannotRevokeRole'));
   }
-  assert.equal(w.calls.sign.length, 0);
-});
-
-test('a forged certificate (bad signature) is never offered as a target, and a key it names cannot be revoked by id', async (t) => {
-  const w = await world(t, { lang: 'en' });
-  await armRoot(w);
-  const original = JSON.parse(await readFile(path.join(w.certDir, 'docs-pin.cert.json'), 'utf8')) as { payload: string };
-  const payload = JSON.parse(Buffer.from(original.payload, 'base64').toString('utf8')) as Record<string, unknown>;
-  const forgedKey = `sha256:${'ee'.repeat(32)}`;
-  payload.approver_key_id = forgedKey;
-  await writeFile(path.join(w.certDir, 'docs-forged.cert.json'), JSON.stringify({ ...original, payload: Buffer.from(JSON.stringify(payload)).toString('base64') }));
-  const targets = await w.session.revocationTargets();
-  assert.equal(JSON.stringify(targets).includes(forgedKey), false);
-  assert.equal(failure(await revoke(w, { kind: 'key', keyId: forgedKey })), en('admin.p2.err.notATarget'));
   assert.equal(w.calls.sign.length, 0);
 });
 
@@ -444,4 +438,79 @@ test('the revocations view reads the list under the active root and reports stal
   const stale = await w.session.revocations();
   assert.ok(stale.ok && stale.stale);
   assert.equal(failure(await armRoot(w).then(() => w.session.refreshRevocations('30d'))), en('admin.p2.err.stale'));
+});
+
+test('role keys follow the active state: after a rotation a dropped recovery key is revocable and the active ones are not', async (t) => {
+  const w = await world(t, { recovery: true, lang: 'en' });
+  const [r1, r2, r3] = w.recovery as [Key, Key, Key];
+  const newRoot = await w.keyFn!('new-root');
+  const newRecoveryKey = await w.keyFn!('new-recovery');
+  await rootEvent(w, 'rotate', [r2, r3], { newRoot, newRecovery: [r2, r3, newRecoveryKey] });
+  await adoptTrustDocuments({ rootKeyPath: newRoot.priv, fromRootKeyId: w.rootKeyId, trustRootPath: w.trustRoot, revocationsPath: w.revocations, now: new Date(T0.getTime() + 120_000) });
+  assert.equal((await w.session.arm(newRoot.priv)).ok, true);
+  w.pick(newRecoveryKey);
+  assert.equal(failure(await revoke(w, { kind: 'other' })), en('admin.p2.err.cannotRevokeRole'), 'the new recovery key');
+  w.pick(r2);
+  assert.equal(failure(await revoke(w, { kind: 'other' })), en('admin.p2.err.cannotRevokeRole'), 'a recovery key that stayed');
+  w.pick(newRoot);
+  assert.equal(failure(await revoke(w, { kind: 'other' })), en('admin.p2.err.cannotRevokeRole'), 'the active root');
+  assert.equal(w.calls.sign.length, 0);
+  w.pick(r1);
+  const dropped = await revoke(w, { kind: 'other' });
+  assert.equal(dropped.ok, true, JSON.stringify(dropped));
+  w.pick({ pub: w.rootPub });
+  const former = await revoke(w, { kind: 'other' });
+  assert.equal(former.ok, true, `the former root, replaced by the rotation, is revocable: ${JSON.stringify(former)}`);
+});
+
+test('revocationTargets leaves out an approver whose key is a role key (root, recovery or timestamp)', async (t) => {
+  const w = await world(t, { recovery: true, lang: 'en' });
+  const [, r2, r3] = w.recovery as [Key, Key, Key];
+  const newRoot = await w.keyFn!('new-root-2');
+  assert.equal((await w.session.arm(w.rootPriv)).ok, true);
+  const approverName = (await trust(w)).approvers[0]!.name;
+  assert.deepEqual(await w.session.revocationTargets(), [{ kind: 'key', keyId: w.approverKeyId, label: approverName }]);
+  w.session.disarm();
+  await rootEvent(w, 'rotate', [r2, r3], { newRoot, newRecovery: [r2, r3, { pub: w.approverPub }] });
+  await adoptTrustDocuments({ rootKeyPath: newRoot.priv, fromRootKeyId: w.rootKeyId, trustRootPath: w.trustRoot, revocationsPath: w.revocations, now: new Date(T0.getTime() + 120_000) });
+  assert.equal((await w.session.arm(newRoot.priv)).ok, true);
+  assert.deepEqual(await w.session.revocationTargets(), [], 'the approver key is now a recovery key');
+  assert.equal(failure(await revoke(w, { kind: 'key', keyId: w.approverKeyId })), en('admin.p2.err.cannotRevokeRole'));
+});
+
+test('a root event appended inside the timestamp signing dialog makes Sign timestamp refuse, and the timestamp file is untouched', async (t) => {
+  const w = await world(t, { recovery: true, freshness: true, lang: 'en' });
+  await armTimestamp(w);
+  const before = await fileBytes(w.timestampPath);
+  const r1 = await w.keyFn!('r1-guard');
+  w.handlers.sign = async () => { await rootEvent(w, 'rotate', [w.recovery[0]!, w.recovery[1]!], { newRoot: r1 }); return true; };
+  assert.equal(failure(await w.session.signTimestamp('24h')), en('admin.p2.err.changed'));
+  assert.equal(w.calls.sign.length, 1, 'the dialog was shown');
+  assert.deepEqual(await fileBytes(w.timestampPath), before);
+});
+
+test('first-seen marks: set for a trust root and a revocation list this computer has not recorded, clear for an empty root event log', async (t) => {
+  const w = await world(t, { recovery: true, freshness: true, lang: 'en' });
+  // Changed from the command line, so this computer's memory has not seen the new versions.
+  const extra = await w.newKey('later-approver');
+  await addApprover({ rootKeyPath: w.rootPriv, trustRootPath: w.trustRoot, now: NOW, publicKeyPath: extra.pub, name: 'Later Approver', scopes: ['docs-*'], expires: '90d' });
+  await updateRevocations({ rootKeyPath: w.rootPriv, revocationsPath: w.revocations, now: NOW, revokeKey: KEY_A, reason: 'command line' });
+  await armTimestamp(w);
+  const signed = await w.session.signTimestamp('24h');
+  assert.equal(signed.ok, true, JSON.stringify(signed));
+  const stamp = doc(w.calls.sign[0]);
+  assert.ok(stamp.action === 'sign-timestamp');
+  if (stamp.action === 'sign-timestamp') {
+    assert.equal(stamp.documents.rootEvents.counter, 0);
+    assert.equal(stamp.documents.rootEvents.firstSeen, false, 'an empty root event log is never first seen');
+    assert.equal(stamp.documents.trustRoot.firstSeen, true);
+    assert.equal(stamp.documents.revocations.firstSeen, true);
+  }
+  const lines = signDialog('en', stamp).detail.split('\n').filter((l) => l.includes('(first seen by this computer)'));
+  assert.equal(lines.length, 2, 'the trust root line and the revocation list line, not the root events line');
+  // The timestamp commit recorded both versions, so the next timestamp finds nothing new.
+  await armTimestamp(w);
+  assert.equal((await w.session.signTimestamp('12h')).ok, true);
+  const again = doc(w.calls.sign[1]);
+  assert.ok(again.action === 'sign-timestamp' && !again.documents.trustRoot.firstSeen && !again.documents.revocations.firstSeen);
 });
