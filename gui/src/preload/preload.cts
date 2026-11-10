@@ -1,7 +1,7 @@
 // Sandboxed preload: exposes exactly the RendererApi, nothing from Node or Electron itself.
 import type { IpcRendererEvent } from 'electron';
 import type { Lang } from '../i18n/messages.ts';
-import type { AdminApproverLifetime, AdminLifetime, AdminTrustRootLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
+import type { AdminApproverLifetime, AdminLifetime, AdminListLifetime, AdminRevokeRequest, AdminTimestampLifetime, AdminTrustRootLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
 
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
 
@@ -38,6 +38,13 @@ const api: RendererApi = {
     removeApprover:   (o: { keyId: string; trustRootLifetime?: AdminTrustRootLifetime }) => ipcRenderer.invoke('admin:remove-approver', o),
     renewTrustRoot:   (o: { lifetime: AdminTrustRootLifetime }) => ipcRenderer.invoke('admin:renew-trust-root', o),
     verifyAll:        () => ipcRenderer.invoke('admin:verify-all'),
+    revocations:      () => ipcRenderer.invoke('admin:revocations'),
+    revocationSkills: () => ipcRenderer.invoke('admin:revocation-skills'),
+    revocationTargets: () => ipcRenderer.invoke('admin:revocation-targets'),
+    revoke:           (o: { target: AdminRevokeRequest; reason: string; lifetime: AdminListLifetime }) => ipcRenderer.invoke('admin:revoke', o),
+    refreshRevocations: (o: { lifetime: AdminListLifetime }) => ipcRenderer.invoke('admin:refresh-revocations', o),
+    timestamp:        () => ipcRenderer.invoke('admin:timestamp'),
+    signTimestamp:    (o: { lifetime: AdminTimestampLifetime }) => ipcRenderer.invoke('admin:sign-timestamp', o),
   },
 };
 

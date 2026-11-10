@@ -321,7 +321,9 @@ export type AdminSignSummary =
       replaces: { name: string; scopes: string[]; expiresAt: string } | null })
   | (AdminSignCommon & { action: 'remove-approver'; removedKeyId: string; name: string; lastApprover: boolean })
   | (AdminSignCommon & { action: 'renew-trust-root'; expiresFrom: string })
-  | (AdminSignCommon & { action: 'revoke-key'; targetKeyId: string; label: string; reason: string })
+  | (AdminSignCommon & { action: 'revoke-key'; targetKeyId: string; label: string; reason: string;
+      /** Certificates naming the key (found in the configured folders), only for a key chosen with the picker; null for an approver. */
+      certificates: number | null })
   | (AdminSignCommon & { action: 'revoke-digest'; digest: string; skillName: string; reason: string })
   | (AdminSignCommon & { action: 'refresh-revocations'; expiresFrom: string })
   | (AdminSignCommon & { action: 'sign-timestamp';
@@ -334,6 +336,38 @@ export type AdminTrustRootView =
   | { ok: true; path: string; sha256: string; version: number; expiresAt: string; expired: boolean; approvers: AdminApproverView[];
       stale: boolean; signedByPreviousRoot: boolean; note: string | null }
   | { ok: false; message: string; signedByPreviousRoot: boolean };
+
+export interface AdminRevocationEntry { reason: string; revokedAt: string }
+
+export type AdminRevocationsView =
+  | { ok: true; path: string; sha256: string; version: number; expiresAt: string; expired: boolean;
+      keys: Array<AdminRevocationEntry & { keyId: string }>; digests: Array<AdminRevocationEntry & { digest: string }>;
+      stale: boolean; signedByPreviousRoot: boolean }
+  | { ok: false; message: string; signedByPreviousRoot: boolean };
+
+export type AdminTimestampView =
+  | { ok: true; configured: false }
+  | { ok: true; configured: true; path: string; keyId: string | null; version: number | null; expiresAt: string | null; readable: boolean;
+      /** The timestamp names the documents now on disk (the host's own check, memory included). */
+      matches: boolean; maxLifetime: string;
+      /** The lifetimes (6h, 12h, 24h) within `max_lifetime`; empty means the template is disabled. */
+      lifetimes: AdminTimestampLifetime[];
+      /** Why signing is disabled before any dialog (revoked root, no allowed lifetime), or null. */
+      disabled: string | null }
+  | { ok: false; message: string };
+
+/** One discovered Skill in TARGET: its tree digest (or why it could not be read) and whether the armed key reviewed that digest. */
+export interface AdminRevocationSkill { instanceId: string; name: string; digest: string | null; reviewed: boolean; error: string | null }
+
+/** What REVOKE offers from the documents and the review records. `other` (a key chosen with the picker) is a request, not a listed target. */
+export type AdminRevocationTarget =
+  | { kind: 'key'; keyId: string; label: string }
+  | { kind: 'digest'; digest: string; skillName: string; instanceId: string };
+
+export type AdminRevokeRequest =
+  | { kind: 'key'; keyId: string }
+  | { kind: 'digest'; digest: string; instanceId: string }
+  | { kind: 'other' };
 
 export interface AdminVerifyAllView {
   skills:            number;
@@ -420,5 +454,14 @@ export interface RendererApi {
     removeApprover(o: { keyId: string; trustRootLifetime?: AdminTrustRootLifetime }): Promise<AdminWriteResult>;
     renewTrustRoot(o: { lifetime: AdminTrustRootLifetime }):           Promise<AdminWriteResult>;
     verifyAll():                                                       Promise<AdminVerifyAllView>;
+    revocations():                                                     Promise<AdminRevocationsView>;
+    /** The discovered Skills for TARGET; the digest is offered for revocation only once reviewed. */
+    revocationSkills():                                                Promise<AdminRevocationSkill[]>;
+    revocationTargets():                                               Promise<AdminRevocationTarget[]>;
+    /** Opens the native signing dialog (for `other`, the public-key picker first); writes only after it is confirmed. */
+    revoke(o: { target: AdminRevokeRequest; reason: string; lifetime: AdminListLifetime }): Promise<AdminWriteResult>;
+    refreshRevocations(o: { lifetime: AdminListLifetime }):            Promise<AdminWriteResult>;
+    timestamp():                                                       Promise<AdminTimestampView>;
+    signTimestamp(o: { lifetime: AdminTimestampLifetime }):            Promise<AdminWriteResult>;
   };
 }

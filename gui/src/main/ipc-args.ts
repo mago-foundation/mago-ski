@@ -1,11 +1,15 @@
 // Argument checks for the phase 2 IPC channels: exact key sets and types, so a compromised page cannot smuggle extra
 // fields or odd values into a signing request. Pure, so they can be tested without Electron.
-import { validateScope } from '../../../src/names.ts';
-import { APPROVER_LIFETIMES, MAX_APPROVER_NAME, TRUST_ROOT_LIFETIMES } from '../service/admin.ts';
-import type { AdminApproverLifetime, AdminTrustRootLifetime } from '../service/types.ts';
+import { validateDigest, validateScope } from '../../../src/names.ts';
+import { APPROVER_LIFETIMES, MAX_APPROVER_NAME, REVOCATION_LIFETIMES, TIMESTAMP_LIFETIMES, TRUST_ROOT_LIFETIMES } from '../service/admin.ts';
+import type { AdminApproverLifetime, AdminListLifetime, AdminRevokeRequest, AdminTimestampLifetime, AdminTrustRootLifetime } from '../service/types.ts';
 
 export const KEY_ID = /^sha256:[0-9a-f]{64}$/u;
 const MAX_SCOPES_PER_APPROVER = 64;
+/** A discovered instance id, as the observation service makes them. */
+export const INSTANCE_ID = /^[A-Za-z0-9-]{1,80}$/u;
+/** A revocation reason as it crosses the IPC boundary; the session applies the real limit (512) after trimming. */
+export const MAX_RAW_REVOKE_REASON = 4096;
 
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid arguments');
@@ -45,4 +49,36 @@ export function parseRemoveApprover(value: unknown): { keyId: string; trustRootL
 export function parseRenew(value: unknown): { lifetime: AdminTrustRootLifetime } {
   const o = exact(value, ['lifetime']);
   return { lifetime: oneOf(o.lifetime, TRUST_ROOT_LIFETIMES, 'lifetime') };
+}
+
+export function parseRevoke(value: unknown): { target: AdminRevokeRequest; reason: string; lifetime: AdminListLifetime } {
+  const o = exact(value, ['target', 'reason', 'lifetime']);
+  if (typeof o.reason !== 'string' || o.reason.length > MAX_RAW_REVOKE_REASON) throw new Error('invalid reason');
+  const kind = (typeof o.target === 'object' && o.target !== null && !Array.isArray(o.target) ? (o.target as { kind?: unknown }).kind : undefined);
+  let target: AdminRevokeRequest;
+  if (kind === 'key') {
+    const t = exact(o.target, ['kind', 'keyId']);
+    if (typeof t.keyId !== 'string' || !KEY_ID.test(t.keyId)) throw new Error('invalid key id');
+    target = { kind: 'key', keyId: t.keyId };
+  } else if (kind === 'digest') {
+    const t = exact(o.target, ['kind', 'digest', 'instanceId']);
+    if (typeof t.instanceId !== 'string' || !INSTANCE_ID.test(t.instanceId)) throw new Error('invalid instance id');
+    target = { kind: 'digest', digest: validateDigest(t.digest), instanceId: t.instanceId };
+  } else if (kind === 'other') {
+    exact(o.target, ['kind']);
+    target = { kind: 'other' };
+  } else {
+    throw new Error('invalid target');
+  }
+  return { target, reason: o.reason, lifetime: oneOf(o.lifetime, REVOCATION_LIFETIMES, 'lifetime') };
+}
+
+export function parseRefresh(value: unknown): { lifetime: AdminListLifetime } {
+  const o = exact(value, ['lifetime']);
+  return { lifetime: oneOf(o.lifetime, REVOCATION_LIFETIMES, 'lifetime') };
+}
+
+export function parseSignTimestamp(value: unknown): { lifetime: AdminTimestampLifetime } {
+  const o = exact(value, ['lifetime']);
+  return { lifetime: oneOf(o.lifetime, TIMESTAMP_LIFETIMES, 'lifetime') };
 }

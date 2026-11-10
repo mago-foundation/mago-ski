@@ -87,7 +87,7 @@ async function world(t: TestContext, options: Options = {}) {
     confirmOffline: async () => { calls.offline += 1; return await handlers.offline(); },
     confirmLastApprover: async () => { calls.lastApprover += 1; return await handlers.lastApprover(); },
     pickPublicKey: async () => { calls.pick += 1; return await handlers.pick(); },
-    instance: () => null, discoveryRoots: () => [skills], skillFolders: () => [], hostSkillDirs: () => hostSkillDirs, hooks,
+    instance: () => null, instances: () => [], discoveryRoots: () => [skills], skillFolders: () => [], hostSkillDirs: () => hostSkillDirs, hooks,
   });
   t.after(() => session.disarm());
   const newKey = async (name: string): Promise<{ priv: string; pub: string; keyId: string }> => {

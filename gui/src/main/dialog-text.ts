@@ -89,6 +89,7 @@ function documentDialog(lang: Lang, s: DocumentSummary): DialogText {
       break;
     case 'revoke-key':
       lines.push(t(lang, 'admin.dialog.revoke.lineKey', { label: dialogSafe(s.label), keyId: s.targetKeyId }), t(lang, 'admin.dialog.revoke.lineReason', { reason: dialogSafe(s.reason) }));
+      if (s.certificates !== null) lines.push(t(lang, 'admin.dialog.revoke.lineCerts', { n: s.certificates }));
       break;
     case 'revoke-digest':
       lines.push(t(lang, 'admin.dialog.revoke.lineDigest', { skill: dialogSafe(s.skillName), digest: s.digest }), t(lang, 'admin.dialog.revoke.lineReason', { reason: dialogSafe(s.reason) }));
@@ -102,7 +103,7 @@ function documentDialog(lang: Lang, s: DocumentSummary): DialogText {
       break;
   }
   lines.push(t(lang, 'admin.dialog.sign.key', { role: s.role, name: dialogSafe(s.keyName ?? '-'), keyId: s.keyId }));
-  lines.push(...consequenceLines(lang, s.consequence, s.action === 'sign-timestamp'));
+  lines.push(...consequenceLines(lang, s.consequence));
   if (s.action === 'revoke-key') lines.push(t(lang, 'admin.p2.notice.permanenceKey'));
   if (s.action === 'revoke-digest') lines.push(t(lang, 'admin.p2.notice.permanenceDigest'));
   if (s.action !== 'sign-timestamp' && s.freshnessBlock) lines.push(t(lang, 'admin.p2.notice.freshnessBlock'));
@@ -115,18 +116,19 @@ function documentDialog(lang: Lang, s: DocumentSummary): DialogText {
   };
 }
 
-/** The consequence block: head, at most 5 lines, how many more, folders too deep; or why it cannot be shown. */
-export function consequenceLines(lang: Lang, c: AdminConsequence, timestamp = false): string[] {
+/**
+ * The consequence block: head, at most 5 lines, how many more, folders too deep; or why it cannot be shown. When the current
+ * documents do not verify there is no head and no lines (design P8.4): the reason, then what the documents give once signed.
+ */
+export function consequenceLines(lang: Lang, c: AdminConsequence): string[] {
   const out: string[] = [];
   if (c.fromFailed !== null) {
     out.push(t(lang, 'admin.p2.notice.consequenceFromFailed', { reason: dialogSafe(c.fromFailed) }));
-    // A timestamp that fixes a stale one: show what signing restores (design U4).
-    if (timestamp) {
-      const verified = c.afterCounts.VERIFIED ?? 0;
-      const others = Object.entries(c.afterCounts).filter(([verdict]) => verdict !== 'VERIFIED') as Array<[string, number]>;
-      out.push(t(lang, 'admin.p2.policyCheck.done', { n: verified, m: others.reduce((sum, [, k]) => sum + k, 0) }));
-      for (const [verdict, k] of others) out.push(t(lang, 'admin.p2.policyCheck.line', { verdict, k }));
-    }
+    // Folders too deep to check are already counted in `afterCounts` as UNVERIFIABLE.
+    const verified = c.afterCounts.VERIFIED ?? 0;
+    const others = Object.entries(c.afterCounts).filter(([verdict, k]) => verdict !== 'VERIFIED' && (k ?? 0) > 0) as Array<[string, number]>;
+    out.push(t(lang, 'admin.p2.policyCheck.done', { n: verified, m: others.reduce((sum, [, k]) => sum + k, 0) }));
+    for (const [verdict, k] of others) out.push(t(lang, 'admin.p2.policyCheck.line', { verdict, k }));
     return out;
   }
   if (c.toFailed !== null) {
