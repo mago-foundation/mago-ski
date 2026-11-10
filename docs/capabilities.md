@@ -1,12 +1,12 @@
 # What mago-ski can do
 
-As of 2026-11-03.
+As of 2026-11-10.
 
-mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. Yes, it can approve Skills, and it can install approved Skills for users, but the installing part is built and not yet released.
+mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. It can approve Skills. It can also install approved Skills for users, but that part, the company gate for Claude Code and Codex, is built and not yet released.
 
-The list has three parts: what works today in the released version (0.2.0), what is built but not released yet, and what mago-ski does not do.
+This page has three parts: what works today in the released version (0.3.0), what is built but not released yet, and what mago-ski does not do.
 
-## What works today (version 0.2.0, released)
+## What works today (version 0.3.0, released)
 
 Anyone can install this version for free. It runs on Linux and macOS.
 
@@ -14,7 +14,8 @@ Anyone can install this version for free. It runs on Linux and macOS.
 
 - mago-ski creates the organisation's keys: one main key, and one key for each person who approves Skills.
 - It lets the organisation decide who may approve which Skills, and until what date.
-- It can remove a person's right to approve.
+- It can remove a person's right to approve, and extend how long the list of approvers stays valid.
+- A key that has been the organisation's main key or timestamp key can never become an approver.
 
 **Approving Skills**
 
@@ -34,6 +35,11 @@ Anyone can install this version for free. It runs on Linux and macOS.
 - Approvals and the list of taken-back approvals expire, so a machine cannot keep using an old list forever.
 - It refuses to go back to an older copy of the approval files.
 
+**If the main key is lost or stolen**
+
+- An organisation can name a few recovery keys, kept offline. Together they can stop trust in a stolen main key, or replace it, without editing every computer's settings.
+- An organisation can also require a short-lived timestamp. A computer fed old approval files then stops trusting anything once the newest timestamp expires.
+
 **Blocking and trying out**
 
 - In the Pi coding agent, mago-ski blocks Skills that are not approved. The agent does not see them and cannot load them.
@@ -41,14 +47,20 @@ Anyone can install this version for free. It runs on Linux and macOS.
 - A trial mode records what would be blocked without blocking anything, so an organisation can test first.
 - It keeps a record of each check.
 
-**Desktop app (early preview, separate download)**
+**Desktop app (early preview, separate download, in English and Korean)**
 
 - The desktop app watches the Skills installed on a computer, shows what changed, and shows whether each one is approved.
-- (Built, not released) In the desktop app's administration tab, an approver can approve a Skill version: load their approver key, look at the exact version, write why it is approved, and sign. The app checks that the key really is one of the organisation's approvers, using the organisation's settings file that only the administrator can change. (Built, not released) With the root key, in the same tab, an administrator can add, replace, remove and renew approvers: the app shows which Skills would stop verifying before it asks for a signature. Taking approvals back and the rest of the administration come later.
+- In its administration tab, the organisation's everyday tasks can be done without the command line:
+  - an approver can approve a Skill version;
+  - an administrator can add, remove and renew approvers, take back an approval or a key, and re-sign the list of taken-back approvals;
+  - the person holding the timestamp key can sign the timestamp.
+- Every signature needs a confirmation window that shows exactly what will be signed and which Skills it affects.
+- The app checks that the key really belongs to someone in that role, using the organisation's settings file that only the administrator can change.
+- Setting up a new organisation and recovering from a stolen main key still use the command line.
 
 ## Built, not released yet (the company gate)
 
-This part is finished and tested on Linux only. It is not yet packaged and not yet part of the mago-ski command. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions.
+This part is finished and tested on Linux only. It is not yet packaged and not yet part of the mago-ski command, so it cannot be switched on from a released version. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions only.
 
 **Installing Skills**
 
@@ -65,7 +77,10 @@ This part is finished and tested on Linux only. It is not yet packaged and not y
 - If it cannot check, it blocks rather than lets the Skill through.
 - A Skill whose approval is taken back is blocked at its next use, even in a session that is already open. The session itself keeps running.
 - It writes the administrator settings files that switch this on for Claude Code and Codex.
-- In Claude Code, Skills the administrator did not install are hidden from the AI as well as blocked. In Codex they stay visible in its list of Skills and are only blocked when used, and users have to call an installed Skill by its full link (`[$name](/etc/codex/skills/name/SKILL.md)`), not just `$name`.
+- In Claude Code, Skills the administrator did not install are hidden from the AI as well as blocked.
+- In Codex, they stay visible in its list of Skills and are only blocked when used.
+- In Codex, users have to call an installed Skill by its full link (`[$name](/etc/codex/skills/name/SKILL.md)`), not just `$name`.
+- In Codex, mentions from plugins and links that do not lead to an installed Skill are blocked.
 
 **Control and records**
 
