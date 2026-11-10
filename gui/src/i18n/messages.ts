@@ -1067,7 +1067,7 @@ export const MESSAGES = {
     'admin.p2.btn.resign': 'Re-sign',
     'admin.p2.btn.sign': 'Sign',
     'admin.p2.btn.review': 'Review',
-    'admin.p2.trustRoot.ready': '{n} approvers · version {v} · expires {date}',
+    'admin.p2.trustRoot.ready': 'Approvers: {n} · version {v} · expires {date}',
     'admin.p2.trustRoot.done': 'Signed: version {v}',
     'admin.p2.target.ready': 'Choose what to revoke',
     'admin.p2.target.done': '{label} selected',

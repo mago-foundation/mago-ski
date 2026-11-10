@@ -1122,7 +1122,7 @@ The offline dialog's cancel button reuses `admin.dialog.cancel`.
 | `admin.p2.btn.resign` | 다시 서명 | Re-sign |
 | `admin.p2.btn.sign` | 서명 | Sign |
 | `admin.p2.btn.review` | 검토 | Review |
-| `admin.p2.trustRoot.ready` | 승인자 {n}명 · 버전 {v} · 만료 {date} | {n} approvers · version {v} · expires {date} |
+| `admin.p2.trustRoot.ready` | 승인자 {n}명 · 버전 {v} · 만료 {date} | Approvers: {n} · version {v} · expires {date} |
 | `admin.p2.trustRoot.done` | 서명했어요: 버전 {v} | Signed: version {v} |
 | `admin.p2.target.ready` | 폐기할 대상을 고르세요 | Choose what to revoke |
 | `admin.p2.target.done` | {label} 선택됨 | {label} selected |

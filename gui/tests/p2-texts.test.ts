@@ -52,7 +52,7 @@ const TEXTS: Array<[MessageKey, string, string]> = [
   ['admin.template.timestamp', '타임스탬프 서명', 'Sign timestamp'],
   ['admin.p2.btn.add', '추가', 'Add'], ['admin.p2.btn.remove', '빼기', 'Remove'], ['admin.p2.btn.renew', '연장', 'Renew'],
   ['admin.p2.btn.revoke', '폐기', 'Revoke'], ['admin.p2.btn.resign', '다시 서명', 'Re-sign'], ['admin.p2.btn.sign', '서명', 'Sign'], ['admin.p2.btn.review', '검토', 'Review'],
-  ['admin.p2.trustRoot.ready', '승인자 {n}명 · 버전 {v} · 만료 {date}', '{n} approvers · version {v} · expires {date}'],
+  ['admin.p2.trustRoot.ready', '승인자 {n}명 · 버전 {v} · 만료 {date}', 'Approvers: {n} · version {v} · expires {date}'],
   ['admin.p2.trustRoot.done', '서명했어요: 버전 {v}', 'Signed: version {v}'],
   ['admin.p2.target.ready', '폐기할 대상을 고르세요', 'Choose what to revoke'],
   ['admin.p2.target.done', '{label} 선택됨', '{label} selected'],
