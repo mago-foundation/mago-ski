@@ -1340,3 +1340,50 @@ These keys are renamed; their texts are unchanged:
 | `admin.dialog.doc.actionRevoke` | `admin.dialog.revoke.action` |
 | `admin.dialog.reset.detail` | kept (an existing dialog) |
 | `admin.p2.freshnessCli` | `admin.p2.notice.freshnessCli` |
+
+## 2a code review fixes (v11)
+
+These fixes come from the two Goldfish code reviews of `25ffd25..da58894`. Neither review found a HIGH issue. Where these fixes differ from an earlier section, they win.
+
+1. **State writes across processes (security M1).**
+   - `persistState` (`src/policy.ts`) becomes a compare-and-swap loop, used by `recordDocumentVersions` and the host save alike:
+     1. read the raw bytes once (absent counts as `null`);
+     2. parse and merge;
+     3. call `writeFileAtomic(path, bytes, 0o600, { expectSha256: sha256(raw) or null })`;
+     4. on `FileChangedError`, re-read, merge and retry, up to 5 times with 10–80 ms jittered waits;
+     5. then fail, with `stateError: 'write'` for the existing failure paths. `recordDocumentVersions` throws.
+   - The in-process chain stays.
+   - The doc comments that claim "never lowers" are corrected to say "within the retry budget; fails closed otherwise". The stale "unreadable file is replaced" comment goes.
+   - Test: two processes recording ascending versions never leave a lower value on disk (the reviewer's `race.ts` recipe).
+2. **Expired trust root lifetime (security LOW-1, correctness L8).**
+   - The renderer coercion (`if (v.expired && trustLifetime === '') trustLifetime = '365d'`) is removed.
+   - While the trust root has expired, the lifetime control offers no `유지` / `Keep`, and no value is preselected. Add and Remove stay disabled until a lifetime is picked.
+   - `trustLifetime` resets to `''` (Keep) after every successful write.
+   - The engine's `admin.p2.err.pickLifetime` refusal stays as the backstop.
+3. **Snapshot first (security LOW-2, correctness L1).** `inputsOf(pin)` is called before `trustRootDocument`, `loadPolicyRoot` and `forbiddenApproverKeys`, so the commit guard sees any change made after the forbidden list was computed.
+4. **Picker after the refusals (correctness M1).** For add, the public-key picker runs after:
+   - the role check;
+   - the previous-root check (`trustRootDocument`);
+   - the root-walk refusal;
+   - the forbidden-list computation;
+   - the `leftOver` refusal.
+
+   `requireNoDialog()` stays immediately before `ask()`.
+5. **One root-walk refusal (correctness M3).** The add path's separate English `rootCheck` is deleted. `trustRootDocument` refuses first with `admin.p2.err.trustRootUnchanged` for every write. No hard-coded English refusal remains on the add path.
+6. **`timestampMismatch` (correctness M2).** It is true only when the host-view failure is the binding check: the timestamp names other document digests or versions (`policy.ts` ~709 and the digest comparison). An expired, missing or unreadable timestamp sets `timestampMismatch: false`, and POLICY CHECK shows the trust note (the host's reason) instead.
+7. **Forbidden keys and the revocation minimum (security LOW-3).**
+   - `forbiddenApproverKeys(policy, now, o?: { minimumRevocations?: number })` refuses a revocation list below the minimum with `StaleDocumentError`.
+   - The GUI passes `memoryMinimums(...).revocations`. The CLI passes nothing, which keeps today's behaviour.
+8. **Renderer display (security LOW-4; correctness L2, L3, L4, L5, L7).**
+   - Approver names in the TRUST ROOT list go through `dialogSafe`, the same function the dialogs use. Move it to `gui/src/i18n` or a shared renderer util if needed.
+   - The add form clears only when the add result is `ok` (L2).
+   - The trust root path is shown under a new label, `admin.p2.label.trustRootPath`: `신뢰 루트 파일` / `Trust root file` (L3).
+   - `admin.p2.err.notRoot` gets the localised role name from the existing `admin.role.*` keys (L4).
+   - New catalog keys replace the hard-coded `TRUST ROOT`, `POLICY CHECK`, `SHA-256` and `Key ID` labels: `admin.p2.dev.trustRoot`, `admin.p2.dev.policyCheck`, `admin.p2.label.sha256`, `admin.p2.label.keyId`. Device names stay the same English words in both languages, as in phase 1 (L5).
+   - `loadTrustView` shows the failure with `admin.p2.err.rolesUnknown` and the reason, not a stuck `검사 중…` (L7).
+9. **Engine English (correctness L6).** Accepted. Engine messages reach the GUI in English through `dialogSafe`, as Z2 says.
+10. **Tests (correctness M4, L9).**
+    - A GUI test: a rolled-back root event log refuses add, remove and renew before any dialog opens, and no picker is called.
+    - A GUI test: an expired revocation list that the trust-root change does not fix makes Sign refuse with `consequenceToFailed`, and no signing dialog opens.
+    - `tests/preview-import.test.ts` also scans `.mjs`, `.cjs` and `gui/tests`.
+    - Tests for items 2, 3, 6 and 7.
