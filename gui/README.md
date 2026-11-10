@@ -2,9 +2,19 @@
 
 A desktop companion that shows how your installed Skills change, next to whether your organization approved them. It runs as its own window, like a plug-in next to a DAW, and does not change how you install or use Skills.
 
-> Status: **proof of concept**, not published. Linux and macOS. Pi is the only host it knows. UI text is Korean.
+> Status: **proof of concept**, not published. Linux and macOS. Pi is the only host it knows. The UI is in English or Korean.
 
 The design comes from [the GUI product plan](../docs/mago-ski-gui-product-plan.md), [the ontology](../docs/mago-ski-ontology.md) §§18–27 and [the approved preview](../docs/mago-ski-gui-preview.html).
+
+## Language
+
+The header has a language switch, `한국어 | English`. It re-renders the page at once and keeps your place (tab, selection, typed text). The choice is stored in `settings.json` in the data folder (`{"lang":"ko"}` or `{"lang":"en"}`); without it the app uses the system language (Korean for a `ko` locale, English otherwise). Native dialogs, notifications and the admin session's messages follow the same language. All texts are in `src/i18n/messages.ts`; Korean texts quoted in this README and the spec are the Korean catalog entries.
+
+![The observation tab](../docs/images/gui-observe.png)
+![The admin tab: organisation pin and templates](../docs/images/gui-admin-templates.png)
+![The Approve template with an approver key loaded](../docs/images/gui-admin-approve.png)
+
+Screenshots are made with `node scripts/screenshots.ts` (see the header of that script; the admin shots need the demo organisation's pin installed at `/etc/mago-ski`). Native dialogs are drawn by the OS and are not shown.
 
 ## What it does
 

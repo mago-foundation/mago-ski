@@ -3,9 +3,15 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, session, type IpcMainInvokeEvent } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { AdminSession, dialogSafe, LIFETIMES } from '../service/admin.ts';
+import { LANGS, langFromLocale, t, type Lang } from '../i18n/messages.ts';
+import { AdminSession, LIFETIMES } from '../service/admin.ts';
 import { ObservationService } from '../service/service.ts';
+import { readLang, writeLang } from '../service/settings.ts';
 import type { AdminReviewSummary, AdminSignSummary, InstanceView, Prefs } from '../service/types.ts';
+import {
+  cancelLabel, keyPickerAllFiles, keyPickerTitle, notificationGrouped, notificationImmediate, resetDialog, reviewDialog,
+  rootPickerTitle, signDialog, startFailure, type DialogText,
+} from './dialog-text.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererIndex = path.join(here, '..', 'renderer', 'index.html');
@@ -21,6 +27,8 @@ if (process.env.MAGO_SKI_GUI_DATA) app.setPath('userData', path.resolve(process.
 let window: BrowserWindow | null = null;
 let service: ObservationService | null = null;
 let admin: AdminSession | null = null;
+/** The language of native dialogs, notifications and session messages; read again each time one is built. */
+let currentLang: Lang = 'en';
 
 function requireString(value: unknown, pattern: RegExp, label: string): string {
   if (typeof value !== 'string' || !pattern.test(value)) throw new Error(`invalid ${label}`);
@@ -46,10 +54,13 @@ function notify(changed: InstanceView[]): void {
     n.show();
   };
   if (mode === 'immediate') {
-    for (const instance of changed) show(`${instance.name}: 기록한 버전에서 내용이 바뀌었어요`, '변경 내용을 확인할 수 있어요. 관찰 모드는 실행을 막지 않아요.');
+    for (const instance of changed) {
+      const text = notificationImmediate(currentLang, instance.name);
+      show(text.title, text.body);
+    }
   } else {
-    const names = changed.map((i) => i.name).join(', ');
-    show(`Skill ${changed.length}개의 내용이 바뀌었어요`, `${names} · 변경 내용을 확인할 수 있어요.`);
+    const text = notificationGrouped(currentLang, changed.map((i) => i.name));
+    show(text.title, text.body);
   }
 }
 
@@ -61,7 +72,7 @@ function registerIpc(svc: ObservationService): void {
   handle('action:remember', (id, digest) => svc.rememberVersion(requireString(id, ID, 'instance id'), requireString(digest, DIGEST, 'digest')));
   // The renderer never supplies a path: the user picks one in a native dialog owned by this process.
   handle('roots:add', async () => {
-    const options: Electron.OpenDialogOptions = { title: 'Skill 폴더 추가', properties: ['openDirectory'] };
+    const options: Electron.OpenDialogOptions = { title: rootPickerTitle(currentLang), properties: ['openDirectory'] };
     const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     if (!picked.canceled && picked.filePaths[0]) await svc.addRoot(picked.filePaths[0]);
     return svc.view();
@@ -73,6 +84,13 @@ function registerIpc(svc: ObservationService): void {
     return svc.view();
   });
   handle('history:dismiss-reset', async () => { await svc.dismissHistoryReset(); return svc.view(); });
+  handle('settings:get-lang', () => currentLang);
+  handle('settings:set-lang', async (lang) => {
+    if (typeof lang !== 'string' || !(LANGS as readonly string[]).includes(lang)) throw new Error('invalid language');
+    await writeLang(app.getPath('userData'), lang as Lang);
+    currentLang = lang as Lang;
+    return currentLang;
+  });
   registerAdminIpc(svc);
   handle('clipboard:write', (text) => {
     if (typeof text !== 'string' || text.length > 4096) throw new Error('invalid text');
@@ -81,9 +99,9 @@ function registerIpc(svc: ObservationService): void {
 }
 
 /** A native confirmation: cancel is the default and the escape answer; only the second button confirms. */
-async function confirmBox(options: { title: string; message: string; detail: string; action: string }): Promise<boolean> {
+async function confirmBox(options: DialogText): Promise<boolean> {
   const box: Electron.MessageBoxOptions = {
-    type: 'warning', buttons: ['취소', options.action], defaultId: 0, cancelId: 0, noLink: true,
+    type: 'warning', buttons: [cancelLabel(currentLang), options.action], defaultId: 0, cancelId: 0, noLink: true,
     title: options.title, message: options.message, detail: options.detail,
   };
   const result = window ? await dialog.showMessageBox(window, box) : await dialog.showMessageBox(box);
@@ -93,28 +111,15 @@ async function confirmBox(options: { title: string; message: string; detail: str
 const ADMIN_RAW_REASON_LIMIT = 4096;
 
 function confirmReview(s: AdminReviewSummary): Promise<boolean> {
-  return confirmBox({
-    title: 'Skill 검토 확인', message: '이 정확한 버전의 파일을 모두 검토했나요?', action: '검토함',
-    detail: [`Skill: ${dialogSafe(s.skillName)}`, `폴더: ${dialogSafe(s.skillPath)}`, `버전: ${s.digest}`, `파일: ${s.files}개`].join('\n'),
-  });
+  return confirmBox(reviewDialog(currentLang, s));
 }
 
 function confirmSign(s: AdminSignSummary): Promise<boolean> {
-  return confirmBox({
-    title: '인증서 서명', message: '이 Skill 버전에 인증서를 서명할까요?', action: '서명',
-    detail: [
-      `Skill: ${dialogSafe(s.skillName)}`, `폴더: ${dialogSafe(s.skillPath)}`, `검토한 버전: ${s.reviewedDigest}`, `서명할 버전: ${s.digest}`,
-      `기간: ${s.lifetime} (만료 ${s.expiresAt})`, `이유: ${dialogSafe(s.reason)}`,
-      `키: ${s.role} · ${dialogSafe(s.keyName ?? '-')} · ${s.keyId}`,
-    ].join('\n'),
-  });
+  return confirmBox(signDialog(currentLang, s));
 }
 
 function confirmReset(): Promise<boolean> {
-  return confirmBox({
-    title: '기록 초기화', message: '이 컴퓨터가 기억하는 조직 문서 버전을 지울까요? 오래된 문서를 다시 받아들일 수 있게 돼요.',
-    detail: '', action: '초기화',
-  });
+  return confirmBox(resetDialog(currentLang));
 }
 
 /**
@@ -133,11 +138,12 @@ function registerAdminIpc(svc: ObservationService): void {
     discoveryRoots: () => svc.view().roots.map((r) => r.path),
     skillFolders: () => svc.view().instances.map((i) => i.path),
     hostSkillDirs: () => svc.hostSkillDirs(),
+    lang: () => currentLang,
   });
   admin = session;
   handle('admin:status', () => session.status());
   handle('admin:arm', async () => {
-    const options: Electron.OpenDialogOptions = { title: '서명 키 불러오기 (개인 키 PEM)', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'PEM', extensions: ['pem'] }, { name: '모든 파일', extensions: ['*'] }] };
+    const options: Electron.OpenDialogOptions = { title: keyPickerTitle(currentLang), properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'PEM', extensions: ['pem'] }, { name: keyPickerAllFiles(currentLang), extensions: ['*'] }] };
     let chosen: string | null;
     try {
       chosen = await session.pickFile(async () => {
@@ -145,7 +151,7 @@ function registerAdminIpc(svc: ObservationService): void {
         return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
       });
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : '잠시 후 다시 시도하세요' };
+      return { ok: false, reason: error instanceof Error ? error.message : t(currentLang, 'admin.err.cooldown') };
     }
     if (chosen === null) return { ok: false, reason: 'cancelled' };
     return await session.arm(chosen);
@@ -199,6 +205,7 @@ async function main(): Promise<void> {
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
 
+  currentLang = (await readLang(app.getPath('userData'))) ?? langFromLocale(app.getLocale());
   service = new ObservationService({ dataDir: app.getPath('userData') });
   registerIpc(service);
   service.on('update', (view) => window?.webContents.send('view:update', view));
@@ -213,6 +220,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  dialog.showErrorBox('mago-ski', `시작하지 못했어요: ${error instanceof Error ? error.message : String(error)}`);
+  dialog.showErrorBox('mago-ski', startFailure(currentLang, error instanceof Error ? error.message : String(error)));
   app.exit(1);
 });

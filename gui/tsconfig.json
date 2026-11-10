@@ -21,6 +21,7 @@
     "rootDir": ".."
   },
   "include": [
+    "src/i18n/**/*.ts",
     "src/service/**/*.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.cts",
@@ -28,6 +29,7 @@
     "scripts/**/*.ts"
   ],
   "exclude": [
-    "scripts/smoke.ts"
+    "scripts/smoke.ts",
+    "scripts/screenshots.ts"
   ]
 }

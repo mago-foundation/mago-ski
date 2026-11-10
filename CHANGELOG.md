@@ -6,6 +6,7 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ### Added
 
+- Desktop GUI in English and Korean: a language switch in the header (system language by default, stored in `settings.json`), one message catalog, and README screenshots.
 - Claude Code interception spike (`docs/spikes/`): which hooks and settings can enforce Skill approval on Claude Code, and the resulting adapter design.
 - **Root recovery** ([spec](docs/spec/root-recovery-v1.md), now normative). Policy `mago.policy/v2` pins a recovery set (1-16 offline keys with a rotate and a revoke threshold) next to the root fingerprint. Recovery keys sign numbered root events in a root event log: `revoke` stops hosts trusting the root key, `rotate` replaces it (and optionally the recovery set or the timestamp key). A leaked root key no longer means editing every host's policy. Implemented in the CLI, the Pi host and the GitHub Action.
 - **Freshness** (optional, in `mago.policy/v2`): a separate timestamp key signs a short-lived statement of the exact root event log, trust root and revocation list. A host fed old files stops trusting anything once the newest timestamp expires (24 hours by default, at most 7 days).

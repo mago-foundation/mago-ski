@@ -963,3 +963,18 @@ test('F2: a key moved away before the dialog gives the swap message and is dropp
   assert.equal((await w.session.status()).armed, null);
   assert.equal(w.calls.sign.length, 0);
 });
+
+test('i18n: with lang "en" the session refusals come back in English', async (t) => {
+  const w = await world(t, { cooldownMs: 60_000 });
+  const english = new AdminSession({ ...w.options, pinPath: w.pinPath, now: () => NOW, lang: () => 'en', cooldownMs: 60_000, instance: (id) => (id === 'docs' ? { path: w.docs, name: 'docs-helper' } : null) });
+  t.after(() => english.disarm());
+  // No key loaded.
+  assert.equal(failure(await english.review('docs')), 'Load an approver key first');
+  // The cooldown after a cancelled review.
+  assert.equal((await english.arm(w.org.approverKey)).ok, true);
+  w.handlers.review = async () => false;
+  assert.equal(failure(await english.review('docs')), 'The review was not recorded');
+  assert.equal(failure(await english.review('docs')), 'Try again in a moment');
+  // The same session in Korean (the default) is unchanged.
+  assert.equal(failure(await w.session.review('docs')), '승인자 키를 먼저 불러오세요');
+});

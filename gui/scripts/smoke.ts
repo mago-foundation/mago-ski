@@ -3,7 +3,7 @@
 // Needs Playwright (not a dependency of this package) and a display (use xvfb-run on a headless Linux).
 //   node scripts/smoke.ts OUT_DIR
 import { spawnSync } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +21,9 @@ const demo = (...args: string[]) => {
   if (r.status !== 0) throw new Error(r.stderr);
 };
 demo('setup', dir, '--org');
+// The selectors below match the Korean texts; the language is stored, so the run does not depend on the system locale.
+await mkdir(path.join(dir, 'gui-data'), { recursive: true });
+await writeFile(path.join(dir, 'gui-data', 'settings.json'), '{"lang":"ko"}\n');
 
 const app = await _electron.launch({
   executablePath: electronPath,
