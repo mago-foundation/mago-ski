@@ -13,6 +13,7 @@ import { loadPrivateKeyBytes, type PrivateKeyInfo } from '../../../src/keys.ts';
 import { scopeMatches } from '../../../src/names.ts';
 import { loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy, type PolicyRootResult } from '../../../src/policy.ts';
 import { requireDisplaySafeText } from '../../../src/root-events.ts';
+import { t, type Lang, type MessageKey } from '../i18n/messages.ts';
 import { addDuration, formatTimestamp } from '../../../src/time.ts';
 import { collectSkillTree, SKILL_FILENAME, sha256Hex } from '../../../src/tree-digest.ts';
 import type { TrustContextResult } from '../../../src/verify.ts';
@@ -33,14 +34,9 @@ export const DIALOG_SLOT_GRACE_MS = 5000;
 export const MEMORY_FILE = 'admin-state.json';
 const IDENTITY_CONTEXT = 'mago-ski gui identity v1';
 
-const KEY_IN_SKILL = 'Skill 폴더 안에 있는 키는 쓸 수 없어요. 키를 Skill 밖으로 옮기세요.';
-const KEY_GONE     = '키가 빠졌어요';
-const NEED_REASON  = '이유에 글자나 숫자를 3개 이상 적으세요';
-const KEY_SWAPPED = '키 파일이 바뀌었어요. 다시 불러오세요.';
-const MEMORY_BUSY  = '이 컴퓨터의 관리 기록을 지금 읽을 수 없어요. 잠시 후 다시 시도하세요.';
+// Refusal texts are in the message catalog (admin.err.*); a session reads its language when it builds each one.
 const MAX_KEY_FILE_BYTES = 64 * 1024;
 const READ_RETRY_MS = [50, 100, 200] as const;
-const CHANGED      = '검토한 뒤 Skill이 바뀌었어요. 다시 검토하세요';
 
 export type PinState =
   | { kind: 'missing'; path: string }
@@ -63,6 +59,8 @@ type LoadedPin = Extract<PinState, { kind: 'loaded' }>;
 export interface PinEnv {
   platform: NodeJS.Platform;
   procDir:  string;
+  /** The language of the refusal text; Korean when absent. */
+  lang?:    Lang;
 }
 
 /**
@@ -90,11 +88,11 @@ async function namespaceProblem(env: PinEnv): Promise<string | null> {
     try {
       text = await readFile(path.join(env.procDir, 'self', name), 'utf8');
     } catch {
-      return '실행 환경을 확인할 수 없어 조직 고정 정책을 쓰지 않아요';
+      return t(env.lang ?? 'ko', 'admin.err.nsUnknown');
     }
     const lines = text.trim().split(/\r?\n/u);
     if (lines.length !== 1 || lines[0]!.trim().split(/\s+/u).join(' ') !== '0 0 4294967295')
-      return '이 실행 환경(사용자 네임스페이스)에서는 조직 고정 정책을 믿을 수 없어요';
+      return t(env.lang ?? 'ko', 'admin.err.nsUntrusted');
   }
   return null;
 }
@@ -145,6 +143,8 @@ export interface ReadPinOptions {
   platform:     NodeJS.Platform;
   procDir:      string;
   readlink:     (p: string) => string;
+  /** The language of the reasons in the result; Korean when absent. */
+  lang?:        Lang;
   /** Called when an unreadable memory file was moved aside. */
   onMemoryReset?: (reset: { at: string; backup: string }) => void;
 }
@@ -157,13 +157,14 @@ export async function moveMemoryAside(memoryFile: string, now: Date): Promise<st
 }
 
 export async function readPin(options: ReadPinOptions): Promise<PinState> {
+  const lang = options.lang ?? 'ko';
   const file = mapPinPath(options.path, options.platform, options.readlink);
   try {
     await lstat(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', path: file };
   }
-  const problem = await pinOwnershipProblem(file, options.rootUid, options.trustedBase, { platform: options.platform, procDir: options.procDir });
+  const problem = await pinOwnershipProblem(file, options.rootUid, options.trustedBase, { platform: options.platform, procDir: options.procDir, lang: options.lang ?? 'ko' });
   if (problem) return { kind: 'unprotected', path: file, reason: problem };
   let policy: Policy;
   let bytes: Buffer;
@@ -179,7 +180,7 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
   try {
     await mkdir(path.dirname(options.memoryFile), { recursive: true, mode: 0o700 });
   } catch (error) {
-    return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 저장하지 못했어요: ${(error as Error).message}` };
+    return { kind: 'invalid', path: file, reason: t(lang, 'admin.err.saveFailed', { error: (error as Error).message }) };
   }
   let moved = false;
   let retries = 0;
@@ -188,7 +189,7 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
     const root = await loadPolicyRoot(memoryPolicy, options.now, { recordVersions: true });
     const trust = await loadPolicyTrust(memoryPolicy, options.now, { recordVersions: true });
     const writeFailed = (!root.ok && root.stateError === 'write') ? root.reason : (!trust.ok && trust.stateError === 'write') ? trust.reason : null;
-    if (writeFailed !== null) return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 저장하지 못했어요: ${writeFailed}` };
+    if (writeFailed !== null) return { kind: 'invalid', path: file, reason: t(lang, 'admin.err.saveFailed', { error: writeFailed }) };
     const corrupt = (!root.ok && root.stateError === 'corrupt') || (!trust.ok && trust.stateError === 'corrupt');
     const unreadable = (!root.ok && root.stateError === 'unreadable') || (!trust.ok && trust.stateError === 'unreadable');
     // A memory that was read and is wrong is moved aside once. A memory that could not be read is never moved.
@@ -200,7 +201,7 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
       } catch (error) {
         // Another reader may have moved it already; anything else cannot be repaired here.
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-          return { kind: 'invalid', path: file, reason: `이 컴퓨터의 기록을 저장하지 못했어요: ${(error as Error).message}` };
+          return { kind: 'invalid', path: file, reason: t(lang, 'admin.err.saveFailed', { error: (error as Error).message }) };
       }
       continue;
     }
@@ -209,7 +210,7 @@ export async function readPin(options: ReadPinOptions): Promise<PinState> {
       retries += 1;
       continue;
     }
-    if (corrupt || unreadable) return { kind: 'invalid', path: file, reason: MEMORY_BUSY };
+    if (corrupt || unreadable) return { kind: 'invalid', path: file, reason: t(lang, 'admin.err.memoryBusy') };
     return { kind: 'loaded', path: file, policy, sha256, root, trust, memoryFile: options.memoryFile };
   }
 }
@@ -290,11 +291,11 @@ export function dialogSafe(text: string): string {
 }
 
 /** A key load error as fixed text; the raw message may carry the key file's path. */
-function keyLoadMessage(error: unknown): string {
+function keyLoadMessage(error: unknown, lang: Lang): string {
   const message = error instanceof Error ? error.message : '';
-  if (message.includes('Private key permissions')) return '키 파일 권한이 너무 넓어요 (chmod 600)';
-  if (message.includes('not a valid PKCS#8 key') || message.includes('not Ed25519')) return 'Ed25519 개인 키가 아니에요';
-  return '키 파일을 읽을 수 없어요';
+  if (message.includes('Private key permissions')) return t(lang, 'admin.err.keyPerm');
+  if (message.includes('not a valid PKCS#8 key') || message.includes('not Ed25519')) return t(lang, 'admin.err.keyNotEd');
+  return t(lang, 'admin.err.keyUnreadable');
 }
 
 /** An engine message, unless it could carry a path. */
@@ -324,6 +325,8 @@ export interface AdminSessionOptions {
   discoveryRoots: () => string[];
   skillFolders:   () => string[];
   hostSkillDirs:  () => string[];
+  /** The language of the refusal texts, read each time one is built. Korean when absent. */
+  lang?: () => Lang;
   /** Tests only. */
   platform?: NodeJS.Platform;
   procDir?: string;
@@ -401,8 +404,16 @@ export class AdminSession {
     return await readPin({
       path: this.pinPath, rootUid: this.rootUid, trustedBase: this.trustedBase, now: this.now(),
       memoryFile: this.memoryFile, platform: this.platform, procDir: this.procDir, readlink: (p) => readlinkSync(p),
-      onMemoryReset: (reset) => { this.memoryReset = reset; },
+      onMemoryReset: (reset) => { this.memoryReset = reset; }, lang: this.lang(),
     });
+  }
+
+  private lang(): Lang {
+    return this.options.lang?.() ?? 'ko';
+  }
+
+  private msg(key: MessageKey, params?: Record<string, string | number>): string {
+    return t(this.lang(), key, params);
   }
 
   /** Synchronous and never queued: nothing awaits between the decision to disarm and the disarm. */
@@ -468,8 +479,8 @@ export class AdminSession {
 
   /** One dialog at a time, and a pause after any cancel or timeout, so a page cannot spam dialogs until one is clicked. */
   private requireNoDialog(): void {
-    if (Date.now() < this.cooldownUntil) throw new AdminError('잠시 후 다시 시도하세요');
-    if (this.dialogsOpen > 0) throw new AdminError('다른 확인 창이 열려 있어요');
+    if (Date.now() < this.cooldownUntil) throw new AdminError(this.msg('admin.err.cooldown'));
+    if (this.dialogsOpen > 0) throw new AdminError(this.msg('admin.err.dialogOpen'));
   }
 
   private async hostDiffers(pin: PinState): Promise<boolean> {
@@ -520,13 +531,13 @@ export class AdminSession {
       try {
         ({ key, canonical, identity } = await this.openKeyFile(keyPath));
       } catch (error) {
-        return { ok: false, reason: keyLoadMessage(error) };
+        return { ok: false, reason: keyLoadMessage(error, this.lang()) };
       }
-      if (await this.keyInsideSkills(canonical, pin)) return { ok: false, reason: KEY_IN_SKILL, keyId: key.keyId };
+      if (await this.keyInsideSkills(canonical, pin)) return { ok: false, reason: this.msg('admin.err.keyInSkill'), keyId: key.keyId };
       const { view, publicKey } = roleOf(pin, key, this.now());
       if (view.role === 'none' || !publicKey) return { ok: false, reason: view.note ?? 'this key holds no role in the organisation', keyId: key.keyId };
       if (!proveIdentity(pin, key, publicKey)) return { ok: false, reason: 'the key could not prove possession: it is not the private half of the key the documents name', keyId: key.keyId };
-      if (generation !== this.generation) return { ok: false, reason: KEY_GONE };
+      if (generation !== this.generation) return { ok: false, reason: this.msg('admin.err.keyGone') };
       this.armed = { key, keyPath: canonical, keyDev: identity.dev, keyIno: identity.ino, role: view, pinSha: pin.sha256, lastUsed: Date.now() };
       this.scheduleIdle();
       return { ok: true, role: { ...view } };
@@ -571,7 +582,7 @@ export class AdminSession {
     }
     if (!same) {
       if (this.armed === armed) this.dropKey('key file');
-      throw new AdminError(KEY_SWAPPED);
+      throw new AdminError(this.msg('admin.err.keySwapped'));
     }
   }
 
@@ -605,9 +616,9 @@ export class AdminSession {
   private async current(role: AdminRoleView['role'], op: { generation: number }): Promise<{ pin: LoadedPin; armed: Armed }> {
     this.expireIfIdle();
     const armed = this.armed;
-    if (!armed || op.generation !== this.generation) throw new AdminError(KEY_GONE);
+    if (!armed || op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
     const pin = await this.pin();
-    if (op.generation !== this.generation) throw new AdminError(KEY_GONE);
+    if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
     if (pin.kind !== 'loaded' || pin.sha256 !== armed.pinSha) {
       this.dropKey('pin');
       throw new AdminError('the organisation pin changed; load your key again');
@@ -691,7 +702,7 @@ export class AdminSession {
       try {
         this.requireNoDialog();
         const first = this.armed;
-        if (!first) throw new AdminError('승인자 키를 먼저 불러오세요');
+        if (!first) throw new AdminError(this.msg('admin.err.needKey'));
         const op = { keyId: first.key.keyId, generation: this.generation };
         await this.current('approver', op);
         const skill = this.skill(instanceId);
@@ -699,14 +710,14 @@ export class AdminSession {
         try {
           read = await this.readSkill(skill.path);
         } catch (error) {
-          throw new AdminError(safeMessage(error, 'Skill을 읽을 수 없어요. 다시 시도하세요.'));
+          throw new AdminError(safeMessage(error, this.msg('admin.err.skillUnreadable')));
         }
         const summary: AdminReviewSummary = { skillName: read.name, skillPath: skill.path, digest: read.tree.digest, files: read.tree.files.length };
         this.requireNoDialog();
         const confirmed = await this.ask(() => this.options.confirmReview(summary), false);
         if (!confirmed || op.generation !== this.generation) {
           this.startCooldown();
-          return { ok: false, message: '검토를 기록하지 않았어요' };
+          return { ok: false, message: this.msg('admin.err.reviewNotRecorded') };
         }
         this.reviews.set(`${op.keyId}|${op.generation}|${instanceId}`, { digest: read.tree.digest, name: read.name, keyId: op.keyId, generation: op.generation });
         return { ok: true };
@@ -725,14 +736,14 @@ export class AdminSession {
     return this.serial(async () => {
       try {
         const first = this.armed;
-        if (!first) throw new AdminError('승인자 키를 먼저 불러오세요');
+        if (!first) throw new AdminError(this.msg('admin.err.needKey'));
         const op = { keyId: first.key.keyId, generation: this.generation };
         if (first.role.role !== 'approver') throw new AdminError(`this needs the approver role; the armed key is ${first.role.role}`);
         this.requireNoDialog();
 
         const recordKey = `${op.keyId}|${op.generation}|${instanceId}`;
         const record = this.reviews.get(recordKey);
-        if (!record || record.digest !== digest) throw new AdminError('먼저 이 정확한 버전을 검토하세요');
+        if (!record || record.digest !== digest) throw new AdminError(this.msg('admin.err.needReview'));
 
         const text = this.checkReason(reason);
         if (!LIFETIMES.includes(lifetime)) throw new AdminError('choose a lifetime of 30, 90 or 180 days');
@@ -743,27 +754,27 @@ export class AdminSession {
         // The expiry as the re-check has just refreshed it, not the one seen when the key was armed.
         const keyExpiry = armed.role.expiresAt;
         if (keyExpiry && expires > new Date(keyExpiry))
-          throw new AdminError(`이 기간은 승인자 키의 만료(${keyExpiry})를 넘어요. 더 짧게 고르세요.`);
+          throw new AdminError(this.msg('admin.err.keyExpiry', { expiry: keyExpiry }));
         const scopes = armed.role.scopes ?? [];
         if (!scopes.some((scope) => scopeMatches(scope, record.name)))
-          throw new AdminError(`범위(${scopes.join(', ')})가 Skill 이름 "${record.name}"을 포함하지 않아요`);
+          throw new AdminError(this.msg('admin.err.scope', { scopes: scopes.join(', '), name: record.name }));
         await this.requireSameKeyFile(armed);
         const skill = this.skill(instanceId);
         try {
           await resolveOutside(armed.keyPath, skill.path, 'Approver private key');
         } catch {
-          throw new AdminError(KEY_IN_SKILL);
+          throw new AdminError(this.msg('admin.err.keyInSkill'));
         }
-        if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(KEY_IN_SKILL);
+        if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
         await this.requireSameKeyFile(armed);
 
         let read;
         try {
           read = await this.readSkill(skill.path);
         } catch {
-          throw new AdminError(CHANGED);
+          throw new AdminError(this.msg('admin.err.changed'));
         }
-        if (read.tree.digest !== record.digest || read.name !== record.name) throw new AdminError(CHANGED);
+        if (read.tree.digest !== record.digest || read.name !== record.name) throw new AdminError(this.msg('admin.err.changed'));
 
         // Claim the record before the dialog, so a second approve cannot use it while this one waits for the human.
         this.requireNoDialog();
@@ -776,9 +787,9 @@ export class AdminSession {
         if (!confirmed) {
           if (op.generation === this.generation) this.reviews.set(recordKey, record);
           this.startCooldown();
-          return { ok: false, message: '서명을 취소했어요' };
+          return { ok: false, message: this.msg('admin.err.signCancelled') };
         }
-        if (op.generation !== this.generation) throw new AdminError(KEY_GONE);
+        if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
 
         const dir = pin.policy.certificateDirs[0];
         try {
@@ -792,15 +803,15 @@ export class AdminSession {
               await this.requireSameKeyFile(latest.armed);
               const latestScopes = latest.armed.role.scopes ?? [];
               if (!latestScopes.some((scope) => scopeMatches(scope, info.skillName)))
-                throw new AdminError(`범위(${latestScopes.join(', ')})가 Skill 이름 "${info.skillName}"을 포함하지 않아요`);
-              if (op.generation !== this.generation) throw new AdminError(KEY_GONE);
-              if (await this.keyInsideSkills(latest.armed.keyPath, latest.pin)) throw new AdminError(KEY_IN_SKILL);
+                throw new AdminError(this.msg('admin.err.scope', { scopes: latestScopes.join(', '), name: info.skillName }));
+              if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+              if (await this.keyInsideSkills(latest.armed.keyPath, latest.pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
             },
           });
           return { ok: true, certificateId: issued.certificateId, certificatePath: issued.path, digest: issued.digest, expiresAt: formatTimestamp(issued.expiresAt) };
         } catch (error) {
           if (error instanceof AdminError) throw error;
-          throw new AdminError(safeMessage(error, '서명하지 못했어요. Skill을 다시 검토하세요.'));
+          throw new AdminError(safeMessage(error, this.msg('admin.err.signFailed')));
         }
       } catch (error) {
         return { ok: false, message: (error as Error).message };
@@ -811,11 +822,11 @@ export class AdminSession {
   /** Trim; at most 1024 units; display-safe; and real letters or digits, not fillers. */
   private checkReason(reason: string): string {
     const text = reason.trim();
-    if (text === '') throw new AdminError(NEED_REASON);
-    if (text.length > MAX_REASON) throw new AdminError('이유는 1024자 이하여야 해요');
+    if (text === '') throw new AdminError(this.msg('admin.err.needReason'));
+    if (text.length > MAX_REASON) throw new AdminError(this.msg('admin.err.reasonTooLong'));
     requireDisplaySafeText(text, 'Reason', MAX_REASON);
     const real = [...text].filter((c) => /[\p{L}\p{N}]/u.test(c) && !'ᅟᅠㅤﾠ⠀'.includes(c));
-    if (real.length < 3) throw new AdminError(NEED_REASON);
+    if (real.length < 3) throw new AdminError(this.msg('admin.err.needReason'));
     return text;
   }
 
@@ -845,7 +856,7 @@ export class AdminSession {
           });
         }
       } catch (error) {
-        refusal = error instanceof AdminError ? error.message : '기록을 옮기지 못했어요';
+        refusal = error instanceof AdminError ? error.message : this.msg('admin.err.moveFailed');
       }
       const status = await this.status();
       return refusal === null ? { ok: true, status } : { ok: false, message: refusal, status };

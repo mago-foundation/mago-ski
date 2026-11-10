@@ -1,5 +1,6 @@
 // Sandboxed preload: exposes exactly the RendererApi, nothing from Node or Electron itself.
 import type { IpcRendererEvent } from 'electron';
+import type { Lang } from '../i18n/messages.ts';
 import type { AdminLifetime, Prefs, RendererApi, ServiceView } from '../service/types.ts';
 
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
@@ -15,6 +16,8 @@ const api: RendererApi = {
   setPrefs:        (prefs: Partial<Prefs>) => ipcRenderer.invoke('prefs:set', prefs),
   copyText:        (text: string) => ipcRenderer.invoke('clipboard:write', text),
   dismissHistoryReset: () => ipcRenderer.invoke('history:dismiss-reset'),
+  getLang:         () => ipcRenderer.invoke('settings:get-lang'),
+  setLang:         (lang: Lang) => ipcRenderer.invoke('settings:set-lang', lang),
   onUpdate: (listener: (view: ServiceView) => void) => {
     const wrapped = (_event: IpcRendererEvent, view: ServiceView) => listener(view);
     ipcRenderer.on('view:update', wrapped);

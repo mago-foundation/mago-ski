@@ -1,6 +1,7 @@
 // View model shared by the observation service, the Electron main process and the renderer.
 // Self-contained on purpose: the renderer type-checks against this file without the engine or Node types.
 
+import type { Lang } from '../i18n/messages.ts';
 /** Mirrors the engine's VERDICTS (src/verify.ts); service.ts checks the two stay equal. */
 export type Verdict =
   | 'VERIFIED' | 'REVOKED' | 'UNAPPROVED_CHANGE' | 'EXPIRED' | 'UNTRUSTED_SIGNER' | 'UNVERIFIABLE' | 'NO_CERTIFICATE';
@@ -326,6 +327,10 @@ export interface RendererApi {
   setPrefs(prefs: Partial<Prefs>):                    Promise<ServiceView>;
   copyText(text: string):                             Promise<void>;
   dismissHistoryReset():                              Promise<ServiceView>;
+  /** The language in effect: the stored setting, or the system locale. */
+  getLang():                                          Promise<Lang>;
+  /** Stores the language and returns it. Only 'ko' and 'en' are accepted. */
+  setLang(lang: Lang):                                Promise<Lang>;
   onUpdate(listener: (view: ServiceView) => void):    () => void;
   admin: {
     status():                                                          Promise<AdminStatusView>;
@@ -333,7 +338,7 @@ export interface RendererApi {
     arm():                                                             Promise<AdminArmResult>;
     disarm():                                                          Promise<AdminStatusView>;
     inspect(instanceId: string):                                       Promise<AdminInspectView>;
-    /** Opens a native confirmation in the main process; only its 검토함 answer records the review. */
+    /** Opens a native confirmation in the main process; only its Reviewed (검토함) answer records the review. */
     review(instanceId: string):                                        Promise<AdminActionResult>;
     approve(instanceId: string, digest: string, lifetime: AdminLifetime, reason: string): Promise<AdminActionResult>;
     check(instanceId: string):                                         Promise<AdminCheckView>;
