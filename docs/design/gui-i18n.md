@@ -75,7 +75,7 @@ The English is written for administrators and must state the same facts as the K
 | 폐기 | revoke / revocation |
 | 기록 초기화 | Reset memory |
 | 키 불러오기 | Load key |
-| 키 빼기 (disarm) | Unload key |
+| 키 꺼내기 (disarm) | Unload key |
 | 관리 (tab) | Admin |
 
 Use plain sentences, with no exclamation marks. Errors say what happened and what to do.
