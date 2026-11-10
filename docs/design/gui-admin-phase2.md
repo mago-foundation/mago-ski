@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: draft v5, for Goldfish review. Precedence: [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: draft v6, for Goldfish review. Precedence: [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -766,3 +766,126 @@ These decisions bring the design up to date with `dev` at `890fe40`. Since v4, t
 - **`AdminSessionOptions`** already has `lang`, `stateDir`, `discoveryRoots`, `skillFolders`, `hostSkillDirs`, `pickFile` (through the session) and the test seams. Phase 2 adds `confirmOffline`, `confirmLastApprover` and `pickPublicKey` (W11) next to them.
 - **The engine's state helpers** already serialise writes per canonical path (`persistState` chain, hardening v5.2 item 3). `recordDocumentVersions` (V3, W1) joins that same chain.
 - **Screenshots.** After 2a and again after 2b, `gui/scripts/screenshots.ts` gains one shot per new template, in English, and the READMEs show them.
+
+## Decisions (v6)
+
+These decisions resolve:
+- the v5 readiness check: B1, B2 and N1–N10;
+- the v5 comprehension check: blocking points 1–7 and the minor points.
+
+Where v6 differs from V, W or Z, v6 wins.
+
+### A1. One view for consequences: the host's own checks (comprehension 1, readiness B1)
+
+`contextFromBytes` (W3) is dropped. Consequences use the same function hosts use:
+
+- **The new option.** `loadPolicyTrust(policy, now, options)` gains `options.override?: { trustRoot?: Buffer; revocations?: Buffer; timestamp?: Buffer }`. A given buffer replaces the bytes read from that document's path. Everything else runs as for a host:
+  - the root-event walk;
+  - the retired and collision checks;
+  - freshness;
+  - the minimums from the state file.
+- **What the consequence calls.** It always passes `recordVersions: false` and the memory policy, so it never writes.
+- **`from`.** Each Skill's verdict under `loadPolicyTrust(memoryPolicy(pin), now, { recordVersions: false })`. When that fails, `from` is `UNVERIFIABLE` with the failure reason, as in W3.
+- **`to`, for a trust-root or revocation write.** The same call with `override` set to the prepared document, signed in memory with the armed key.
+  - In a freshness organisation that call fails the freshness check. W3's rule stands: every Skill's `to` is `BLOCKED_UNTIL_TIMESTAMP`.
+  - The line beneath it, "result after timestamp", comes from the same call plus a test-only flag `skipFreshness: true`. It is engine-internal, exported only for this preview.
+- **`to`, for a timestamp.** The same call with `override.timestamp` set to the timestamp signed in memory.
+- **Removing a retired approver.** `from` now shows what hosts show: `UNVERIFIABLE`, because of the V2 check. `to` shows the recovery.
+
+### A2. No change to how hosts treat recovery keys (comprehension 2, readiness N6)
+
+W6's walker change is **withdrawn**. The walker and the V2 host check stay as follows:
+- `retired` holds only root and timestamp keys, as today;
+- hosts do not refuse a trust root that lists a former recovery key;
+- the walker's existing rotate refusals (`root-events.ts:334, 342`) and their messages are unchanged.
+
+`RootWalk` gains `formerRecovery: string[]`, every key that was in a recovery set and left it in walked events. Only `forbiddenApproverKeys` uses it, so the GUI and `root add-approver --policy` refuse such a key as an approver. Its why text is `a former recovery key` / `예전 복구 키`.
+
+No host refuses a document it accepted before. The specs and CHANGELOG say: "Former recovery keys are refused as new approvers by the GUI and by `--policy`; hosts do not check this."
+
+### A3. English security texts, given and tested exactly (comprehension 3)
+
+The English catalog values below are fixed. `dialog-text.test.ts` asserts the full `en` string for each, not just "contains the values".
+
+| Key (meaning) | ko (from V/W) | en |
+|---|---|---|
+| permanence, key | 폐기는 되돌릴 수 없어요. 이 키가 서명한 모든 인증서가 영구히 검증되지 않아요. | Revocation cannot be undone. Every certificate this key signed will permanently fail verification. |
+| permanence, digest | 폐기는 되돌릴 수 없어요. 이 버전의 모든 인증서가 영구히 검증되지 않아요. | Revocation cannot be undone. Every certificate for this version will permanently fail verification. |
+| freshness line | 이 조직은 타임스탬프를 써요: 새 타임스탬프를 서명할 때까지 enforce 모드의 호스트는 모든 Skill을 막아요. | This organisation uses timestamps: hosts in enforce mode block every Skill until a new timestamp is signed. |
+| last approver | (W10 text) | No approvers will remain. Every approved Skill will stop verifying (UNTRUSTED_SIGNER), and no Skill can be approved until you add a new approver. Continue? |
+| previous root | 문서가 이전 루트 키로 서명돼 있어요. CLI에서 root adopt로 새 루트 키로 옮기세요. (GUI 지원은 3단계) | These documents are signed by a previous root key. Move them to the new root key with `root adopt` in the CLI. (GUI support comes in phase 3.) |
+| offline confirm | 루트 키와 복구 키는 오프라인 관리용 컴퓨터에서만 써야 해요. 이 컴퓨터가 그런 컴퓨터인가요? | Root and recovery keys must only be used on an offline administration computer. Is this such a computer? / buttons: Cancel, Yes, it is offline |
+| changed | 문서가 그 사이에 바뀌었어요. 다시 준비하세요. | The document changed in the meantime. Prepare it again. |
+| stale | 이 컴퓨터가 본 것보다 오래된 문서예요. 최신 문서를 되돌려 놓으세요. | This document is older than one this computer has already seen. Put the newest document back. |
+| consequence head | 영향받는 Skill: {changed}개 (전체 {skills}개) | Skills affected: {changed} (of {skills}) |
+| blocked until timestamp | 타임스탬프 전까지 차단 | blocked until a timestamp |
+| after reset (A7) | 이 컴퓨터의 기록을 초기화한 뒤 첫 서명이에요: 디스크의 문서가 최신인지 확인하세요. | This is the first signature since this computer's memory was reset: make sure the documents on disk are the newest. |
+
+Every other new text is written to the glossary in `gui-i18n.md` §4 and checked by the catalog parity test.
+
+### A4. What the preview binds (comprehension 4, 5)
+
+- **W4 binding.** W4's sentence "the consequence shown is what is signed" is replaced by: "The documents named in the dialog are bound at commit. The consequence counts are computed when the change is prepared, from the Skill folders and certificates found then. They are not re-checked at commit." The spec states this as a limit.
+- **Certificates.** Certificates come from the pin's `certificate_dirs` **and** each Skill's own folder, as V10 and `verifyWithPolicy` say. W8's "only the pin's" is corrected.
+
+### A5. Timestamp signed by another key (comprehension 6)
+
+- **The version line.** When the existing timestamp is signed by a key other than the armed one, `versionFrom` is `null`, so the dialog line reads `버전: 없음 → 1` / `Version: none → 1`.
+- **An extra line** is added: `이전 타임스탬프는 다른 키({keyId})가 서명했어요.` / `The previous timestamp was signed by another key ({keyId}).`
+
+### A6. Active root public key (readiness B1)
+
+- **Where it comes from.** The active root's public key is `readTrustRootForUpdate(trustRootBytes, activeRootKeyId).root.publicKey`, the same source `signPolicyTimestamp` uses. If the trust root is signed by another root, that call throws, and the views show the previous-root state (V16).
+- **`prepareRevocationsChange`** gains `rootPublicKey: KeyObject`.
+  - For writes, the GUI passes the armed key's public key.
+  - The CLI passes the loaded root key's public key, as `updateRevocations` does today.
+- **Other users of the key.** `forbiddenApproverKeys`, `revocations()` and the revocation consequence get the key from the trust root, as above.
+
+### A7. Memory reset trade-off (comprehension 7)
+
+Accepted as designed (D7). After a reset, the first root or timestamp signature in that GUI session adds the "after reset" line (A3) to its dialog.
+
+### A8. Spec edits by heading (readiness B2, comprehension minor)
+
+V20 and W15 are replaced by these edits to `docs/spec/gui-admin-rack-v1.md`:
+- **`## Templates` table.**
+  - The Revoke row becomes `IDENTITY → TARGET → REVOKE → POLICY CHECK`.
+  - The Publish row is split into *Refresh revocation list* (`IDENTITY → REVOCATION REFRESH → POLICY CHECK`) and *Sign timestamp* (`IDENTITY → TIMESTAMP → POLICY CHECK`).
+- **`## Phases`.** The phase 2 item becomes 2a and 2b, as in V0.
+- **`## Replay and this computer's memory`.** It gains the write window (V1), version recording on writes (V3, W9) and the reset line (A7).
+- **`## Limits`.** It gains the retired-key scope (V2), the former-recovery-key rule (A2) and the consequence limits (A4).
+- **New sections.**
+  - *Manage approvers*, *Revoke*, *Refresh revocation list* and *Sign timestamp*, written to V, W and A.
+  - Dialog texts are quoted in Korean, with a note that the English is in the catalog.
+- **Other docs.**
+  - `docs/spec/trust-documents-v1.md` and `docs/spec/root-recovery-v1.md`: V2 and A2.
+  - CLI help: `src/cli.ts` command list (lines 34–35) and usage (line 98). Add `root renew` there, and `--policy` to the `root add-approver` usage.
+  - The five phrases V20 cited that are not in the spec are dropped.
+
+### A9. Readiness N1–N10 and comprehension minor points
+
+1. **Revoking a key and a digest in one call.** The CLI's `updateRevocations` can revoke a key and a digest in one call. `RevocationChange` gains `{ kind: 'both'; keyId: string; digest: string; reason: string }`. Only the CLI uses it.
+2. **`recordDocumentVersions`.** The v2 Engine-section signature is deleted, and V3's signature applies. `recordDocumentVersions` throws when the write fails; inside, it uses the `persistState` chain and turns `{ error }` into a thrown `Error`.
+3. **`checkReason`.** It becomes `checkReason(reason: string, max: number)`. Approve passes 1024 and revoke passes 512.
+4. **`memoryPolicy(pin)`** is extracted from `readPin` into a named, exported function in `gui/src/service/admin.ts`.
+5. **Exports.** `readHostState`, `recordDocumentVersions`, `memoryMinimums`, `forbiddenApproverKeys` and the `loadPolicyTrust` options are exported. `persistState`, `cloneWalk`, `readState` and `stateBytes` stay private.
+6. **(A2.)**
+7. **Freshness text in 2a.** Until 2b ships, 2a's POLICY CHECK freshness note names the CLI: `타임스탬프가 새 문서를 가리키지 않아요. CLI에서 mago-ski timestamp sign을 실행하세요.` / `The timestamp does not name the new documents. Run mago-ski timestamp sign in the CLI.` 2b changes it to the template text (V17).
+8. **Scopes.** IPC scopes are checked with `validateScope`.
+9. **CLI test.** A `root renew --help` test is added to `tests/cli.test.ts`.
+10. **Golden fixtures.** The first 2a commit creates `tests/fixtures/admin-golden/` from the current code, before anything is reimplemented (W14).
+
+Minor points:
+
+- **Timestamp lifetime.** It is refused above `max_lifetime`, never capped (W5).
+- **Refusal wording.** The forbidden refusal for remove and renew reads `Cannot check the root event log, so the trust root is not changed: <reason>`. Add keeps its own text.
+- **Review claim.** If a commit is refused after confirm (changed document, stale document, key moved), the claimed review record is restored when the generation is unchanged.
+- **Already revoked (V6).** The engine throws `<Key|Digest> <id> is already revoked`, and the CLI behaves the same way.
+- **Re-enrolment test recipe.** It uses the rotate-then-adopt pattern from `tests/root-recovery.test.ts` (the test that drives a whole revoke and rotate). Not `setupRecoveryOrg({ rotate })`, which sets the threshold.
+- **Branch and base.** Z1 wins: `feat/gui-admin-phase2-v2`, whose base is `dev` plus `c4e3170`.
+- **Signing key line.** Every new signing dialog uses the existing `admin.dialog.sign.key` format, `키: {role} · {name} · {keyId}`, with `-` for a missing name.
+- **Public-key picker.** The `pickPublicKey` seam returns a key. In production, `main.ts` implements it by calling `session.pickFile`, then reading and loading the key (W11).
+- **Timestamp view.** It reads with `recordVersions: false`.
+- **Revoking a current approver's key.** It leaves the approver in the trust root. TRUST ROOT then marks it forbidden (`revoked`) and offers Remove.
+- **Old test line.** The v2 §Tests line "same-version restore refused" is deleted.
+- **First seen.** A counter missing from the memory snapshot counts as first seen (`firstSeen = true`).
