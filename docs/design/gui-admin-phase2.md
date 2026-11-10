@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: draft v8, for Goldfish review. Precedence: [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: v9. Precedence: [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -1175,3 +1175,119 @@ The offline dialog's cancel button reuses `admin.dialog.cancel`.
 
   > Before upgrading hosts, open the TRUST ROOT view in a GUI of the new version: it marks any approver whose key has held the root or timestamp role. Remove those approvers (`mago-ski root remove-approver`), and in an organisation that uses timestamps, sign a new timestamp afterwards (`mago-ski timestamp sign`). Hosts that use `loadPolicyTrust` (the CLI, Pi, the GitHub Action and the gate's verifier) refuse a trust root that still lists such an approver, and in enforce mode block every Skill. The gate's trust store does not check this.
 - **firstSeen** follows V11: above memory, with the key `admin.p2.notice.timestampFirstSeen`.
+
+## Decisions (v9)
+
+These decisions resolve:
+- the v8 readiness check: B1–B6 and the minor points;
+- the v8 comprehension check: B1, B2 and m1–m5.
+
+Where v9 differs from an earlier section, v9 wins.
+
+### T1. Active root public key (readiness B1)
+
+There is one source, the trust root itself, as `signPolicyTimestamp` does it (`recovery-admin.ts:259-260`):
+
+```ts
+readTrustRootForUpdate(await readFile(policy.trustRootPath), activeRootKeyId).root.publicKey
+```
+
+Here `activeRootKeyId` comes from `loadPolicyRoot`. If the read fails, the caller refuses:
+- in the GUI with `admin.p2.err.previousRoot` when the file's root id is a retired key;
+- otherwise with `admin.p2.err.rolesUnknown`.
+
+`RootWalk` gets no public key field. W6's "comes from the walk" is withdrawn.
+
+### T2. Consequence keys (readiness B2, comprehension m1)
+
+S2 and R4 use the S3 names. The final keys, with their texts:
+
+| Key | ko | en |
+|---|---|---|
+| `admin.p2.notice.consequenceHead` | 영향받는 Skill: {changed}개 (전체 {skills}개) | Skills affected: {changed} (of {skills}) |
+| `admin.p2.notice.consequenceLine` | {name}: {from} → {to} | {name}: {from} → {to} |
+| `admin.p2.notice.consequenceLineBlocked` | {name}: {from} → 타임스탬프 전까지 차단 (타임스탬프 뒤 {after}) | {name}: {from} → blocked until a timestamp (after the timestamp: {after}) |
+| `admin.p2.notice.consequenceMore` | 외 {n}개 | and {n} more |
+| `admin.p2.notice.consequenceTooDeep` | 너무 깊어서 확인하지 않은 폴더: {n}개 | Folders too deep to check: {n} |
+| `admin.p2.notice.consequenceFromFailed` | 현재 문서로는 검증할 수 없어요: {reason} | The current documents do not verify: {reason} |
+| `admin.p2.notice.consequenceToFailed` | 서명 후 문서가 검증되지 않아요: {reason} | After signing, the documents would not verify: {reason} |
+| `admin.p2.notice.freshnessBlock` | (R4 text) | (R4 text) |
+
+### T3. Prefix rule (readiness B3)
+
+| Prefix | Used for |
+|---|---|
+| `admin.dialog.<action>.title` / `.message` / `.action` | a dialog's title, message and button |
+| `admin.dialog.<action>.line*` | a detail line in that dialog |
+| `admin.dialog.doc.*` | detail lines shared by all document dialogs |
+| `admin.p2.notice.*` | notices that may appear in several dialogs or views |
+| `admin.p2.err.*` | refusals |
+| `admin.p2.forbidden.*` | forbidden-key labels |
+| `admin.p2.btn.*` | buttons |
+| `admin.p2.label.*` | form labels |
+| `admin.p2.<device>.ready` / `.done` | device states |
+| `admin.template.*` | template names |
+
+Renames:
+- `admin.p2.trustRoot.lifetime` becomes `admin.p2.label.trustRootLifetime`;
+- `admin.p2.trustRoot.keep` becomes `admin.p2.label.keep`;
+- the timestamp document labels are `admin.p2.notice.timestampDocRootEvents`, `admin.p2.notice.timestampDocTrustRoot` and `admin.p2.notice.timestampDocRevocations`;
+- the others are `admin.p2.notice.timestampOtherKey` and `admin.p2.notice.timestampFirstSeen`.
+
+### T4. Engine signatures (readiness B4, B5)
+
+```ts
+export function signPreparedTrustRoot(p: PreparedTrustRoot, key: PrivateKeyInfo): Buffer;
+export function signPreparedRevocations(p: PreparedRevocations, key: PrivateKeyInfo): Buffer;
+export function signPreparedTimestamp(p: PreparedTimestamp, key: PrivateKeyInfo): Buffer;
+```
+
+- **Signing functions.** These are pure. Key-id checks stay in `commit*`.
+- **Shared loader body.** `src/policy.ts` gets a private `loadTrustBody(policy: Policy, now: Date, o: { record: boolean; override?: { trustRoot?: Buffer; revocations?: Buffer; timestamp?: Buffer }; skipFreshness?: boolean }): Promise<TrustContextResult>`.
+  - It holds today's body of `loadPolicyTrust`.
+  - `override` replaces the three reads at `policy.ts:566-568`, and keeps their size limits (`MAX_TRUST_ROOT_BYTES`, `MAX_REVOCATIONS_BYTES`, `MAX_TIMESTAMP_BYTES`, or the constants used there).
+- **Two wrappers:**
+  - `loadPolicyTrust(policy, now, opts)` is `loadTrustBody(policy, now, { record: opts.recordVersions !== false })`;
+  - `loadTrustForPreview(policy, now, o)` is `loadTrustBody(policy, now, { record: false, ...o })`.
+
+### T5. Consequence failure cases (readiness B6)
+
+- **`from` load fails.** The dialog shows only `consequenceFromFailed`: no head, no lines.
+- **`to` load fails for a reason other than freshness**, for example the V2 retired-key refusal, or an expired document the change does not fix. The dialog shows `consequenceToFailed`, and Sign is disabled: `ask()` is not called, and the method returns `{ ok: false, message: consequenceToFailed }`.
+- **Removing the last forbidden approver** makes `to` pass, so this does not block the fix.
+
+### T6. Sign timestamp's own preview (comprehension B1)
+
+- **The rule.** `consequenceLineBlocked` and `freshnessBlock` apply only to trust-root and revocation writes. For a timestamp write:
+  - `to` is the override load with the signed timestamp, with freshness checked (A1);
+  - lines use `consequenceLine`;
+  - "changed" is `from !== to`;
+  - no freshness line is shown.
+- **The type.** V11's `sign-timestamp` summary member has `consequence` with `freshnessBlock: false`.
+
+### T7. Root-event counter in memory (comprehension B2)
+
+- **New field.** V3's `recordDocumentVersions` gains `rootEvents?: { rootKeyId: string; sequence: number; eventDigest: string }`. It is merged as `mergeHostState` merges `rootEvents`: the higher sequence wins.
+- **Recording after a timestamp.** After a timestamp commit, the GUI records `timestamp`, and also `rootEvents` from the walk the prepare used.
+- **Recording after a root write.** After a trust-root or revocation commit, it records `trustRoot` or `revocations` as before.
+- **Clearing the marker.** firstSeen for root events then clears after the first timestamp (W9).
+
+### T8. Placement and wording (comprehension m2–m5; readiness minor points)
+
+- **Detail-line order** for every document dialog:
+  1. document lines (`doc.*`);
+  2. action lines (`line*`), with the replace and scope `*` notices directly after the line they qualify;
+  3. the timestamp lines, each with its firstSeen marker on the same line;
+  4. `timestampOtherKey`;
+  5. the key line;
+  6. the consequence (head, lines, more, tooDeep, or `fromFailed` / `toFailed`);
+  7. the permanence line;
+  8. `freshnessBlock`;
+  9. `afterReset`.
+- **A5 example.** `none → 1` holds when the key has no memory. Otherwise it reads `none → memory + 1` (W5).
+- **Upgrade note (S5).** It adds: "In an organisation that uses timestamps, remove the approvers and sign the new timestamp in one sitting. Between the two, hosts block every Skill."
+- **Freshness add dialog.** In a freshness add, the head can read `0 (of N)` while `freshnessBlock` says every Skill is blocked until a timestamp. This is intended: the head counts changes after the timestamp.
+- **Tests.**
+  - The re-enrolment recipe is `setupRecoveryOrg(t, { freshness })` plus the rotate-then-adopt pattern (A9). The `t` was missing.
+  - The `RootWalk` return literal and `cloneWalk` carry `retired` and `formerRecovery` (R2, S4).
+  - V17's `needsTimestamp` reads `timestampMismatch` (S4).
