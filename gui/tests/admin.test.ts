@@ -6,7 +6,7 @@ import { access, appendFile, chmod, copyFile, mkdir, readdir, readFile, rename, 
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { addApprover, removeApprover } from '../../src/admin.ts';
-import { generateKeyPair } from '../../src/keys.ts';
+import { generateKeyPair, loadPublicKey, type PublicKeyInfo } from '../../src/keys.ts';
 import { adoptTrustDocuments, appendRootEvent, prepareRootEvent, signRootEvent } from '../../src/recovery-admin.ts';
 import { collectSkillTree } from '../../src/tree-digest.ts';
 import { daysAfter, setupOrg, setupRecoveryOrg, T0, tempDir, writeSkill, type Org, type RecoveryOrg } from '../../tests/helpers.ts';
@@ -38,8 +38,11 @@ function fakes(base: string, procDir: string) {
     review: async (_summary: AdminReviewSummary): Promise<boolean> => true,
     sign: async (_summary: AdminSignSummary): Promise<boolean> => true,
     reset: async (): Promise<boolean> => true,
+    offline: async (): Promise<boolean> => true,
+    lastApprover: async (): Promise<boolean> => true,
+    pick: async (): Promise<{ ok: true; key: PublicKeyInfo } | { ok: false; reason: string }> => ({ ok: false, reason: 'cancelled' }),
   };
-  const calls = { review: [] as AdminReviewSummary[], sign: [] as AdminSignSummary[], reset: 0 };
+  const calls = { review: [] as AdminReviewSummary[], sign: [] as AdminSignSummary[], reset: 0, offline: 0, lastApprover: 0, pick: 0 };
   const hooks: NonNullable<AdminSessionOptions['hooks']> = {};
   const hostSkillDirs: string[] = [];
   const options = {
@@ -47,6 +50,9 @@ function fakes(base: string, procDir: string) {
     confirmReview: async (s: AdminReviewSummary) => { calls.review.push(s); return await handlers.review(s); },
     confirmSign: async (s: AdminSignSummary) => { calls.sign.push(s); return await handlers.sign(s); },
     confirmReset: async () => { calls.reset += 1; return await handlers.reset(); },
+    confirmOffline: async () => { calls.offline += 1; return await handlers.offline(); },
+    confirmLastApprover: async () => { calls.lastApprover += 1; return await handlers.lastApprover(); },
+    pickPublicKey: async () => { calls.pick += 1; return await handlers.pick(); },
     discoveryRoots: () => [] as string[],
     skillFolders: () => [] as string[],
     hostSkillDirs: () => hostSkillDirs,
@@ -282,7 +288,7 @@ test('F1: approve, review and the dialogs: no signature without both answers', a
   assert.equal(signed.ok && signed.digest, shown.digest);
   assert.equal(signed.ok && signed.certificatePath, path.join(w.docs, '.mago-ski-cert.json'));
   assert.equal(w.calls.sign.length, 1);
-  const summary = w.calls.sign[0]!;
+  const summary = w.calls.sign[0]! as Extract<AdminSignSummary, { action: 'approve' }>;
   assert.deepEqual(
     [summary.action, summary.skillName, summary.skillPath, summary.reviewedDigest, summary.digest, summary.lifetime, summary.reason, summary.role, summary.keyName, summary.keyId],
     ['approve', 'docs-helper', w.docs, shown.digest, shown.digest, '30d', 'Reviewed the formatting rules', 'approver', 'Reviewer One', w.org.approverKeyId],
@@ -520,12 +526,12 @@ test('the armed key is dropped when the pin changes, when the role is gone, and 
   assert.equal((await idle.session.status()).armed, null);
 });
 
-test('a root administrator cannot use the approver devices', async (t) => {
+test('a root administrator may review but cannot approve, and a recovery key cannot review', async (t) => {
   const w = await world(t);
-  await w.session.arm(w.org.rootKey);
-  assert.match(failure(await w.session.review('docs')), /needs the approver role; the armed key is root/u);
+  assert.equal((await w.session.arm(w.org.rootKey)).ok, true);
+  assert.deepEqual(await w.session.review('docs'), { ok: true }, 'the root role may review (design V12)');
+  assert.equal(w.calls.review.length, 1);
   assert.match(failure(await w.session.approve('docs', (await w.session.inspect('docs')).digest, '30d', 'Reviewed')), /needs the approver role; the armed key is root/u);
-  assert.equal(w.calls.review.length, 0);
   // With no key at all, the message says to load one.
   w.session.disarm();
   assert.equal(failure(await w.session.review('docs')), '승인자 키를 먼저 불러오세요');

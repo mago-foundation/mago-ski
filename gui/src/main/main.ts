@@ -4,14 +4,17 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, session, 
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LANGS, langFromLocale, t, type Lang } from '../i18n/messages.ts';
+import { loadPublicKeyBytes } from '../../../src/keys.ts';
+import { readRegularFile } from '../../../src/fs-safe.ts';
 import { AdminSession, LIFETIMES } from '../service/admin.ts';
 import { ObservationService } from '../service/service.ts';
 import { readLang, writeLang } from '../service/settings.ts';
 import type { AdminReviewSummary, AdminSignSummary, InstanceView, Prefs } from '../service/types.ts';
 import {
-  cancelLabel, keyPickerAllFiles, keyPickerTitle, notificationGrouped, notificationImmediate, resetDialog, reviewDialog,
-  rootPickerTitle, signDialog, startFailure, type DialogText,
+  cancelLabel, keyPickerAllFiles, keyPickerTitle, lastApproverDialog, notificationGrouped, notificationImmediate, offlineDialog, publicKeyPickerTitle,
+  resetDialog, reviewDialog, rootPickerTitle, signDialog, startFailure, type DialogText,
 } from './dialog-text.ts';
+import { parseAddApprover, parseRemoveApprover, parseRenew } from './ipc-args.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rendererIndex = path.join(here, '..', 'renderer', 'index.html');
@@ -122,6 +125,29 @@ function confirmReset(): Promise<boolean> {
   return confirmBox(resetDialog(currentLang));
 }
 
+function confirmOffline(): Promise<boolean> {
+  return confirmBox(offlineDialog(currentLang));
+}
+
+function confirmLastApprover(): Promise<boolean> {
+  return confirmBox(lastApproverDialog(currentLang));
+}
+
+/** The approver's public key: chosen in a native dialog, read at most 64 KiB and loaded here; a failure carries no path. */
+async function pickPublicKey(): Promise<{ ok: true; key: import('../../../src/keys.ts').PublicKeyInfo } | { ok: false; reason: string }> {
+  const options: Electron.OpenDialogOptions = {
+    title: publicKeyPickerTitle(currentLang), properties: ['openFile', 'showHiddenFiles'],
+    filters: [{ name: 'PEM', extensions: ['pem', 'pub'] }, { name: keyPickerAllFiles(currentLang), extensions: ['*'] }],
+  };
+  const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+  if (picked.canceled || !picked.filePaths[0]) return { ok: false, reason: 'cancelled' };
+  try {
+    return { ok: true, key: loadPublicKeyBytes(await readRegularFile(picked.filePaths[0], 'Public key', 64 * 1024)) };
+  } catch {
+    return { ok: false, reason: 'unreadable' };
+  }
+}
+
 /**
  * Administration rack (docs/spec/gui-admin-rack-v1.md). The renderer never names a file or sees key material: the key is
  * chosen in a dialog owned by this process and stays in the AdminSession.
@@ -133,7 +159,7 @@ function registerAdminIpc(svc: ObservationService): void {
       return found ? { path: found.path, name: found.name } : null;
     },
     hostPolicyPath: () => svc.view().host.policy.path,
-    confirmReview, confirmSign, confirmReset,
+    confirmReview, confirmSign, confirmReset, confirmOffline, confirmLastApprover, pickPublicKey,
     stateDir: app.getPath('userData'),
     discoveryRoots: () => svc.view().roots.map((r) => r.path),
     skillFolders: () => svc.view().instances.map((i) => i.path),
@@ -167,6 +193,11 @@ function registerAdminIpc(svc: ObservationService): void {
   handle('admin:check', (id) => session.check(requireString(id, ID, 'instance id')));
   handle('admin:reset-memory', () => session.resetMemory());
   handle('admin:dismiss-memory-reset', () => { session.dismissMemoryReset(); return session.status(); });
+  handle('admin:trust-root', () => session.trustRoot());
+  handle('admin:add-approver', (arg) => session.addApprover(parseAddApprover(arg)));
+  handle('admin:remove-approver', (arg) => { const o = parseRemoveApprover(arg); return session.removeApprover(o.keyId, o.trustRootLifetime); });
+  handle('admin:renew-trust-root', (arg) => session.renewTrustRoot(parseRenew(arg).lifetime));
+  handle('admin:verify-all', () => session.verifyAll());
 }
 
 function createWindow(): BrowserWindow {

@@ -72,12 +72,14 @@ test('dialogs insert untrusted values through dialogSafe in both languages', () 
 
 test('reset dialog, pickers, notifications and the start failure', () => {
   assert.deepEqual(resetDialog('ko'), {
-    title: '기록 초기화', message: '이 컴퓨터가 기억하는 조직 문서 버전을 지울까요? 오래된 문서를 다시 받아들일 수 있게 돼요.', detail: '', action: '초기화',
+    title: '기록 초기화', message: '이 컴퓨터가 기억하는 조직 문서 버전을 지울까요? 오래된 문서를 다시 받아들일 수 있게 돼요.',
+    detail: '초기화하면 루트 문서를 쓸 때 지금 디스크에 있는 문서를 기준으로 삼아요.', action: '초기화',
   });
   const en = resetDialog('en');
   for (const text of [en.title, en.message, en.detail, en.action]) assert.doesNotMatch(text, HANGUL);
   assert.equal(en.title, 'Reset memory');
   assert.match(en.message, /older documents/u);
+  assert.equal(en.detail, 'After a reset, root document writes take the documents now on disk as their base.');
 
   assert.equal(keyPickerTitle('ko'), '서명 키 불러오기 (개인 키 PEM)');
   assert.equal(keyPickerAllFiles('ko'), '모든 파일');
