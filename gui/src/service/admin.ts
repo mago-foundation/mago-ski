@@ -367,7 +367,7 @@ export interface AdminSessionOptions {
   procDir?: string;
   dialogTimeoutMs?: number;
   cooldownMs?: number;
-  hooks?: { afterInspectTree?: () => Promise<void>; beforeSign?: () => Promise<void> };
+  hooks?: { afterInspectTree?: () => Promise<void>; beforeSign?: () => Promise<void>; afterCommit?: () => Promise<void> };
 }
 
 interface Armed {
@@ -1107,7 +1107,7 @@ export class AdminSession {
     return this.serial(async () => {
       try {
         const first = this.armed;
-        if (!first) throw new AdminError(this.msg('admin.err.needKey'));
+        if (!first) throw new AdminError(this.msg('admin.p2.why.needRoot'));
         const op = { keyId: first.key.keyId, generation: this.generation };
         this.requireNoDialog();
         if (first.role.role !== 'root') throw new AdminError(this.msg('admin.p2.err.notRoot', { role: first.role.role }));
@@ -1219,6 +1219,7 @@ export class AdminSession {
         this.resetPending = false;
         let memoryWarning = false;
         try {
+          await this.options.hooks?.afterCommit?.();
           await recordDocumentVersions(pin.memoryFile, { rootKeyId: found.activeRootKeyId, trustRoot: written.version });
         } catch {
           memoryWarning = true;
