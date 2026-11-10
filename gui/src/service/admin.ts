@@ -1,6 +1,7 @@
 // Administration rack (docs/spec/gui-admin-rack-v1.md): the organisation pin, roles recognised by proof of
 // possession, the armed key and the devices of the "Approve a Skill version" template. Plain Node, used only by the
 // Electron main process: key material never leaves this module and never reaches the renderer.
+import { dialogSafe } from '../i18n/dialog-safe.ts';
 import { randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 import { readlinkSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
@@ -298,14 +299,7 @@ function pinView(pin: PinState): AdminPinView {
   };
 }
 
-/**
- * Text shown in a native dialog: controls, line and bidirectional marks and zero-width characters are replaced by
- * their code point (format characters, surrogates, private-use and unassigned code points included), so a path, name or reason cannot rewrite or hide the lines around it.
- */
-export function dialogSafe(text: string): string {
-  return text.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u034F\u3164\u2800]/gu,
-    (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
-}
+export { dialogSafe };
 
 /** The root key id a trust root file claims, read without verifying it (to tell a previous root's documents apart). */
 function unverifiedRootKeyId(bytes: Buffer): string | null {
@@ -942,13 +936,14 @@ export class AdminSession {
     const { document } = found;
     let forbidden = new Map<string, ForbiddenKey['why']>();
     let note: string | null = null;
+    const state = await readHostState(found.pin.memoryFile).catch(() => null);
+    const minimums = state ? memoryMinimums(state, found.activeRootKeyId, null) : null;
+    const minimum = minimums?.trustRoot ?? 0;
     try {
-      forbidden = new Map((await forbiddenApproverKeys(memoryPolicy(found.pin), now)).map((item) => [item.keyId, item.why]));
+      forbidden = new Map((await forbiddenApproverKeys(memoryPolicy(found.pin), now, { minimumRevocations: minimums?.revocations ?? 0 })).map((item) => [item.keyId, item.why]));
     } catch (error) {
       note = this.msg('admin.p2.err.rolesUnknown', { reason: dialogSafe((error as Error).message) });
     }
-    const state = await readHostState(found.pin.memoryFile).catch(() => null);
-    const minimum = state ? memoryMinimums(state, found.activeRootKeyId, null).trustRoot : 0;
     return {
       ok: true, path: found.pin.policy.trustRootPath, sha256: `sha256:${sha256Hex(found.bytes)}`, version: document.version,
       expiresAt: formatTimestamp(document.expiresAt), expired: document.expiresAt <= now,
@@ -1036,7 +1031,7 @@ export class AdminSession {
     for (const dir of set.dirs) add(trust.ok ? (await verifyWithPolicy(policy, dir, { now, context: trust.context })).verdict : 'UNVERIFIABLE');
     for (const dir of set.tooDeep) add(tooDeepResult(dir, now).verdict);
     let timestampMismatch = false;
-    if (!trust.ok && pin.policy.recovery?.freshness)
+    if (!trust.ok && trust.bindingMismatch === true && pin.policy.recovery?.freshness)
       timestampMismatch = (await loadTrustForPreview(policy, now, { skipFreshness: true })).ok;
     return {
       skills: set.dirs.length + set.tooDeep.length, counts, trustOk: trust.ok,
@@ -1110,7 +1105,7 @@ export class AdminSession {
         if (!first) throw new AdminError(this.msg('admin.p2.why.needRoot'));
         const op = { keyId: first.key.keyId, generation: this.generation };
         this.requireNoDialog();
-        if (first.role.role !== 'root') throw new AdminError(this.msg('admin.p2.err.notRoot', { role: first.role.role }));
+        if (first.role.role !== 'root') throw new AdminError(this.msg('admin.p2.err.notRoot', { role: this.msg(`admin.role.${first.role.role}` as MessageKey) }));
         const name = request.kind === 'add' ? request.name.trim() : '';
         if (request.kind === 'add') {
           if (name === '' || name.length > MAX_APPROVER_NAME || request.scopes.length === 0 || request.scopes.length > 64) throw new AdminError(this.msg('admin.p2.err.badInput'));
@@ -1121,32 +1116,18 @@ export class AdminSession {
         await this.requireSameKeyFile(armed);
         if (await this.keyInsideSkills(armed.keyPath, pin)) throw new AdminError(this.msg('admin.err.keyInSkill'));
 
-        let publicKey: PublicKeyInfo | null = null;
-        if (request.kind === 'add') {
-          this.requireNoDialog();
-          const picked = await this.ask(() => this.options.pickPublicKey(), { ok: false as const, reason: 'cancelled' });
-          if (!picked.ok) {
-            this.startCooldown();
-            throw new AdminError(picked.reason === 'cancelled' ? this.msg('admin.p2.err.cancelled') : this.msg('admin.p2.err.publicKeyUnreadable'));
-          }
-          if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
-          publicKey = picked.key;
-        }
-
+        // Snapshot first: the commit guard then sees any change made after the checks below read the documents.
+        const inputs = await this.inputsOf(pin);
         const now = this.now();
+        // Refuses first for a pin whose root walk does not load (design U1), a previous root and an unreadable document.
         const found = await this.trustRootDocument(pin);
         if (!found.ok) throw new AdminError(found.message);
-        // The root walk must load (design U1); add keeps the engine's own text.
-        const rootCheck = await loadPolicyRoot(memoryPolicy(pin), now, { recordVersions: false });
-        if (!rootCheck.ok) {
-          throw new AdminError(rootCheck.rootRevoked ? this.msg('admin.p2.err.rootRevoked')
-            : request.kind === 'add' ? dialogSafe(`Cannot check the root event log, so no approver is added: ${rootCheck.reason}`)
-            : this.msg('admin.p2.err.trustRootUnchanged', { reason: dialogSafe(rootCheck.reason) }));
-        }
+        const memory = await readHostState(pin.memoryFile);
         let forbidden: ForbiddenKey[];
         try {
-          forbidden = await forbiddenApproverKeys(memoryPolicy(pin), now);
+          forbidden = await forbiddenApproverKeys(memoryPolicy(pin), now, { minimumRevocations: memoryMinimums(memory, found.activeRootKeyId, null).revocations });
         } catch (error) {
+          if (error instanceof StaleDocumentError) throw error;
           throw new AdminError(this.msg('admin.p2.err.rolesUnknown', { reason: dialogSafe((error as Error).message) }));
         }
         const listed = found.document.approvers.filter((entry) => forbidden.some((item) => item.keyId === entry.keyId));
@@ -1166,9 +1147,19 @@ export class AdminSession {
         }
         if (request.kind === 'add' && !APPROVER_LIFETIMES.includes(request.lifetime)) throw new AdminError(this.msg('admin.p2.err.badInput'));
 
-        const state = await readHostState(pin.memoryFile);
-        const minimum = memoryMinimums(state, found.activeRootKeyId, null).trustRoot;
-        const inputs = await this.inputsOf(pin);
+        let publicKey: PublicKeyInfo | null = null;
+        if (request.kind === 'add') {
+          this.requireNoDialog();
+          const picked = await this.ask(() => this.options.pickPublicKey(), { ok: false as const, reason: 'cancelled' });
+          if (!picked.ok) {
+            this.startCooldown();
+            throw new AdminError(picked.reason === 'cancelled' ? this.msg('admin.p2.err.cancelled') : this.msg('admin.p2.err.publicKeyUnreadable'));
+          }
+          if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
+          publicKey = picked.key;
+        }
+
+        const minimum = memoryMinimums(memory, found.activeRootKeyId, null).trustRoot;
         const change: TrustRootChange = request.kind === 'add'
           ? { kind: 'add', publicKey: publicKey!, name, scopes: request.scopes, expires: request.lifetime, ...(trustRootLifetime ? { trustRootExpires: trustRootLifetime } : {}) }
           : request.kind === 'remove'

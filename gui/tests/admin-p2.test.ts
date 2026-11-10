@@ -6,7 +6,8 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { addApprover, removeApprover, updateRevocations } from '../../src/admin.ts';
 import { loadPublicKey, type PublicKeyInfo } from '../../src/keys.ts';
-import { readHostState, recordDocumentVersions } from '../../src/policy.ts';
+import { forbiddenApproverKeys, readHostState, recordDocumentVersions } from '../../src/policy.ts';
+import { StaleDocumentError } from '../../src/admin.ts';
 import { adoptTrustDocuments, appendRootEvent, prepareRootEvent, signPolicyTimestamp, signRootEvent } from '../../src/recovery-admin.ts';
 import { approve, daysAfter, setupOrg, setupRecoveryOrg, T0, tempDir, writeSkill, type Key } from '../../tests/helpers.ts';
 import { signDialog } from '../src/main/dialog-text.ts';
@@ -470,4 +471,117 @@ test('English refusals and dialogs when the session language is English', async 
   w.handlers.sign = async () => false;
   assert.match(failure(await w.session.renewTrustRoot('180d')), /./u);
   assert.equal((await w.session.trustRoot()).ok, true);
+});
+
+// ------------------------------------------------------------------ code review fixes (design v11)
+
+/** One rotation event, adopted, so the host memory has applied event 1; returns the new root key and the empty log it had before. */
+async function rotated(w: World): Promise<{ r1: Key; emptyLog: Buffer }> {
+  const emptyLog = await fileBytes(w.eventsPath);
+  const r1 = await w.keyFn!('r1');
+  const out = path.join(w.base, 'rotate.json');
+  const eventNow = new Date(T0.getTime() + 60_000);
+  await prepareRootEvent({ policy: await w.policyOf(), action: 'rotate', reason: 'rotate for test', out, now: eventNow, signerPublicPaths: [w.recovery[0]!.pub, w.recovery[1]!.pub], newRootPublicPath: r1.pub });
+  for (const key of [w.recovery[0]!, w.recovery[1]!, r1]) await signRootEvent({ proposalPath: out, keyPath: key.priv });
+  await appendRootEvent({ policy: await w.policyOf(), proposalPath: out, now: eventNow });
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: w.rootKeyId, trustRootPath: w.trustRoot, revocationsPath: w.revocations, now: new Date(T0.getTime() + 120_000) });
+  return { r1, emptyLog };
+}
+
+test('a rolled-back root event log refuses add, remove and renew before any dialog or picker', async (t) => {
+  const w = await world(t, { recovery: true });
+  const { r1, emptyLog } = await rotated(w);
+  assert.equal((await w.session.arm(r1.priv)).ok, true);
+  assert.equal((await w.session.status()).pin.kind, 'loaded', 'the memory now records root event 1');
+  assert.equal((await readHostState(w.stateFile)).rootEvents[w.rootKeyId]?.sequence, 1);
+  await writeFile(w.eventsPath, emptyLog);
+  w.pick(await w.newKey('n'));
+  const results = [await w.session.addApprover({ name: 'N', scopes: ['*'], lifetime: '90d' }), await w.session.removeApprover(w.approverKeyId), await w.session.renewTrustRoot('180d')];
+  for (const result of results) assert.equal(result.ok, false, JSON.stringify(result));
+  assert.match(failure(results[0]!), /rollback/u, 'the first refusal names the rollback; the key is then dropped');
+  assert.ok(results.every((r) => failure(r) !== '' && !failure(r).startsWith('Cannot check the root event log, so no approver is added')));
+  assert.deepEqual([w.calls.pick, w.calls.sign.length, w.calls.lastApprover], [0, 0, 0]);
+});
+
+test('an expired revocation list that the trust root change does not fix refuses the write, with no dialog', async (t) => {
+  const w = await world(t, { now: daysAfter(T0, 400) });
+  await armRoot(w);
+  const result = await w.session.renewTrustRoot('180d');
+  assert.equal(result.ok, false);
+  assert.match(failure(result), /^서명 후 문서가 검증되지 않아요: /u);
+  assert.equal(w.calls.sign.length, 0, 'no signing dialog opened');
+});
+
+test('the picker runs after the refusals: a forbidden approver left over opens no picker', async (t) => {
+  const w = await world(t, { recovery: true });
+  const { r1 } = await rotated(w);
+  await addApprover({ rootKeyPath: r1.priv, trustRootPath: w.trustRoot, now: new Date(T0.getTime() + 180_000), publicKeyPath: w.rootPub, name: 'Old root', scopes: ['*'], expires: '30d' });
+  assert.equal((await w.session.arm(r1.priv)).ok, true);
+  w.pick(await w.newKey('another'));
+  assert.equal(failure(await w.session.addApprover({ name: 'Y', scopes: ['*'], lifetime: '90d' })), '예전에 루트나 타임스탬프 역할을 했던 키: 이 승인자를 먼저 빼세요');
+  assert.equal(w.calls.pick, 0);
+});
+
+test('documents signed by a previous root open no picker', async (t) => {
+  const w = await world(t, { recovery: true });
+  const r1 = await w.keyFn!('r1');
+  const out = path.join(w.base, 'rotate.json');
+  const eventNow = new Date(T0.getTime() + 60_000);
+  await prepareRootEvent({ policy: await w.policyOf(), action: 'rotate', reason: 'rotate for test', out, now: eventNow, signerPublicPaths: [w.recovery[0]!.pub, w.recovery[1]!.pub], newRootPublicPath: r1.pub });
+  for (const key of [w.recovery[0]!, w.recovery[1]!, r1]) await signRootEvent({ proposalPath: out, keyPath: key.priv });
+  await appendRootEvent({ policy: await w.policyOf(), proposalPath: out, now: eventNow });
+  assert.equal((await w.session.arm(r1.priv)).ok, true);
+  w.pick(await w.newKey('n'));
+  assert.equal((await w.session.addApprover({ name: 'N', scopes: ['*'], lifetime: '90d' })).ok, false);
+  assert.equal(w.calls.pick, 0);
+});
+
+test('the inputs are captured before the picker: a document changed while it is open is refused at commit', async (t) => {
+  const w = await world(t);
+  await armRoot(w);
+  const key = await w.newKey('late');
+  w.handlers.pick = async () => {
+    await removeApprover({ rootKeyPath: w.rootPriv, trustRootPath: w.trustRoot, now: NOW, keyId: w.approverKeyId });
+    return { ok: true, key: await loadPublicKey(key.pub) };
+  };
+  assert.equal(failure(await w.session.addApprover({ name: 'Late', scopes: ['*'], lifetime: '90d' })), '문서가 그 사이에 바뀌었어요. 다시 준비하세요.');
+  assert.equal((await trust(w)).approvers.length, 0, 'the other writer\'s document stands');
+});
+
+test('timestampMismatch is true only for the binding check; an expired timestamp shows the host reason', async (t) => {
+  const w = await world(t, { recovery: true, freshness: true, now: daysAfter(NOW, 3) });
+  await armRoot(w);
+  const view = await w.session.verifyAll();
+  assert.equal(view.trustOk, false);
+  assert.equal(view.timestampMismatch, false, 'an expired timestamp is not a mismatch');
+  assert.match(view.trustNote ?? '', /timestamp expired/u);
+});
+
+test('forbiddenApproverKeys refuses a revocation list below the minimum; the GUI maps it to the stale text', async (t) => {
+  const w = await world(t, { recovery: true });
+  const policy = await w.policyOf();
+  const now = NOW;
+  assert.ok((await forbiddenApproverKeys(policy, now)).length > 0, 'no minimum: today\'s behaviour');
+  assert.ok((await forbiddenApproverKeys(policy, now, { minimumRevocations: 1 })).length > 0);
+  await assert.rejects(forbiddenApproverKeys(policy, now, { minimumRevocations: 99 }), StaleDocumentError);
+  await armRoot(w);
+  await recordDocumentVersions(w.stateFile, { rootKeyId: w.rootKeyId, revocations: 99 });
+  w.pick(await w.newKey('n'));
+  assert.equal(failure(await w.session.addApprover({ name: 'N', scopes: ['*'], lifetime: '90d' })), '이 컴퓨터가 본 것보다 오래된 문서예요. 최신 문서를 되돌려 놓으세요.');
+  assert.equal(w.calls.pick, 0);
+});
+
+test('English refusal for a non-root key names the role in English', async (t) => {
+  const w = await world(t, { lang: 'en' });
+  assert.equal((await w.session.arm(w.approverKey)).ok, true);
+  assert.match(failure(await w.session.renewTrustRoot('180d')), /Approver/u);
+});
+
+test('the renderer offers no Keep and no preselected lifetime for an expired trust root, and clears only on success', async () => {
+  const source = await readFile(path.join(import.meta.dirname, '..', 'src', 'renderer', 'admin.ts'), 'utf8');
+  assert.ok(!source.includes("trustLifetime = '365d'"), 'no coercion to 365d');
+  assert.match(source, /v\.expired \? \[\.\.\.TRUST_LIFETIMES\] : \['', \.\.\.TRUST_LIFETIMES\]/u);
+  assert.match(source, /needsLifetime = v\.expired && trustLifetime === ''/u);
+  assert.match(source, /if \(writeResult\(await api\.admin\.addApprover/u);
+  assert.match(source, /dialogSafe\(a\.name\)/u);
 });

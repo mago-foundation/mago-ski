@@ -6,6 +6,7 @@ import type {
   AdminTrustRootView, AdminVerifyAllView, ChangeView, RendererApi, ServiceView,
 } from '../service/types.ts';
 import { t, type MessageKey } from '../i18n/messages.ts';
+import { dialogSafe } from '../i18n/dialog-safe.ts';
 import { h } from './dom.ts';
 import { noteText, tr, type Note } from './lang.ts';
 
@@ -408,7 +409,7 @@ function inspectDetail(pane: HTMLElement): void {
   if (change) pane.append(h('p', { class: 'hint', style: 'margin-top:10px' },
     `${tr('admin.inspect.changedFiles', { files: change.files.map((f) => `${f.path} (${f.change})`).join(', ') })}${change.addedOrigins.length ? ` · ${tr('admin.inspect.newOrigins', { origins: change.addedOrigins.join(', ') })}` : ''} · ${tr('admin.inspect.lineChanges')}`));
   pane.append(h('table', { class: 'tbl', style: 'margin-top:10px' },
-    h('tr', {}, h('th', {}, tr('admin.inspect.file')), h('th', {}, tr('admin.inspect.fileSize')), h('th', {}, tr('admin.inspect.exec')), h('th', {}, 'SHA-256')),
+    h('tr', {}, h('th', {}, tr('admin.inspect.file')), h('th', {}, tr('admin.inspect.fileSize')), h('th', {}, tr('admin.inspect.exec')), h('th', {}, tr('admin.p2.label.sha256'))),
     ...i.files.map((f) => h('tr', {}, h('td', { class: 'mono' }, f.path), h('td', {}, String(f.size)), h('td', {}, f.exec ? tr('admin.inspect.yes') : ''), h('td', { class: 'mono' }, f.sha256.slice(0, 16) + '…')))));
   const armedApprover = status?.armed?.role === 'approver';
   pane.append(h('div', { class: 'cmd', style: 'margin-top:12px' },
@@ -488,8 +489,8 @@ async function loadTrustView(): Promise<void> {
   try {
     trustView = await api.admin.trustRoot();
     verifyView = await api.admin.verifyAll();
-  } catch {
-    trustView = null;
+  } catch (error) {
+    trustView = { ok: false, message: tr('admin.p2.err.rolesUnknown', { reason: dialogSafe(error instanceof Error ? error.message : String(error)) }), signedByPreviousRoot: false };
   } finally {
     trustLoading = false;
   }
@@ -547,7 +548,7 @@ function approversRack(): HTMLElement {
 
 function approversDetail(): HTMLElement {
   const pane = h('section', { class: 'admin-detail' });
-  const titles: Record<'identity' | 'trustroot' | 'policy', string> = { identity: tr('admin.dev.identity'), trustroot: 'TRUST ROOT', policy: 'POLICY CHECK' };
+  const titles: Record<'identity' | 'trustroot' | 'policy', string> = { identity: tr('admin.dev.identity'), trustroot: tr('admin.p2.dev.trustRoot'), policy: tr('admin.p2.dev.policyCheck') };
   const key = device === 'trustroot' || device === 'policy' ? device : 'identity';
   pane.append(h('h2', {}, titles[key]));
   if (key === 'identity') identityDetail(pane);
@@ -565,14 +566,16 @@ function chips<T extends string>(values: readonly T[], current: T, label: (v: T)
   }));
 }
 
-function writeResult(result: { ok: true; version: number; needsTimestamp: boolean; memoryWarning: boolean } | { ok: false; message: string }): void {
-  if (!result.ok) { message = { ok: false, text: result.message }; return; }
+function writeResult(result: { ok: true; version: number; needsTimestamp: boolean; memoryWarning: boolean } | { ok: false; message: string }): boolean {
+  if (!result.ok) { message = { ok: false, text: result.message }; return false; }
+  trustLifetime = '';
   rootWritten = { version: result.version };
   const extra = [
     result.memoryWarning ? tr('admin.p2.notice.memoryWarning') : '',
     result.needsTimestamp ? tr('admin.p2.notice.freshnessCli') : '',
   ].filter(Boolean).join(' ');
   message = { ok: true, text: () => `${tr('admin.p2.trustRoot.done', { v: result.version })}${extra ? ` ${extra}` : ''}` };
+  return true;
 }
 
 async function afterWrite(): Promise<void> {
@@ -591,28 +594,29 @@ function trustRootDetail(pane: HTMLElement): void {
   pane.append(h('dl', { class: 'kv' },
     h('dt', {}, tr('admin.p2.label.version')), h('dd', {}, String(v.version)),
     h('dt', {}, tr('admin.p2.label.expires')), h('dd', {}, `${v.expiresAt}${v.expired ? ` · ${tr('admin.p2.err.trustRootExpired')}` : ''}`),
-    h('dt', {}, 'SHA-256'), h('dd', { class: 'mono' }, v.sha256),
-    h('dt', {}, tr('admin.pin.label')), h('dd', {}, v.path)));
+    h('dt', {}, tr('admin.p2.label.sha256')), h('dd', { class: 'mono' }, v.sha256),
+    h('dt', {}, tr('admin.p2.label.trustRootPath')), h('dd', {}, v.path)));
   if (v.stale) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, tr('admin.p2.notice.stale')));
   if (v.note) pane.append(h('div', { class: 'banner', style: 'margin:10px 0' }, v.note));
 
   pane.append(h('h2', {}, tr('admin.p2.label.approvers')));
   if (v.approvers.length === 0) pane.append(h('p', { class: 'hint' }, tr('admin.p2.notice.noApprovers')));
   else pane.append(h('table', { class: 'tbl' },
-    h('tr', {}, h('th', {}, tr('admin.p2.label.name')), h('th', {}, tr('admin.p2.label.scopes')), h('th', {}, tr('admin.p2.label.expires')), h('th', {}, 'Key ID'), h('th', {}, '')),
+    h('tr', {}, h('th', {}, tr('admin.p2.label.name')), h('th', {}, tr('admin.p2.label.scopes')), h('th', {}, tr('admin.p2.label.expires')), h('th', {}, tr('admin.p2.label.keyId')), h('th', {}, '')),
     ...v.approvers.map((a) => {
       const remove = button(tr('admin.p2.btn.remove'), () => void run(async () => {
         writeResult(await api.admin.removeApprover({ keyId: a.keyId, ...(trustLifetime ? { trustRootLifetime: trustLifetime } : {}) }));
         await afterWrite();
-      }), { disabled: !canWrite || (v.expired && trustLifetime === ''), id: `remove-${a.keyId.slice(7, 15)}` });
+      }), { disabled: !canWrite || needsLifetime, id: `remove-${a.keyId.slice(7, 15)}` });
       return h('tr', { 'data-approver': a.name },
-        h('td', {}, a.name, a.forbidden ? h('div', { class: 'hint', style: 'margin:0;color:#b32' }, tr('admin.p2.forbidden.mustRemove', { why: a.forbidden })) : null),
+        h('td', {}, dialogSafe(a.name), a.forbidden ? h('div', { class: 'hint', style: 'margin:0;color:#b32' }, tr('admin.p2.forbidden.mustRemove', { why: a.forbidden })) : null),
         h('td', {}, a.scopes.join(', ')), h('td', {}, `${a.expiresAt}${a.expired ? ` · ${tr('admin.p2.notice.expiredApprover')}` : ''}`),
         h('td', { class: 'mono' }, short(a.keyId)), h('td', {}, remove));
     })));
 
+  // An expired trust root has no Keep and nothing preselected: Add and Remove wait for a lifetime to be picked.
   const trustChoices: Array<'' | AdminTrustRootLifetime> = v.expired ? [...TRUST_LIFETIMES] : ['', ...TRUST_LIFETIMES];
-  if (v.expired && trustLifetime === '') trustLifetime = '365d';
+  const needsLifetime = v.expired && trustLifetime === '';
   pane.append(h('h2', {}, tr('admin.p2.label.trustRootLifetime')),
     chips(trustChoices, trustLifetime, (value) => value === '' ? tr('admin.p2.label.keep') : lifetimeLabel(value), (value) => { trustLifetime = value; }));
 
@@ -622,7 +626,7 @@ function trustRootDetail(pane: HTMLElement): void {
   scopesInput.value = addScopes;
   let addButton: HTMLButtonElement;
   const scopeList = (): string[] => addScopes.split(',').map((x) => x.trim()).filter(Boolean);
-  const addReady = (): boolean => canWrite && addName.trim() !== '' && scopeList().length > 0;
+  const addReady = (): boolean => canWrite && !needsLifetime && addName.trim() !== '' && scopeList().length > 0;
   nameInput.addEventListener('input', () => { addName = nameInput.value; addButton.disabled = busy || !addReady(); });
   scopesInput.addEventListener('input', () => { addScopes = scopesInput.value; addButton.disabled = busy || !addReady(); });
   pane.append(h('h2', {}, tr('admin.p2.btn.add')), h('p', { class: 'hint' }, tr('admin.p2.hint.addPublicKey')),
@@ -632,8 +636,7 @@ function trustRootDetail(pane: HTMLElement): void {
       h('label', {}, tr('admin.p2.label.approverLifetime')),
       chips(APPROVER_LIFETIMES, addLifetime, lifetimeLabel, (value) => { addLifetime = value; }),
       addButton = button(tr('admin.p2.btn.add'), () => void run(async () => {
-        writeResult(await api.admin.addApprover({ name: addName.trim(), scopes: scopeList(), lifetime: addLifetime, ...(trustLifetime ? { trustRootLifetime: trustLifetime } : {}) }));
-        if (rootWritten) { addName = ''; addScopes = ''; }
+        if (writeResult(await api.admin.addApprover({ name: addName.trim(), scopes: scopeList(), lifetime: addLifetime, ...(trustLifetime ? { trustRootLifetime: trustLifetime } : {}) }))) { addName = ''; addScopes = ''; }
         await afterWrite();
       }), { primary: true, disabled: !addReady(), id: 'add-approver' })));
 
