@@ -174,3 +174,122 @@ Docs are written by a separate subagent from the planner's ranked notes (process
    - `tests/gate-cli.test.ts`: `planInit` output for both hosts (golden file contents); refusal of foreign host files without `--force`; `--print` writes nothing; instance-config validation; admin client round trip against a started test service; `doctor` against a test layout (`rootUid` = test uid); the non-Linux refusal.
    - The live tests (`tests/live/*.live.ts`) switch to `planInit` and `applyInit`, so the commands shipped are the ones tested live.
 7. **Docs** as in §7.
+
+## Decisions (v2)
+
+These decisions resolve the v1 Goldfish review (B1–B11 and the minor points). Where they differ from v1, v2 wins.
+
+### G1. Sockets (B1)
+
+- **Two directories.**
+  - The instance config has `decision_socket_dir` = `/run/mago-ski/gate/<host>`. This is the unit's `RuntimeDirectory`, mode `0755`, and holds `decision.sock` (`0666`).
+  - It also has `admin_socket_dir` = `/run/mago-ski/gate/<host>/admin`, which `start()` creates at `0700` and which holds `admin.sock` (`0600`).
+- **Mapping.** `gate run` maps them to `decisionSocketDir` and `adminSocketDir`. The hook config's `socket` is `<decision_socket_dir>/decision.sock`. `gate init` does not create the run directories; systemd and `start()` do.
+
+### G2. Unit hardening (B2, B3)
+
+**`ExecStart`.** `gate init` writes the unit with `ExecStart=<process.execPath> <realpath of <install>/dist/src/cli.js> gate run --host %i`. It uses the same `node` as the hooks, and does not go through `env` or `PATH`.
+
+**The template** (`mago-ski-gate@.service`) uses `ProtectSystem=strict`, `NoNewPrivileges=yes`, `LimitNOFILE=4096`, `Restart=on-failure`, `RuntimeDirectory=mago-ski/gate/%i` and `RuntimeDirectoryMode=0755`.
+
+**Per host.** `gate init` also writes a drop-in, `/etc/systemd/system/mago-ski-gate@<host>.service.d/paths.conf`, with:
+- `ReadWritePaths=/var/lib/mago-ski/gate/<host> <managed_dir>`;
+- `ReadOnlyPaths=/etc/mago-ski` (a no-op under `strict`, stated for clarity).
+
+**Unit text in code.** The unit and drop-in text is generated in code (`setup.ts`) and golden-tested. There is no `packaging/` folder, and `package.json` `files` is unchanged.
+
+### G3. Paths with `@` (B4)
+
+- `SAFE_PATH` in `claude-code-settings.ts` and `codex-requirements.ts` becomes `^\/[A-Za-z0-9._/@-]+$`. `@` is inert unquoted in `sh` and `bash`.
+- Golden tests cover an `/usr/lib/node_modules/@mago-foundation/mago-ski/...` hook path for both generators.
+
+### G4. Whole-tree trust check (B5)
+
+- **The check.** `checkRootOwnedTree(dir, uid)` requires that every entry under `<install>/dist`, and every parent folder up to `/`, is owned by `uid` and not writable by group or others. Symlinks inside the tree are refused.
+- **`process.execPath`** and its parent chain get the same treatment.
+- **Where it runs.** `gate init` refuses on any failure. `doctor` repeats the check (step 4).
+- **The message names the first bad path:** `<path> must be owned by root and not writable by others: an editable hook file would let a user bypass the gate`.
+
+### G5. Ownership manifest, no in-file marker (B6, B7)
+
+- **The manifest.** `gate init` writes `/etc/mago-ski/gate/<host>.manifest.json` as canonical JSON: `{ "v": 1, "files": [{ "path": "...", "sha256": "sha256:..." }] }`. It covers every file `gate init` wrote, the manifest itself excluded.
+- **Ownership.** A host config file is "ours" when its current SHA-256 equals the manifest's. Host files carry no marker.
+- **Foreign files.** `planInit` lists every existing file that is not ours, and the command refuses **before the first write**, naming all of them.
+  - **With `--force`,** each foreign file is renamed to `<path>.mago-ski-bak-<YYYYMMDDTHHMMSSZ>` before writing. A failed rename stops the command. Both paths are printed.
+- **`doctor`'s host file check** (step 6) compares the file's SHA-256 with what `planInit` would produce now.
+
+### G6. Start errors are visible (B8)
+
+- **`start()`.** When it catches a store or directory error, it keeps it as `startError: string`.
+- **`status`.** When the service is not ready, `status` returns `{ ok: false, error: 'service is not ready: <startError>' }`. `gate run` also prints `startError` to stderr when start finishes not ready.
+- **`gate init`** creates every directory with parents: parents are root-owned `0755`, and each leaf gets its stated mode.
+- **`doctor`:**
+  - It passes the service check only when `status` returns `ok: true` and `ready: true`.
+  - It runs the root-owned chain check on `state_dir`, `generations_dir`, `managed_dir`, both socket directories (once they exist) and `/etc/mago-ski/gate`. The service header's deployment requirements become checked facts.
+  - It also checks that `net.core.somaxconn` is at least 1024, and that `/proc` is not mounted with `hidepid`, as warnings.
+  - It FAILs when the mode in `status` differs from the instance config, or from the mode in the host config file.
+
+### G7. Test seams (B9)
+
+- **Seam parameters.** `instancePaths(host, base = '/')`, `planInit(opts & { base?, rootUid?, platform? })`, `applyInit(plan, { force, base, rootUid })`, `doctor(host, { base, rootUid, platform, ask? })` and `checkRootOwnedTree(path, uid)`.
+- **Defaults.** Production uses `base = '/'` and `rootUid = 0`. Tests pass a temporary base and `process.getuid()`.
+- **`ask`** is the admin-client seam.
+
+### G8. CLI parsing (B10)
+
+- `--force` and `--print` join `BOOLEAN_FLAGS`.
+- `gate` joins `hasSub`.
+- `COMMAND_HELP` keys are `gate init`, `gate run`, `gate trust`, `gate install`, `gate uninstall`, `gate refresh`, `gate status` and `gate doctor`.
+- The main help gains a `COMPANY GATE (Linux, run as root)` section.
+
+### G9. What 0.4.0 stream 1 claims for Codex (B11)
+
+Stream 1 ships the Codex host as **audit-level** until stream 2 lands:
+- `gate init --host codex --mode enforce` is refused with `Codex enforcement is not complete yet (see docs/hosts/codex.md); use --mode shadow`. Stream 2 removes this refusal when it closes the gaps.
+- The help text and `docs/hosts/codex.md` say so.
+
+The 0.4.0 release claim "Codex, full" depends on stream 2, not on this stream.
+
+### G10. Exact contracts (minor points)
+
+**Admin requests**, one JSON line in and one JSON line out:
+
+| Command | Request fields | Notes |
+|---|---|---|
+| `status` | `{ v: 1, cmd: 'status' }` | |
+| `refresh` | `{ v: 1, cmd: 'refresh' }` | Without an inbox, the reply is `no inbox configured`, and the CLI prints it and exits 2. |
+| `accept-trust` | `trust_root_b64`, `revocations_b64` | |
+| `install` | `skill_name`, `source_dir` (absolute; the CLI resolves it), `certificate_b64` | |
+| `uninstall` | `skill_name` | |
+
+Replies are `{ v: 1, ok: true, … }` or `{ v: 1, ok: false, error }`.
+
+**The hook config** is exactly `{ "v": 1, "socket": "<decision>/decision.sock", "mode": …, "host_exes": [...], "client_deadline_ms": 1500, "self_deadline_ms": 3000 }`. For Codex, the generator's extra keys are appended.
+
+**Exit codes:**
+- 0: success;
+- 1: a doctor FAIL, or the service answered `ok: false`;
+- 2: a usage, input or transport error.
+
+`gate run` exits 1 when `start()` throws.
+
+**Doctor output.** One line per check, `PASS|FAIL|SKIP|WARN <check>: <detail>`. SKIP and WARN never fail the run. With `--json`, the output is `[{ check, result, detail }]`.
+
+**Smaller rules:**
+- `--mode` defaults to `shadow`.
+- A re-run of `gate init` prints `systemctl daemon-reload && systemctl restart mago-ski-gate@<host>`.
+- A changed `--root-fingerprint` is written as given. Trust documents for the old root are then refused by the trust store, and `doctor` reports trust as not accepted until `gate trust` runs with the new documents.
+- **Host binaries.**
+  - The default is resolved with the invoking user's `SUDO_USER` login `PATH` when present, otherwise root's.
+  - It must be root-owned, not writable by others, and an ELF executable, because a script would allowlist its interpreter.
+  - It is refused otherwise, with a message saying to pass `--host-exe`.
+- **The admin client deadline** is 65 s. On a timeout it says `the gate did not answer in time; run mago-ski gate status`.
+- **Version.** `build_id` comes from `package.json` (`mago-ski <version>`), not a constant.
+- **`gate install`** prints the digest and the managed path.
+
+### G11. Docs additions
+
+- **`docs/gate-setup.md` starts with a warning:**
+  - enforce mode changes Claude Code for every user of the machine, because it applies the managed locks (managed hooks only, strict plugin customisation, no bundled Skills, plugins off);
+  - Node must be installed system-wide and root-owned, so a per-user Node (nvm, volta) is refused by design.
+- **`docs/hosts/claude-code.md`** names the tested version (2.1.318) and the interactive-session status (stream 4).
