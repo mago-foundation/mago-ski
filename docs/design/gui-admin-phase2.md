@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: draft v7, for Goldfish review. Precedence: [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: draft v8, for Goldfish review. Precedence: [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -996,3 +996,182 @@ The spec's `## Limits` section gains:
 - **m4.** Root review uses the hardening D10 record format (armed key, generation, instance). `review()` accepts the root role as well as the approver role. Tests cover a root review followed by revoke-digest, and an approver review that is **not** usable for revoke when another key is armed.
 - **m6.** `admin.p2.timestamp.otherKey` shows the previous version (R4).
 - **m7.** `setupRecoveryOrg`'s `rotate` is the recovery rotate threshold (`tests/helpers.ts:152`). The re-enrolment recipe uses the rotate-then-adopt test pattern from `tests/root-recovery.test.ts`, as A9 says.
+
+## Decisions (v8)
+
+This section resolves:
+- the v7 readiness check: gaps 1–15;
+- the v7 comprehension check: B1–B3 and the minor points.
+
+Where it differs from earlier sections, v8 wins.
+
+### S1. Loader API (comprehension B3; readiness 9)
+
+- **`loadPolicyTrust` is unchanged.** Its options stay `{ recordVersions? }`. A1's `override` on it is withdrawn.
+- **`loadTrustForPreview`** is the only function that takes `override` and `skipFreshness` (R1).
+- **What `skipFreshness` skips:**
+  - the timestamp read (`policy.ts:568`);
+  - its verification (`:574-592`), including the fail-closed guard at `:576-577`;
+  - the binding check (`:606-607`).
+
+  When `context.root` is present, it sets `context.root.timestamp = null`.
+- **`skipFreshness` is a production preview option**, not a test flag; A1's wording is corrected.
+- **Verdicts.** Each Skill's verdict passes `context: result.context`, from the ok branch, to `verifyWithPolicy`.
+- **In-memory signing.** The engine exports `signPreparedTrustRoot(p, key): Buffer`, `signPreparedRevocations(p, key): Buffer` and `signPreparedTimestamp(p, key): Buffer`.
+  - They are pure: they sign `p.payload` and nothing else.
+  - The preview uses them to build override bytes.
+  - `commit*` uses the same functions, so the bytes previewed and the bytes written come from one code path.
+
+### S2. Consequence lines (comprehension B1)
+
+- **"Changed" is defined** as `from !== after`, where `after` is the verdict under the "result after timestamp" load (or under `to` without freshness). In a freshness organisation, the count no longer reads M of M.
+- **Head line:** `admin.p2.consequence.head` (unchanged).
+- **One line per changed Skill**, at most 5, sorted by name:
+  - without freshness, `admin.p2.consequence.line`: `{name}: {from} → {to}`;
+  - with freshness, `admin.p2.consequence.lineBlocked`: `{name}: {from} → 타임스탬프 전까지 차단 (타임스탬프 뒤 {after})` / `{name}: {from} → blocked until a timestamp (after the timestamp: {after})`.
+- **More than 5:** `admin.p2.consequence.more`: `외 {n}개` / `and {n} more`.
+- **Too deep:** `admin.p2.consequence.tooDeep`: `너무 깊어서 확인하지 않은 폴더: {n}개` / `Folders too deep to check: {n}`.
+- **Every other Skill** is still blocked until a timestamp. The freshness line, `admin.p2.freshnessBlock`, says so once.
+- **Withdrawn:** `admin.p2.consequence.blocked` and `admin.p2.consequence.after`.
+
+### S3. Complete text list (readiness 1, 2, 12–15; comprehension B2)
+
+**Key prefixes.**
+- Z2's prefixes stand.
+- Dialog texts are `admin.dialog.<action>.<part>`.
+- Notices and lines inside dialogs are `admin.p2.notice.<name>`.
+- Refusals are `admin.p2.err.<name>`.
+- Device texts are `admin.p2.<device>.<state>`.
+
+The R4 keys are renamed as follows; their texts are unchanged.
+
+| R4 key | New key |
+|---|---|
+| `admin.p2.permanence.key` | `admin.p2.notice.permanenceKey` |
+| `admin.p2.permanence.digest` | `admin.p2.notice.permanenceDigest` |
+| `admin.p2.freshnessBlock` | `admin.p2.notice.freshnessBlock` |
+| `admin.p2.memoryWarning` | `admin.p2.notice.memoryWarning` |
+| `admin.p2.afterReset` | `admin.p2.notice.afterReset` |
+| `admin.p2.consequence.*` | `admin.p2.notice.consequence*` |
+| `admin.p2.timestamp.*` | `admin.p2.notice.timestamp*` |
+| `admin.p2.forbidden.*` | `admin.p2.forbidden.*` (kept) |
+| `admin.dialog.reset.detailP2` | `admin.dialog.reset.detail` |
+| `admin.p2.freshnessCli` | kept for 2a, deleted in 2b with its use |
+
+**Additional texts.** All are exact, and the tests assert both languages.
+
+| Key | ko | en |
+|---|---|---|
+| `admin.dialog.doc.title` | 조직 문서 서명 | Sign an organisation document |
+| `admin.dialog.doc.action` | 서명 | Sign |
+| `admin.dialog.doc.actionRevoke` | 폐기 | Revoke |
+| `admin.dialog.addApprover.message` | 승인자를 추가할까요? | Add this approver? |
+| `admin.dialog.replaceApprover.message` | 승인자 정보를 바꿀까요? | Change this approver? |
+| `admin.dialog.removeApprover.message` | 승인자를 뺄까요? | Remove this approver? |
+| `admin.dialog.renew.message` | 신뢰 루트 기간을 연장할까요? | Extend the trust root's lifetime? |
+| `admin.dialog.revoke.message` | 폐기할까요? 되돌릴 수 없어요. | Revoke? This cannot be undone. |
+| `admin.dialog.refresh.message` | 폐기 목록을 다시 서명할까요? | Re-sign the revocation list? |
+| `admin.dialog.timestamp.message` | 타임스탬프를 서명할까요? | Sign the timestamp? |
+| `admin.dialog.doc.lineDocument` | 문서: {path} | Document: {path} |
+| `admin.dialog.doc.lineSha` | 현재 SHA-256: {sha} | Current SHA-256: {sha} |
+| `admin.dialog.doc.lineVersion` | 버전: {from} → {to} | Version: {from} → {to} |
+| `admin.dialog.doc.lineExpires` | 만료: {date} | Expires: {date} |
+| `admin.dialog.doc.none` | 없음 | none |
+| `admin.dialog.addApprover.lineNew` | 새 승인자: {name} {keyId} | New approver: {name} {keyId} |
+| `admin.dialog.addApprover.lineScopes` | 범위: {scopes} | Scopes: {scopes} |
+| `admin.dialog.addApprover.lineKeyExpires` | 승인자 키 만료: {date} | Approver key expires: {date} |
+| `admin.p2.notice.replace` | 이미 승인자예요: 이름 {oldName} → {newName}, 범위 {oldScopes} → {newScopes}, 만료 {oldExpires} → {newExpires} | Already an approver: name {oldName} → {newName}, scopes {oldScopes} → {newScopes}, expiry {oldExpires} → {newExpires} |
+| `admin.p2.notice.scopeAll` | 모든 Skill을 승인할 수 있는 범위예요 | This scope lets the approver approve every Skill |
+| `admin.dialog.removeApprover.line` | 뺄 승인자: {name} {keyId} | Approver to remove: {name} {keyId} |
+| `admin.dialog.renew.lineFrom` | 이전 만료: {date} | Previous expiry: {date} |
+| `admin.dialog.revoke.lineKey` | 폐기할 키: {label} {keyId} | Key to revoke: {label} {keyId} |
+| `admin.dialog.revoke.lineDigest` | 폐기할 버전: {skill} {digest} | Version to revoke: {skill} {digest} |
+| `admin.dialog.revoke.lineReason` | 사유: {reason} | Reason: {reason} |
+| `admin.dialog.timestamp.line` | {label}: {counter} {sha} | {label}: {counter} {sha} |
+| `admin.p2.err.timestampUnreadable` | 현재 타임스탬프를 읽을 수 없어요. CLI에서 --version으로 서명하세요. | The current timestamp cannot be read. Sign it in the CLI with --version. |
+| `admin.p2.err.tooManyFolders` | 폴더가 너무 많아서 영향을 계산할 수 없어요. 폴더 수를 줄이세요. | There are too many folders to work out the effect. Reduce the number of folders. |
+| `admin.p2.err.cannotRevokeRole` | 루트·복구·타임스탬프 키는 여기서 폐기할 수 없어요. | Root, recovery and timestamp keys cannot be revoked here. |
+| `admin.p2.err.notATarget` | 현재 승인자나 찾은 인증서의 키만 폐기할 수 있어요 | Only the keys of current approvers or of certificates found can be revoked |
+| `admin.p2.err.alreadyRevoked` | 이미 폐기됐어요 | Already revoked |
+| `admin.p2.err.trustRootExpired` | 신뢰 루트가 만료됐어요 | The trust root has expired |
+| `admin.p2.err.revocationsExpired` | 폐기 목록이 만료됐어요 | The revocation list has expired |
+| `admin.p2.err.revocationsExpiredRefresh` | 폐기 목록이 만료됐어요. 먼저 폐기 목록 새로 고침을 실행하세요. | The revocation list has expired. Run Refresh revocation list first. |
+| `admin.p2.err.trustRootExpiredRenew` | 신뢰 루트가 만료됐어요. 먼저 승인자 관리에서 연장하세요. | The trust root has expired. Renew it in Manage approvers first. |
+| `admin.p2.err.maxLifetimeShort` | 조직의 최대 타임스탬프 기간이 6시간보다 짧아요. CLI를 쓰세요. | The organisation's maximum timestamp lifetime is under 6 hours. Use the CLI. |
+| `admin.p2.err.removeFirst` | {why}: 이 승인자를 먼저 빼세요 | {why}: remove this approver first |
+| `admin.p2.err.pickLifetime` | 신뢰 루트가 만료됐어요. 신뢰 루트 기간을 고르세요. | The trust root has expired. Choose a trust root lifetime. |
+| `admin.p2.err.publicKeyUnreadable` | 공개 키를 읽을 수 없어요 | The public key cannot be read |
+| `admin.p2.err.cancelled` | 취소했어요 | Cancelled |
+| `admin.p2.trustRoot.lifetime` | 신뢰 루트 기간 | Trust root lifetime |
+| `admin.p2.trustRoot.keep` | 유지 | Keep |
+
+The offline dialog's cancel button reuses `admin.dialog.cancel`.
+
+**Device and template texts (W13, V18).** These are exact in Korean as quoted. Their English follows the glossary, and the code review checks it.
+
+| Key | ko | en |
+|---|---|---|
+| `admin.template.approvers` | 승인자 관리 | Manage approvers |
+| `admin.template.revoke` | 폐기 | Revoke |
+| `admin.template.refresh` | 폐기 목록 새로 고침 | Refresh revocation list |
+| `admin.template.timestamp` | 타임스탬프 서명 | Sign timestamp |
+| `admin.p2.btn.add` | 추가 | Add |
+| `admin.p2.btn.remove` | 빼기 | Remove |
+| `admin.p2.btn.renew` | 연장 | Renew |
+| `admin.p2.btn.revoke` | 폐기 | Revoke |
+| `admin.p2.btn.resign` | 다시 서명 | Re-sign |
+| `admin.p2.btn.sign` | 서명 | Sign |
+| `admin.p2.btn.review` | 검토 | Review |
+| `admin.p2.trustRoot.ready` | 승인자 {n}명 · 버전 {v} · 만료 {date} | {n} approvers · version {v} · expires {date} |
+| `admin.p2.trustRoot.done` | 서명했어요: 버전 {v} | Signed: version {v} |
+| `admin.p2.target.ready` | 폐기할 대상을 고르세요 | Choose what to revoke |
+| `admin.p2.target.done` | {label} 선택됨 | {label} selected |
+| `admin.p2.revoke.ready` | 사유와 기간을 적고 폐기하세요 | Enter a reason and lifetime, then revoke |
+| `admin.p2.revoke.done` | 폐기했어요: 버전 {v} | Revoked: version {v} |
+| `admin.p2.refresh.ready` | 폐기 목록 버전 {v} · 만료 {date} | Revocation list version {v} · expires {date} |
+| `admin.p2.refresh.done` | 다시 서명했어요: 버전 {v} | Re-signed: version {v} |
+| `admin.p2.timestamp.ready` | 타임스탬프 버전 {v} · 만료 {date} | Timestamp version {v} · expires {date} |
+| `admin.p2.timestamp.done` | 서명했어요: 버전 {v} | Signed: version {v} |
+| `admin.p2.check.ready` | 검사 중… | Checking… |
+| `admin.p2.check.done` | VERIFIED {n}개 · 그 외 {m}개 | VERIFIED {n} · other {m} |
+| `admin.p2.check.line` | {verdict} {k}개 | {verdict} {k} |
+
+**Closing rule.**
+- Any other Korean text quoted in this document that is not in R4 or S3 becomes a catalog key under the prefixes above. Its English follows the glossary.
+- The Goldfish code review of each PR lists every new key with both values and checks them for meaning.
+- A key missing from this rule, or an English text that drops a fact, is a review finding, not a design gap.
+
+### S4. Types and steps (readiness 3–8, 10, 11)
+
+- **`ForbiddenKey.why`** adds `'formerRecovery'`.
+- **`AdminTrustRootView` and `AdminRevocationsView`.**
+  - `ok: false` members carry `signedByPreviousRoot: boolean`.
+  - `AdminTrustRootView`'s `ok: true` member carries `note: string | null` (W8).
+- **`AdminVerifyAllView`** uses `timestampMismatch: boolean` (W12). `AdminWriteResult` keeps `needsTimestamp`. V17 reads `timestampMismatch`.
+- **`Verdict` in GUI types.** `gui/src/service/types.ts` adds `type AdminVerdictTo = Verdict | 'BLOCKED_UNTIL_TIMESTAMP'` for consequence lines. `Verdict` itself is unchanged.
+- **V12 step 4.** `forbidden` is computed for add, remove and renew (W6).
+- **V15.** The timestamp row reads: "the largest of 6h, 12h and 24h that is not above `max_lifetime`; disabled below 6h (W5)."
+- **V7.**
+  - The timestamp's own-version `StaleDocumentError` branch is deleted. The version is computed as in W5, so the branch is unreachable.
+  - The trust-root and revocation minimums stay.
+  - The signature is `prepareTimestamp(o: { policy; key: PublicKeyInfo; now; expires?; version?; minimumVersions? })`.
+- **The revocation list version** is `current + 1` after the minimum check, the same rule as the trust root (V5).
+- **R2 wiring** also needs:
+  - `formerRecovery: new Set()` in the initial `WalkState` literal (`root-events.ts:398-405`);
+  - `formerRecovery: Set<string>` declared in `WalkState` (`:260-268`);
+  - `retired: string[]` and `formerRecovery: string[]` declared in `RootWalk` (`:65-74`).
+
+  The rotate step unions with `state.formerRecovery`.
+- **R6.** The engine keeps today's message, `Policy <path> has no "freshness" block` (`recovery-admin.ts:244`). R6's new English is withdrawn. The GUI shows `admin.p2.err.noFreshness`.
+- **W13 role name.** It refers to the existing `ROLE_NAME_KEY` map (`gui/src/renderer/admin.ts:33`).
+
+### S5. Wording fixes (comprehension minor points)
+
+- **V1 window sentence** becomes:
+
+  > A process that can write the document folder can still replace the file in the instant between the last hash check and the rename. Its write is then lost, or a later write replaces it. Hosts verify every document's signature and version, so the result is never an unsigned or older-than-memory document being accepted by this computer.
+- **Revocation and review records.** A successful revoke-digest commit consumes the claimed review record.
+- **R3 upgrade note** becomes:
+
+  > Before upgrading hosts, open the TRUST ROOT view in a GUI of the new version: it marks any approver whose key has held the root or timestamp role. Remove those approvers (`mago-ski root remove-approver`), and in an organisation that uses timestamps, sign a new timestamp afterwards (`mago-ski timestamp sign`). Hosts that use `loadPolicyTrust` (the CLI, Pi, the GitHub Action and the gate's verifier) refuse a trust root that still lists such an approver, and in enforce mode block every Skill. The gate's trust store does not check this.
+- **firstSeen** follows V11: above memory, with the key `admin.p2.notice.timestampFirstSeen`.
