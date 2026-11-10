@@ -1428,12 +1428,14 @@ export class AdminSession {
             throw new AdminError(picked.reason === 'cancelled' ? this.msg('admin.p2.err.cancelled') : this.msg('admin.p2.err.publicKeyUnreadable'));
           }
           if (op.generation !== this.generation) throw new AdminError(this.msg('admin.err.keyGone'));
-          target = { keyId: picked.key.keyId, label: this.msg('admin.p2.label.otherKey', { keyId: picked.key.keyId }), certificates: null };
+          // A picked key that is a current approver is named as one; any other is labelled as not a current approver.
+          const known = found.document.approvers.find((entry) => entry.keyId === picked.key.keyId);
+          target = { keyId: picked.key.keyId, label: known ? known.name : this.msg('admin.p2.label.otherKey', { keyId: picked.key.keyId }), certificates: null };
         }
         if (target) {
           if (this.roleKeyIds(pin).has(target.keyId)) throw new AdminError(this.msg('admin.p2.err.cannotRevokeRole'));
           if (list.document.keys.some((entry) => entry.keyId === target!.keyId)) throw new AdminError(this.msg('admin.p2.err.alreadyRevoked'));
-          if (request.kind === 'other') target.certificates = await this.certificatesNaming(pin, target.keyId);
+          if (request.kind === 'other' && !found.document.approvers.some((entry) => entry.keyId === target!.keyId)) target.certificates = await this.certificatesNaming(pin, target.keyId);
         }
         if (request.kind === 'digest' && list.document.digests.some((entry) => entry.digest === request.digest)) throw new AdminError(this.msg('admin.p2.err.alreadyRevoked'));
 
@@ -1580,7 +1582,7 @@ export class AdminSession {
         }
         const seenRoot = snapshot.roots[found.activeRootKeyId];
         const documents = {
-          rootEvents: { sha256: prepared.documents.rootEvents.sha256, counter: prepared.documents.rootEvents.count, firstSeen: (snapshot.rootEvents[pin.policy.rootKeyId]?.sequence ?? -1) < prepared.documents.rootEvents.count },
+          rootEvents: { sha256: prepared.documents.rootEvents.sha256, counter: prepared.documents.rootEvents.count, firstSeen: prepared.documents.rootEvents.count > 0 && (snapshot.rootEvents[pin.policy.rootKeyId]?.sequence ?? -1) < prepared.documents.rootEvents.count },
           trustRoot: { sha256: prepared.documents.trustRoot.sha256, counter: prepared.documents.trustRoot.version, firstSeen: (seenRoot?.trust_root_version ?? 0) < prepared.documents.trustRoot.version },
           revocations: { sha256: prepared.documents.revocations.sha256, counter: prepared.documents.revocations.version, firstSeen: (seenRoot?.revocations_version ?? 0) < prepared.documents.revocations.version },
         };
