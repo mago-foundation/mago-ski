@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: v9. Precedence: [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: v10, 2a ready for implementation. Precedence: [Decisions (v10)](#decisions-v10) > [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -1291,3 +1291,52 @@ export function signPreparedTimestamp(p: PreparedTimestamp, key: PrivateKeyInfo)
   - The re-enrolment recipe is `setupRecoveryOrg(t, { freshness })` plus the rotate-then-adopt pattern (A9). The `t` was missing.
   - The `RootWalk` return literal and `cloneWalk` carry `retired` and `formerRecovery` (R2, S4).
   - V17's `needsTimestamp` reads `timestampMismatch` (S4).
+
+## Decisions (v10)
+
+These decisions resolve the v9 readiness confirmation. Where they differ from earlier sections, v10 wins.
+
+### U1. Root walk refusal and the Sign button (T5)
+
+- **The root walk must load.** Every trust-root and revocation write, and every timestamp write, first runs `loadPolicyRoot(memoryPolicy(pin), now, { recordVersions: false })` (W6, through `forbiddenApproverKeys` for trust-root writes; directly for the others).
+- **When it does not load** (rollback, fork, unreadable log or revoked root), the write is refused before any dialog. The refusal is `admin.p2.err.trustRootUnchanged` with the reason, and for a revoked root `admin.p2.err.rootRevoked`.
+- **Sign stays enabled when `from` fails.** `from` failing is the normal state after a root write in a freshness organisation, and for an expired document that the write fixes. The dialog shows `consequenceFromFailed`.
+- **Sign is disabled** only by U1's refusal and by `consequenceToFailed` (T5).
+
+### U2. Wording fixes for T1 and T4
+
+- **T1.** The trust root is read with `readRegularFile(policy.trustRootPath, 'Trust root', 4 * 1024 * 1024)`, as `recovery-admin.ts:256` does.
+- **The previous-root case.** It is detected before the verified read. The GUI parses the file as JSON without verifying it, and compares its `root_key_id` field (or the field `readTrustRootForUpdate` compares) with the walk's `retired`. A match gives `admin.p2.err.previousRoot`. Any other read failure gives `admin.p2.err.rolesUnknown`.
+- **T4.** `loadTrustBody` records only when `o.record && policy.statePath !== null`, as today's `policy.ts:515` does.
+- **Size limits.** The override buffers use the same literals as the reads they replace: 4 MiB for the trust root, 8 MiB for the revocations, and `MAX_TIMESTAMP_BYTES` (exported from `src/timestamp.ts`).
+
+### U3. Root-event memory after a timestamp (T7)
+
+T7's shape and source are replaced:
+
+- **The source.** The timestamp prepare uses the walk from U1's memory-checked `loadPolicyRoot`, not `walkFromPolicy`. The commit's `beforeWrite` runs that check again, and refuses if the walk changed.
+- **The memory update.** After the commit, the GUI records root-event progress by calling `loadPolicyRoot(memoryPolicy(pin), now, { recordVersions: true })` once. It uses the existing progress rule (`checkRootEvents`) and the existing `HostState.rootEvents` shape: keyed by root id, holding `{ sequence, event_digest, revoked? }`.
+- **`recordDocumentVersions`** gets no `rootEvents` field. T7's field is withdrawn.
+
+### U4. Timestamp dialog conflicts (T6, T8, V11)
+
+- **No freshness line.** The timestamp dialog never shows `freshnessBlock`. T8's step 8 applies to trust-root and revocation dialogs only.
+- **When `from` fails in a timestamp dialog,** which is the stale-timestamp case:
+  - the dialog shows `consequenceFromFailed`;
+  - it also shows `to`'s per-verdict summary, `admin.p2.check.done` and `admin.p2.check.line` (the POLICY CHECK texts), for the Skills under the new timestamp.
+
+  The admin therefore sees what signing restores.
+- **The type.** V11's `sign-timestamp` member gets `consequence: AdminConsequence` (T6 is now in the type).
+- **memoryWarning** is not a dialog line. It is shown after the commit, in the device's result.
+
+### U5. Prefix stragglers (T3)
+
+These keys are renamed; their texts are unchanged:
+
+| Old key | New key |
+|---|---|
+| `admin.p2.check.*` | `admin.p2.policyCheck.*` (POLICY CHECK is a device) |
+| `admin.p2.target.*` | kept (TARGET is a device) |
+| `admin.dialog.doc.actionRevoke` | `admin.dialog.revoke.action` |
+| `admin.dialog.reset.detail` | kept (an existing dialog) |
+| `admin.p2.freshnessCli` | `admin.p2.notice.freshnessCli` |
