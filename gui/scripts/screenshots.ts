@@ -7,11 +7,15 @@
 //   (as root) install DIR/pin/ as /etc/mago-ski/ - a root-owned folder, bind-mounted or copied - because the admin rack reads
 //   the organisation only from there. Without it the admin shots show "Not installed" and the script says so.
 //   node scripts/screenshots.ts shoot DIR OUT    window 1280x800 at device scale factor 2: OUT/gui-observe.png,
-//                                                gui-admin-templates.png, gui-admin-approve.png and gui-admin-approvers.png
-//                                                (the Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK)
+//                                                gui-admin-templates.png, gui-admin-approve.png, gui-admin-approvers.png (Manage approvers:
+//                                                TRUST ROOT with the approver list, and POLICY CHECK), gui-admin-revoke.png (Revoke: TARGET with
+//                                                the approvers and a reviewed Skill), gui-admin-refresh.png (Refresh revocation list) and
+//                                                gui-admin-timestamp.png (Sign timestamp)
 //
-// The native key dialog cannot be clicked by Playwright; the script answers it in the main process with DIR/keys/alice.pem,
-// the approver key of the demo organisation. Nothing is signed.
+// The demo organisation is a policy v2 one with freshness (a recovery set and a signed timestamp), so the three 2b templates have
+// documents to show. The native dialogs cannot be clicked by Playwright; the script answers them in the main process: the key dialog
+// with DIR/keys/alice.pem (approver), root.pem or timestamp.pem, and every confirmation (the offline question and the review of one
+// Skill) with the confirming button. The script never presses a signing button, so nothing is signed.
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -34,16 +38,18 @@ const demo = (...args: string[]) => {
 };
 
 if (command === 'prepare') {
-  demo('setup', dir, '--org');
+  demo('setup', dir, '--freshness');
   await mkdir(path.join(dir, 'gui-data'), { recursive: true });
   await writeFile(path.join(dir, 'gui-data', 'settings.json'), '{"lang":"en"}\n');
   // The same organisation as the demo policy, with absolute paths: the pin is read from /etc/mago-ski, not from the demo home.
-  const policy = JSON.parse(await readFile(path.join(dir, 'home', '.mago-ski', 'policy.json'), 'utf8')) as Record<string, string>;
+  const policy = JSON.parse(await readFile(path.join(dir, 'home', '.mago-ski', 'policy.json'), 'utf8')) as Record<string, any>;
   const documents = path.join(dir, 'home', '.mago-ski');
   await mkdir(path.dirname(pinFile), { recursive: true });
   await writeFile(pinFile, JSON.stringify({
     policy_version: policy.policy_version, mode: policy.mode, root_fingerprint: policy.root_fingerprint,
+    ...(policy.recovery ? { recovery: policy.recovery, root_events: path.join(documents, 'root-events.json') } : {}),
     trust_root: path.join(documents, 'trust-root.json'), revocations: path.join(documents, 'revocations.json'),
+    ...(policy.freshness ? { freshness: { ...policy.freshness, timestamp: path.join(documents, 'timestamp.json') } } : {}),
   }, null, 2), { mode: 0o644 });
   console.log(`prepared ${dir}; the pin to install as ${PIN_PATH} is ${pinFile}`);
   process.exit(0);
@@ -110,8 +116,49 @@ if (pinInstalled) {
   await page.evaluate(() => document.querySelector('#tab-admin .rack-wrap')?.scrollIntoView());
   await page.waitForTimeout(300);
   await shot('gui-admin-approvers.png');
+
+  // The 2b templates: each arms its own key (a template change drops the key). The native confirmations are answered with the confirming button.
+  await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }) as never; });
+  const arm = async (keyFile: string) => {
+    await app.evaluate(({ dialog }, key) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [key] }) as never; }, path.join(dir, 'keys', keyFile));
+    await page.click('[data-admin-device="identity"]');
+    await page.click('[data-action="arm"]');
+    await page.waitForSelector('.admin-dev.done[data-admin-device="identity"]');
+  };
+  const frame = async (selector: string) => {
+    await page.waitForSelector(selector);
+    await page.waitForSelector('#tab-admin .admin-dev[data-admin-device="policy"]:not(.waiting)');
+    await page.waitForTimeout(500);
+    await page.evaluate(() => document.querySelector('#tab-admin .rack-wrap')?.scrollIntoView());
+    await page.waitForTimeout(300);
+  };
+
+  // 5. Revoke: the root key, a reviewed Skill (the review is a native confirmation), and an approver chosen as the target.
+  await page.click('[data-template="revoke"]');
+  await arm('root.pem');
+  await page.click('[data-admin-device="target"]');
+  await page.waitForSelector('#tab-admin tr[data-skill="docs-helper"]');
+  await page.click('[data-action="review-docs-helper"]');
+  await page.waitForSelector('#tab-admin tr[data-skill="docs-helper"] [data-action^="target-skill-"]');
+  await page.click('#tab-admin tr[data-target-key] [data-action^="target-"]');
+  await frame('#tab-admin .admin-dev.done[data-admin-device="target"]');
+  await shot('gui-admin-revoke.png');
+
+  // 6. Refresh revocation list.
+  await page.click('[data-template="refresh"]');
+  await arm('root.pem');
+  await page.click('[data-admin-device="refresh"]');
+  await frame('#tab-admin [data-action="refresh-revocations"]');
+  await shot('gui-admin-refresh.png');
+
+  // 7. Sign timestamp: the timestamp key, which is a different session from the root key.
+  await page.click('[data-template="timestamp"]');
+  await arm('timestamp.pem');
+  await page.click('[data-admin-device="timestamp"]');
+  await frame('#tab-admin [data-action="sign-timestamp"]');
+  await shot('gui-admin-timestamp.png');
 } else {
-  console.warn(`${PIN_PATH} is not ${pinFile}: install the pin first; gui-admin-approve.png and gui-admin-approvers.png were not taken and the templates shot shows no pin`);
+  console.warn(`${PIN_PATH} is not ${pinFile}: install the pin first; the admin shots after the templates one were not taken and the templates shot shows no pin`);
 }
 await app.close();
 if (errors.length) console.warn('page errors:', errors);
