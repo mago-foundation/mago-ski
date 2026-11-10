@@ -88,7 +88,7 @@ function documentDialog(lang: Lang, s: DocumentSummary): DialogText {
       lines.push(t(lang, 'admin.dialog.renew.lineFrom', { date: s.expiresFrom }));
       break;
     case 'revoke-key':
-      lines.push(s.label.endsWith(s.targetKeyId) ? t(lang, 'admin.p2.dialog.lineKeyLabelled', { label: dialogSafe(s.label) }) : t(lang, 'admin.dialog.revoke.lineKey', { label: dialogSafe(s.label), keyId: s.targetKeyId }), t(lang, 'admin.dialog.revoke.lineReason', { reason: dialogSafe(s.reason) }));
+      lines.push(s.label.includes(s.targetKeyId) ? t(lang, 'admin.p2.dialog.lineKeyLabelled', { label: dialogSafe(s.label) }) : t(lang, 'admin.dialog.revoke.lineKey', { label: dialogSafe(s.label), keyId: s.targetKeyId }), t(lang, 'admin.dialog.revoke.lineReason', { reason: dialogSafe(s.reason) }));
       if (s.certificates !== null) lines.push(t(lang, 'admin.dialog.revoke.lineCerts', { n: s.certificates }));
       break;
     case 'revoke-digest':

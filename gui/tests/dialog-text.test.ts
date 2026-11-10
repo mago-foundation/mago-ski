@@ -206,7 +206,7 @@ test('consequence block, freshness line, reset line, permanence lines (exact Eng
   assert.ok(signDialog('en', revokeDigest).detail.includes(`Version to revoke: docs ${OTHER}`));
   // A key chosen with the picker adds the certificate count after the reason (P8.2); an approver does not.
   const other: AdminSignSummary = { ...revokeKey, label: `${OTHER} · not a current approver`, certificates: 3 };
-  assert.deepEqual(signDialog('en', other).detail.split('\n').slice(4, 7), [`Key to revoke: ${OTHER} · not a current approver ${OTHER}`, 'Reason: lost laptop', 'Certificates naming this key: 3']);
+  assert.deepEqual(signDialog('en', other).detail.split('\n').slice(4, 7), [`Key to revoke: ${OTHER} · not a current approver`, 'Reason: lost laptop', 'Certificates naming this key: 3']);
   assert.ok(signDialog('ko', other).detail.split('\n').includes('이 키를 쓰는 인증서: 3개'));
   assert.ok(!signDialog('en', revokeKey).detail.includes('Certificates naming'));
 
