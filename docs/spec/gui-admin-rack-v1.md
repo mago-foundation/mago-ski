@@ -166,11 +166,58 @@ Chain: IDENTITY → TRUST ROOT → POLICY CHECK. It needs the root role, which i
 
 **Expired and previous-root states.** An expired trust root shows *The trust root has expired* and Renew first. Documents signed by a previous root key (after a rotation they were not adopted) disable every writer before any dialog: *These documents are signed by a previous root key. Move them to the new root key with root adopt in the CLI. (GUI support comes in phase 3.)*
 
-**POLICY CHECK** shows the counts by verdict over the same Skill set, the trust note, and, in an organisation with `freshness` whose timestamp does not name the new documents, *The timestamp does not name the new documents. Run mago-ski timestamp sign in the CLI.* (until phase 2b adds the template).
+**POLICY CHECK** shows the counts by verdict over the same Skill set, the trust note, and, in an organisation with `freshness` whose timestamp does not name the new documents, *The timestamp does not name the new documents. Run the Sign timestamp template.*
 
 ## Revoke, Refresh revocation list and Sign timestamp (phase 2b)
 
-The engine for these is complete in phase 2a (`prepareRevocationsChange`, `commitRevocations`, `prepareTimestamp`, `commitTimestamp`, `signPrepared*`). The templates follow [the design](../design/gui-admin-phase2.md): revocation targets are limited to a digest the armed key reviewed this generation, a current approver, or the key of a certificate found in a configured folder; a revocation states its permanence; *Sign timestamp* is its own template because the online timestamp key must not be armed in the offline root session, and it refuses when the trust root or revocation list is expired, older than this computer's memory, or does not load under the active root.
+The engine for these is complete in phase 2a (`prepareRevocationsChange`, `commitRevocations`, `prepareTimestamp`, `commitTimestamp`, `signPrepared*`). Every signing follows *Prepare, confirm, commit* above, with the same checks in the same places: the D9 refusals, the role check, the key file and key location checks, an input snapshot taken first, the root-walk refusal, the memory minimums, the consequence, the native dialog, and `beforeWrite` repeating the checks. Dialog texts are quoted in Korean in [the design](../design/gui-admin-phase2.md#decisions-v8) (v8 S3 and v12 P6/P8); the English values are in the catalog.
+
+**When the current documents do not verify** (the normal state after a root write in a freshness organisation, and for an expired document the write fixes), every signing dialog shows *The current documents do not verify: <reason>* and then the result under the documents as they will be after signing: *VERIFIED n · other m* and one line per other verdict. It shows no consequence head, no lines and no *and K more* line. Sign stays enabled. For a trust-root or revocation write in a freshness organisation the counts are taken with the timestamp check skipped, and the freshness line is still shown.
+
+### Revoke
+
+Chain: IDENTITY → TARGET → REVOKE → POLICY CHECK. Role: root.
+
+**TARGET** offers, and REVOKE accepts, only:
+
+- **A current approver** in the trust root (label: the approver's name).
+- **A digest the armed key reviewed in this generation.** The list shows every discovered Skill (`admin:revocation-skills`: instance id, name, tree digest or the read error, and whether a review record exists for the armed key, the generation, the instance and that digest), sorted by name and then id. Choosing one that is not reviewed shows its digest and a *Review* button, which opens the same native review dialog as *Approve* (the root role may review). After that the digest is offered. The digest revoked is the reviewed digest, not the Skill's current one.
+- **Another key**, chosen with *Revoke another key...*: the public-key picker opens (it counts as a dialog) and the target is that key's id, labelled *<key id> · not a current approver*. The dialog adds *Certificates naming this key: n*, the number of certificates found in the configured folders whose `approver_key_id` is that key. Targets are not taken from certificates: a certificate names only a key id, so the GUI cannot tell that a key it names is genuine, and a planted certificate must not be able to put a key on the list. The administrator chooses the key file deliberately.
+
+The root, the recovery keys and the timestamp key are refused (*Root, recovery and timestamp keys cannot be revoked here.*); so is a key or digest that is already revoked (*Already revoked*) and a target that is none of the three above. A former root, timestamp or recovery key that signs certificates is revocable. A revoked approver stays in the trust root; TRUST ROOT then marks it and offers Remove.
+
+**REVOKE** takes a reason (at most 512 characters, trimmed, display-safe, at least three letters or digits) and the new list's lifetime (7 or 30 days, default 30). Its dialog quotes the document, version, expiry, the key or version being revoked, the reason, the key line, the consequence and the permanence line (*Revocation cannot be undone. Every certificate this key signed will permanently fail verification.* or *... for this version ...*). Revoking a digest **claims** the review record before the dialog; if the dialog is cancelled, or the commit is refused while the generation is unchanged, the record is restored; a successful commit consumes it. *Approve* restores its claimed record in the same way.
+
+### Refresh revocation list
+
+Chain: IDENTITY → REVOCATION REFRESH → POLICY CHECK. Role: root. It re-signs the revocation list with the same entries, the next version and a new expiry (7 or 30 days, default 30; `revoke refresh` in the CLI). An expired list is accepted as the base, since refreshing is how it is fixed. The dialog shows the previous expiry, and in a freshness organisation the freshness line.
+
+### Sign timestamp
+
+Chain: IDENTITY → TIMESTAMP → POLICY CHECK. Role: timestamp signer. It is its own template because the online timestamp key must not be armed in the offline root session. The method refuses in this order, and the first failure decides:
+
+1. the armed key does not hold the timestamp role;
+2. the pin has no `freshness` (*This organisation does not use timestamps.*; the template is disabled);
+3. the root is revoked (*The root key is revoked...*);
+4. the trust root has expired (*The trust root has expired. Renew it in Manage approvers first.*);
+5. the revocation list has expired (*...Run Refresh revocation list first.*);
+6. no lifetime among 6, 12 and 24 hours is within `max_lifetime` (*The organisation's maximum timestamp lifetime is under 6 hours. Use the CLI.*; the template is disabled);
+7. `prepareTimestamp` with the memory minimums: an unreadable current timestamp gives *The current timestamp cannot be read. Sign it in the CLI with --version.*, and a document older than memory gives the stale text;
+8. the documents after signing would not verify (*After signing, the documents would not verify: <reason>*).
+
+The root event walk used is the memory-checked one (`loadPolicyRoot` with `recordVersions: false`), repeated in `beforeWrite`. The dialog shows, for the root events, the trust root and the revocation list, a counter and the SHA-256, each marked *(first seen by this computer)* when the counter is above this computer's memory. The root-event counter is the walk's last sequence number; the trust root and revocation counters are their versions. A timestamp previously signed by another key is named (*The previous timestamp was signed by another key (<id>), version <n>.*) and the version line reads `none → memory + 1`. The dialog never shows the freshness line. The lifetime choices are those of 6, 12 and 24 hours within `max_lifetime` (default: the largest); the engine refuses a lifetime above the maximum.
+
+After a timestamp commit the GUI records the timestamp version and then root-event progress by calling `loadPolicyRoot` once with `recordVersions: true`, so the first-seen marker for root events clears. If recording fails, the result says *The signature was made, but this computer's memory could not be updated.*
+
+**TIMESTAMP** shows the key id, version and expiry parsed from the file without any key check, whether it parses, whether the documents it names are those on disk (`loadTrustForPreview` with the timestamp check on), and the maximum lifetime.
+
+### Common to the three
+
+**TRUST ROOT, REVOCATIONS and the preview never write.** A preview (`loadTrustForPreview`) and a refused write leave `admin-state.json` unchanged; only reads of the pin (`pin()`) record versions, as phase 1.1 decided, and signing methods use `recordVersions: false` for their own checks.
+
+**POLICY CHECK** is the same view as in *Manage approvers*. When the timestamp does not name the new documents it says *The timestamp does not name the new documents. Run the Sign timestamp template.*
+
+**Limits.** The consequence is a preview (see Limits). A planted certificate cannot make a key appear in TARGET; it only changes the certificate count for a key the administrator picked.
 
 ## Replay and this computer's memory
 
@@ -208,6 +255,13 @@ The window is sandboxed as before (context isolation, no Node integration, CSP `
 | `admin:remove-approver` | `{ keyId, trustRootLifetime? }` | The same, for a removal (a second dialog for the last approver) |
 | `admin:renew-trust-root` | `{ lifetime: 180d \| 365d }` | The same, for a renewal |
 | `admin:verify-all` | none | POLICY CHECK over every Skill (unqueued) |
+| `admin:revocations` | none | The revocation list view (unqueued) |
+| `admin:revocation-skills` | none | The discovered Skills for TARGET: instance id, name, digest or error, reviewed (unqueued) |
+| `admin:revocation-targets` | none | The targets REVOKE accepts: current approvers and reviewed digests (unqueued) |
+| `admin:revoke` | `{ target: { kind: 'key', keyId } \| { kind: 'digest', digest, instanceId } \| { kind: 'other' }, reason ≤ 4096 raw, lifetime: 7d \| 30d }` | Opens the native signing dialog (and, for `other`, the public-key picker first); writes the revocation list only after it is confirmed |
+| `admin:refresh-revocations` | `{ lifetime: 7d \| 30d }` | The same, for a refresh |
+| `admin:timestamp` | none | The TIMESTAMP view (unqueued) |
+| `admin:sign-timestamp` | `{ lifetime: 6h \| 12h \| 24h }` | The same, for a timestamp; needs the timestamp role |
 
 The renderer cannot name a file, a key or a directory in any of them. A compromised renderer cannot cause a signature without both native dialogs being answered by a human: it can ask for them, and after a cancel or a timeout it is refused for 10 seconds.
 
@@ -231,5 +285,5 @@ The renderer cannot name a file, a key or a directory in any of them. A compromi
 ## Phases
 
 1. This document; the organisation pin; IDENTITY; the template framework; *Approve a Skill version*.
-2. **2a:** the engine for every root and timestamp write (prepare, commit, `root renew`, `root add-approver --policy`, retired-key host check), these spec changes, and *Manage approvers*. **2b:** *Revoke*, *Refresh revocation list*, *Sign timestamp* (GUI only; the engine is complete in 2a).
+2. **2a:** the engine for every root and timestamp write (prepare, commit, `root renew`, `root add-approver --policy`, retired-key host check), these spec changes, and *Manage approvers*. **2b:** *Revoke*, *Refresh revocation list*, *Sign timestamp* (GUI only; the engine is complete in 2a; built).
 3. *Set up an organisation*, *Root incident*.
