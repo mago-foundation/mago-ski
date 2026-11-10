@@ -74,11 +74,20 @@ export interface RootWalk {
   eventDigests:    string[];
   /** SHA-256 (hex) of the log file's bytes. */
   logSha256:       string;
+  /** Root and timestamp keys that left their role in the walked events (sorted); they never take another. */
+  retired:         string[];
+  /** Keys that were in a recovery set and left it in the walked events (sorted). */
+  formerRecovery:  string[];
+}
+
+/** True when the text has no control, line-separator, bidirectional or invisible formatting characters. */
+export function isDisplaySafeText(text: string): boolean {
+  return !UNSAFE_DISPLAY_PATTERN.test(text);
 }
 
 export function requireDisplaySafeText(value: unknown, label: string, maxLength: number): string {
   const text = requireString(value, label, maxLength);
-  if (UNSAFE_DISPLAY_PATTERN.test(text))
+  if (!isDisplaySafeText(text))
     throw new Error(`${label} must not contain control, line-separator, bidirectional or invisible formatting characters`);
   return text;
 }
@@ -264,6 +273,8 @@ interface WalkState {
   revoked:         { sequence: number; reason: string } | null;
   /** Keys that held the root or timestamp role and left it; they never take any role again. */
   retired:         Set<string>;
+  /** Keys that left a recovery set in a walked rotate. */
+  formerRecovery:  Set<string>;
   lastIssuedAt:    Date | null;
 }
 
@@ -351,6 +362,10 @@ function applyEvent(
     if (fromNew < newRecovery.rotateThreshold)
       throw new Error(`${label} has ${fromNew} signature(s) from the new recovery set; it needs ${newRecovery.rotateThreshold}`);
 
+    const formerRecovery = new Set(state.formerRecovery);
+    for (const keyId of current.keyIds)
+      if (!inNew(keyId))
+        formerRecovery.add(keyId);
     const retired = new Set(state.retired);
     if (newRoot.keyId !== state.activeRootKeyId)
       retired.add(state.activeRootKeyId);
@@ -362,6 +377,7 @@ function applyEvent(
       timestampKeyId:  newTimestamp ? newTimestamp.keyId : state.timestampKeyId,
       revoked:         null,
       retired,
+      formerRecovery,
       lastIssuedAt:    event.issuedAt,
     };
     checkRoles(next, label);
@@ -401,6 +417,7 @@ export function walkRootEvents(bytes: Uint8Array, start: RootStart, now: Date): 
     timestampKeyId:  start.timestampKeyId,
     revoked:         null,
     retired:         new Set(),
+    formerRecovery:  new Set(),
     lastIssuedAt:    null,
   };
   for (let index = start.eventsAfter; index < envelopes.length; index += 1)
@@ -413,6 +430,8 @@ export function walkRootEvents(bytes: Uint8Array, start: RootStart, now: Date): 
     count:           envelopes.length,
     eventDigests:    envelopes.map(eventDigest),
     logSha256:       sha256Hex(bytes),
+    retired:         [...state.retired].sort(),
+    formerRecovery:  [...state.formerRecovery].sort(),
   };
 }
 
@@ -444,6 +463,8 @@ function cloneWalk(walk: RootWalk): RootWalk {
     recovery:     { ...walk.recovery, keyIds: [...walk.recovery.keyIds] },
     revoked:      walk.revoked ? { ...walk.revoked } : null,
     eventDigests: [...walk.eventDigests],
+    retired:      [...walk.retired],
+    formerRecovery: [...walk.formerRecovery],
   };
 }
 

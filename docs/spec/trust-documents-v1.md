@@ -24,7 +24,7 @@ An organization's trust is anchored in one **root key**, kept offline. Hosts pin
 
 - `version`: positive integer, increased on every change. Hosts with a configured state file reject versions lower than those recorded there.
 - `root.public_key` must hash to `root.key_id`, which must equal the pinned fingerprint and the envelope's `keyid`.
-- `approvers`: sorted by `key_id`, unique, at most 256. The root key may not also be an approver.
+- `approvers`: sorted by `key_id`, unique, at most 256. The root key may not also be an approver. With root recovery, a host also refuses (`UNVERIFIABLE`) a trust root that lists an approver whose key has held the root or timestamp role in the root events the host walked: `trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`. Only keys retired in events after `root_events_after` are known, and the gate trust store does not check it. Before upgrading, remove such approvers (see the CHANGELOG).
 - `scopes`: sorted, unique, 1–64 per approver. `*` matches every Skill name; `prefix*` matches names starting with `prefix`; anything else matches one exact name.
 
 ## Revocation list

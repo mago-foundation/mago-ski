@@ -2,13 +2,13 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addApprover, approveSkill, initRoot, removeApprover, updateRevocations } from './admin.ts';
+import { addApprover, approveSkill, initRoot, removeApprover, renewTrustRoot, updateRevocations } from './admin.ts';
 import { parseCertificate } from './certificate.ts';
 import { diffSkillTrees } from './diff.ts';
 import { readRegularFile } from './fs-safe.ts';
 import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
-  appendDecision, decisionRecord, defaultPolicyPath, effectiveMode, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult,
+  appendDecision, decisionRecord, defaultPolicyPath, effectiveMode, findSkillDirs, forbiddenApproverKeys, loadPolicy, loadPolicyTrust, tooDeepResult,
   trustFailureEvent, trustFailureRecord, verifyWithPolicy, type Policy,
 } from './policy.ts';
 import {
@@ -33,6 +33,7 @@ KEYS AND TRUST  (root key holder)
   root init              Create the trust root and revocation list
   root add-approver      Add or replace an approver
   root remove-approver   Remove an approver
+  root renew             Extend the trust root's lifetime
   root show              Verify and print a trust root
   root adopt             Re-sign trust documents with a new root key
   revoke key             Revoke an approver key
@@ -95,7 +96,7 @@ Prints the key id (sha256:...), which identifies the key in trust roots and revo
 /* ******************************************************************************************  */
 /** Per-command: root                                                                          */
 /* ******************************************************************************************  */
-  root: `Usage: mago-ski root <init | add-approver | remove-approver | show> [options]
+  root: `Usage: mago-ski root <init | add-approver | remove-approver | renew | show> [options]
 
 Manages the organization's signed trust root (who may approve which Skills).
 Run "mago-ski root <subcommand> --help" for details.`,
@@ -132,6 +133,7 @@ Adds (or replaces) an approver and re-signs the trust root with the next version
   --expires DUR                how long the approver key stays valid
   --out FILE                   write the new trust root here instead
   --trust-root-expires DUR     also set a new trust root lifetime
+  --policy FILE                refuse keys that hold or held another role in this organisation (recommended)
 ${DURATION_NOTE}`,
 
   /* ************************************************* */
@@ -141,6 +143,11 @@ ${DURATION_NOTE}`,
 
 Removes an approver and re-signs the trust root. Certificates from that approver stop verifying once hosts read
 the new trust root. If the key may be compromised, also revoke it with "mago-ski revoke key".`,
+
+  /*		Per-command "root" -> "root renew"   */
+  'root renew': `Usage: mago-ski root renew --root-key FILE --trust-root FILE --expires DUR [--out FILE]
+
+Re-signs the trust root with a new expiry and the same approvers.`,
 
   /* ************************************** */
   /*		Per-command "root" -> "root show"   */
@@ -531,7 +538,9 @@ async function runRoot(
   }
 
   if (sub === 'add-approver') {
-    allow(parsed, ['--root-key', '--trust-root', '--out', '--public-key', '--name', '--scope', '--expires', '--trust-root-expires'], 0, ['--scope']);
+    allow(parsed, ['--root-key', '--trust-root', '--out', '--public-key', '--name', '--scope', '--expires', '--trust-root-expires', '--policy'], 0, ['--scope']);
+    const policyFile = optional(parsed, '--policy');
+    const forbidden = policyFile === undefined ? undefined : await forbiddenApproverKeys(await loadPolicy(policyFile), now);
     const result = await addApprover({
       rootKeyPath: one(parsed, '--root-key'), 
       trustRootPath: one(parsed, '--trust-root'), 
@@ -542,6 +551,7 @@ async function runRoot(
       name: one(parsed, '--name'), 
       scopes: parsed.flags.get('--scope') ?? [], 
       expires: one(parsed, '--expires'),
+      ...(forbidden ? { forbidden } : {}),
     });
     
     print({ 
@@ -571,6 +581,24 @@ async function runRoot(
     return 0;
   }
   
+  if (sub === 'renew') {
+    allow(parsed, ['--root-key', '--trust-root', '--out', '--expires'], 0);
+    const result = await renewTrustRoot({
+      rootKeyPath: one(parsed, '--root-key'),
+      trustRootPath: one(parsed, '--trust-root'),
+      out: optional(parsed, '--out'),
+      now,
+      expires: one(parsed, '--expires'),
+    });
+    print({
+      status: 'TRUST_ROOT_RENEWED',
+      trust_root_version: result.version,
+      trust_root: result.path,
+      expires_at: formatTimestamp(result.expiresAt),
+    });
+    return 0;
+  }
+
   if (sub === 'show') {
     allow(parsed, ['--trust-root', '--root-fingerprint'], 0);
     const trustRoot = verifyTrustRoot(await readRegularFile(one(parsed, '--trust-root'), 'Trust root', 4 * 1024 * 1024),
@@ -605,7 +633,7 @@ async function runRoot(
     return 0;
   }
 
-  throw new UsageError('Unknown root command; use init, add-approver, remove-approver, show or adopt');
+  throw new UsageError('Unknown root command; use init, add-approver, remove-approver, renew, show or adopt');
 }
 
 async function runRevoke(

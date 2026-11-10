@@ -24,10 +24,10 @@ export async function writeGoldenKeys(dir: string): Promise<GoldenKeys> {
     const priv = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
     const pem = priv.export({ type: 'pkcs8', format: 'pem' });
     out[name] = path.join(dir, `${name}.pem`);
-    await writeFile(out[name], pem, { mode: 0o600 });
-    await chmod(out[name], 0o600);
+    await writeFile(out[name]!, pem, { mode: 0o600 });
+    await chmod(out[name]!, 0o600);
     out[`${name}Pub`] = path.join(dir, `${name}.pub`);
-    await writeFile(out[`${name}Pub`], createPublicKey(priv).export({ type: 'spki', format: 'pem' }));
+    await writeFile(out[`${name}Pub`]!, createPublicKey(priv).export({ type: 'spki', format: 'pem' }));
   }
   return { root: out.root!, approverA: out.approverA!, approverB: out.approverB!, rootPub: out.rootPub!, aPub: out.approverAPub!, bPub: out.approverBPub! };
 }

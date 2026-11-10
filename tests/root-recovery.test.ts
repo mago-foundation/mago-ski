@@ -8,7 +8,10 @@ import { createMagoSkiExtension } from '../hosts/pi/index.ts';
 import { runGitHubCheck } from '../hosts/github/run.ts';
 import { canonicalBytes, parseCanonicalJsonBytes } from '../src/canonical-json.ts';
 import { loadPrivateKey } from '../src/keys.ts';
-import { HostStateFormatError, loadPolicy, loadPolicyRoot, loadPolicyTrust, verifyWithPolicy, type Policy } from '../src/policy.ts';
+import {
+  forbiddenApproverKeys, HostStateFormatError, loadPolicy, loadPolicyRoot, loadPolicyTrust, memoryMinimums, readHostState, recordDocumentVersions,
+  verifyWithPolicy, type Policy,
+} from '../src/policy.ts';
 import {
   adoptTrustDocuments, appendRootEvent, currentRootState, prepareRootEvent, signPolicyTimestamp, signRootEvent,
 } from '../src/recovery-admin.ts';
@@ -16,7 +19,7 @@ import {
   addEnvelopeSignature, clearRootWalkCache, parseRootEventLog, rootEventLogBytes, unsignedEventEnvelope, walkRootEvents, walkRootEventsCached,
 } from '../src/root-events.ts';
 import { addApprover } from '../src/admin.ts';
-import { approve, daysAfter, setupRecoveryOrg, T0, tempDir, writeSkill, type Key, type RecoveryOrg } from './helpers.ts';
+import { approve, daysAfter, setupOrg, setupRecoveryOrg, T0, tempDir, writeSkill, type Key, type RecoveryOrg } from './helpers.ts';
 
 const NOW = new Date(T0.getTime() + 60_000);
 const later = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
@@ -804,3 +807,93 @@ test('overlapping loads of an old and a new document never lower the recorded ve
     assert.equal(await recorded(), expected, `trial ${trial}`);
   }
 });
+
+test('re-enrolment: a rotated-out root key listed as an approver is refused by hosts, with no --policy it can still be added', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  await (await event(org, { action: 'revoke', signers: [org.recovery[0]!] })).append();
+  const r1 = await org.key('r1');
+  await (await event(org, { action: 'rotate', signers: [org.recovery[0]!, org.recovery[1]!], newRoot: r1, now: later(2) })).append();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(3) });
+  assert.equal((await loadPolicyTrust(await org.policy(), later(4))).ok, true);
+  // The CLI without --policy does not know the log: it succeeds, and then hosts refuse the trust root.
+  await addApprover({ rootKeyPath: r1.priv, trustRootPath: org.trustRoot, now: later(5), publicKeyPath: org.root.pub, name: 'Old root', scopes: ['*'], expires: '30d' });
+  const refused = await loadPolicyTrust(await org.policy(), later(6));
+  assert.equal(refused.ok, false);
+  assert.equal(!refused.ok && refused.reason, `trust root lists approver ${org.root.keyId}, which has held the root or timestamp role; a key that left those roles never takes another`);
+  // With the policy, add refuses it.
+  const forbidden = await forbiddenApproverKeys(await org.policy(), later(6));
+  assert.equal(forbidden.find((item) => item.keyId === org.root.keyId)?.why, 'retired');
+  await assert.rejects(addApprover({ rootKeyPath: r1.priv, trustRootPath: org.trustRoot, now: later(7), publicKeyPath: org.root.pub, name: 'Old root', scopes: ['*'], expires: '30d', forbidden }), /cannot stay or be added: it is a key that held the root or timestamp role/u);
+});
+
+test('forbiddenApproverKeys names each category and refuses a log it cannot walk', async (t) => {
+  const org = await setupRecoveryOrg(t, { freshness: true });
+  const [a, b, c] = org.recovery as [Key, Key, Key];
+  const d = await org.key('d');
+  const e = await org.key('e');
+  const r1 = await org.key('r1');
+  const t1 = await org.key('t1');
+  const revoked = `sha256:${'77'.repeat(32)}`;
+  await updateRevocationsFor(org, revoked);
+  const before = Object.fromEntries((await forbiddenApproverKeys(await org.policy(), later(1))).map((item) => [item.keyId, item.why]));
+  assert.equal(before[org.root.keyId], 'root');
+  assert.equal(before[a.keyId], 'recovery');
+  assert.equal(before[org.timestamp.keyId], 'timestamp');
+  assert.equal(before[revoked], 'revoked');
+  assert.equal(before[org.approver.keyId], undefined);
+  await (await event(org, { action: 'rotate', signers: [a, b, d, e], newRoot: r1, newRecovery: [d, e], rotateThreshold: 2, revokeThreshold: 1, newTimestamp: t1, now: later(2) })).append();
+  clearRootWalkCache();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(2) });
+  const after = Object.fromEntries((await forbiddenApproverKeys(await org.policy(), later(3))).map((item) => [item.keyId, item.why]));
+  assert.equal(after[r1.keyId], 'root');
+  assert.equal(after[d.keyId], 'recovery');
+  assert.equal(after[t1.keyId], 'timestamp');
+  assert.equal(after[org.root.keyId], 'retired');
+  assert.equal(after[org.timestamp.keyId], 'retired');
+  assert.equal(after[a.keyId], 'formerRecovery');
+  assert.equal(after[c.keyId], 'formerRecovery');
+  // A cached walk keeps formerRecovery and retired.
+  const cached = Object.fromEntries((await forbiddenApproverKeys(await org.policy(), later(4))).map((item) => [item.keyId, item.why]));
+  assert.equal(cached[c.keyId], 'formerRecovery');
+  // A log that cannot be walked is refused with the add-approver text.
+  await writeFile(org.eventsPath, 'garbage');
+  clearRootWalkCache();
+  await assert.rejects(forbiddenApproverKeys(await org.policy(), later(5)), /^Error: Cannot check the root event log, so no approver is added: /u);
+});
+
+test('forbiddenApproverKeys on a v1 policy gives the root and revoked keys', async (t) => {
+  const org = await setupOrg(t);
+  const keys = await forbiddenApproverKeys(await loadPolicy(org.policyPath), T0);
+  assert.deepEqual(keys, [{ keyId: org.rootKeyId, why: 'root' }]);
+});
+
+test('recordDocumentVersions fills a missing half with 1, never lowers, and writes v2 for timestamps', async (t) => {
+  const dir = await tempDir(t);
+  const file = path.join(dir, 'memory.json');
+  const root = `sha256:${'a1'.repeat(32)}`;
+  const stamp = `sha256:${'b2'.repeat(32)}`;
+  await recordDocumentVersions(file, { rootKeyId: root, trustRoot: 4 });
+  assert.deepEqual((await readHostState(file)).roots[root], { trust_root_version: 4, revocations_version: 1 });
+  await recordDocumentVersions(file, { rootKeyId: root, revocations: 3 });
+  assert.deepEqual((await readHostState(file)).roots[root], { trust_root_version: 4, revocations_version: 3 });
+  await recordDocumentVersions(file, { rootKeyId: root, trustRoot: 2, revocations: 1 });
+  assert.deepEqual((await readHostState(file)).roots[root], { trust_root_version: 4, revocations_version: 3 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).type, 'mago.host-state/v1');
+  await recordDocumentVersions(file, { timestamp: { keyId: stamp, version: 5 } });
+  await recordDocumentVersions(file, { timestamp: { keyId: stamp, version: 2 } });
+  const state = await readHostState(file);
+  assert.equal(state.v2, true);
+  assert.equal(state.timestamps[stamp]?.version, 5);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).type, 'mago.host-state/v2');
+  assert.deepEqual(memoryMinimums(state, root, stamp), { trustRoot: 4, revocations: 3, timestamp: 5 });
+  assert.deepEqual(memoryMinimums(state, `sha256:${'c3'.repeat(32)}`, null), { trustRoot: 0, revocations: 0, timestamp: 0 });
+  await assert.rejects(recordDocumentVersions(file, { trustRoot: 1 }), /rootKeyId is required/u);
+  await writeFile(file, 'garbage');
+  await assert.rejects(recordDocumentVersions(file, { rootKeyId: root, trustRoot: 9 }));
+  assert.equal(await readFile(file, 'utf8'), 'garbage');
+});
+
+async function updateRevocationsFor(org: RecoveryOrg, keyId: string): Promise<void> {
+  const { updateRevocations } = await import('../src/admin.ts');
+  await updateRevocations({ rootKeyPath: org.root.priv, revocationsPath: org.revocations, now: T0, revokeKey: keyId });
+}

@@ -4,7 +4,7 @@ import { chmod, copyFile, mkdir, readFile, symlink, writeFile } from 'node:fs/pr
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { tempDir, writeSkill } from './helpers.ts';
+import { setupRecoveryOrg, T0, tempDir, writeSkill } from './helpers.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 
@@ -136,4 +136,46 @@ test('every command has its own --help, and "help <command>" works too', () => {
 test('--version prints the package version', async () => {
   const pkg = JSON.parse(await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
   assert.equal(run(['--version']).stdout.trim(), `mago-ski ${pkg.version}`);
+});
+
+test('root renew re-signs the trust root with a new expiry, and has help', async (t) => {
+  const dir = await tempDir(t);
+  const keys = path.join(dir, 'keys');
+  await mkdir(keys);
+  const trustRoot = path.join(dir, 'trust-root.json');
+  assert.equal(run(['keygen', '--private-key', path.join(keys, 'root.pem'), '--public-key', path.join(keys, 'root.pub')]).code, 0);
+  assert.equal(run(['root', 'init', '--root-key', path.join(keys, 'root.pem'), '--trust-root', trustRoot, '--revocations', path.join(dir, 'revocations.json')]).code, 0);
+  const renewed = run(['root', 'renew', '--root-key', path.join(keys, 'root.pem'), '--trust-root', trustRoot, '--expires', '30d']);
+  assert.equal(renewed.code, 0, renewed.stderr);
+  const result = json(renewed.stdout);
+  assert.equal(result.status, 'TRUST_ROOT_RENEWED');
+  assert.equal(result.trust_root_version, 2);
+  assert.equal(result.trust_root, trustRoot);
+  assert.match(result.expires_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u);
+  const missing = run(['root', 'renew', '--root-key', path.join(keys, 'root.pem'), '--trust-root', trustRoot]);
+  assert.equal(missing.code, 2);
+  const help = run(['root', 'renew', '--help']);
+  assert.equal(help.code, 0);
+  assert.equal(help.stdout.trim(), "Usage: mago-ski root renew --root-key FILE --trust-root FILE --expires DUR [--out FILE]\n\nRe-signs the trust root with a new expiry and the same approvers.");
+  assert.match(run(['root', 'add-approver', '--help']).stdout, /--policy FILE\s+refuse keys that hold or held another role in this organisation \(recommended\)/u);
+  assert.match(run(['--help']).stdout, /root renew\s+Extend the trust root's lifetime/u);
+});
+
+test('root add-approver --policy refuses a key that left the root role', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  const { prepareRootEvent, signRootEvent, appendRootEvent, adoptTrustDocuments } = await import('../src/recovery-admin.ts');
+  const r1 = await org.key('r1');
+  const proposal = path.join(org.dir, 'rotate.json');
+  const policy = await org.policy();
+  const now = new Date(T0.getTime() + 60_000);
+  await prepareRootEvent({ policy, action: 'rotate', reason: 'rotate for test', out: proposal, now, signerPublicPaths: [org.recovery[0]!.pub, org.recovery[1]!.pub], newRootPublicPath: r1.pub });
+  for (const signer of [org.recovery[0]!, org.recovery[1]!, r1]) await signRootEvent({ proposalPath: proposal, keyPath: signer.priv });
+  await appendRootEvent({ policy, proposalPath: proposal, now });
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now });
+  const args = ['root', 'add-approver', '--root-key', r1.priv, '--trust-root', org.trustRoot, '--public-key', org.root.pub, '--name', 'Old', '--scope', '*', '--expires', '30d'];
+  const before = await readFile(org.trustRoot);
+  const refused = run([...args, '--policy', org.policyPath]);
+  assert.equal(refused.code, 2);
+  assert.match(refused.stderr, new RegExp(`Approver ${org.root.keyId} cannot stay or be added: it is a key that held the root or timestamp role`, 'u'));
+  assert.deepEqual(await readFile(org.trustRoot), before, 'nothing written');
 });
