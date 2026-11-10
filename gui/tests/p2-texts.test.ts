@@ -33,7 +33,7 @@ const TEXTS: Array<[MessageKey, string, string]> = [
   ['admin.p2.err.timestampUnreadable', '현재 타임스탬프를 읽을 수 없어요. CLI에서 --version으로 서명하세요.', 'The current timestamp cannot be read. Sign it in the CLI with --version.'],
   ['admin.p2.err.tooManyFolders', '폴더가 너무 많아서 영향을 계산할 수 없어요. 폴더 수를 줄이세요.', 'There are too many folders to work out the effect. Reduce the number of folders.'],
   ['admin.p2.err.cannotRevokeRole', '루트·복구·타임스탬프 키는 여기서 폐기할 수 없어요.', 'Root, recovery and timestamp keys cannot be revoked here.'],
-  ['admin.p2.err.notATarget', '현재 승인자나 찾은 인증서의 키만 폐기할 수 있어요', 'Only the keys of current approvers or of certificates found can be revoked'],
+  ['admin.p2.err.notATarget', '현재 승인자, 검토한 버전, 또는 직접 고른 공개 키만 폐기할 수 있어요', 'Only current approvers, versions you reviewed, or a public key you chose can be revoked'],
   ['admin.p2.err.alreadyRevoked', '이미 폐기됐어요', 'Already revoked'],
   ['admin.p2.err.trustRootExpired', '신뢰 루트가 만료됐어요', 'The trust root has expired'],
   ['admin.p2.err.revocationsExpired', '폐기 목록이 만료됐어요', 'The revocation list has expired'],

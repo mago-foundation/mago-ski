@@ -1243,15 +1243,21 @@ export class AdminSession {
 
   // ------------------------------------------------------------------ phase 2b: revocations and the timestamp
 
-  /** Root, recovery and timestamp keys of the organisation: never revocable here. */
-  private roleKeyIds(pin: LoadedPin): Set<string> {
-    const ids = new Set<string>([pin.policy.rootKeyId]);
-    const active = activeRoot(pin);
-    if (active) ids.add(active);
-    for (const keyId of pin.policy.recovery?.set.keyIds ?? []) ids.add(keyId);
-    if (pin.policy.recovery?.freshness) ids.add(pin.policy.recovery.freshness.keyId);
-    for (const keyId of pin.root.walk?.recovery.keyIds ?? []) ids.add(keyId);
-    if (pin.root.walk?.timestampKeyId) ids.add(pin.root.walk.timestampKeyId);
+  /**
+   * The active root, recovery and timestamp keys, from the walk of the same operation: never revocable here. Former keys
+   * (a pinned root, recovery or timestamp key that a rotation replaced) are revocable. With no walk, the pinned policy
+   * is the active state.
+   */
+  private roleKeyIds(pin: LoadedPin, root: Pick<Extract<PolicyRootResult, { ok: true }>, 'walk' | 'activeRootKeyId'>): Set<string> {
+    const ids = new Set<string>([root.activeRootKeyId]);
+    if (root.walk) {
+      for (const keyId of root.walk.recovery.keyIds) ids.add(keyId);
+      if (root.walk.timestampKeyId) ids.add(root.walk.timestampKeyId);
+    } else {
+      ids.add(pin.policy.rootKeyId);
+      for (const keyId of pin.policy.recovery?.set.keyIds ?? []) ids.add(keyId);
+      if (pin.policy.recovery?.freshness) ids.add(pin.policy.recovery.freshness.keyId);
+    }
     return ids;
   }
 
@@ -1334,7 +1340,12 @@ export class AdminSession {
     const list = await this.revocationsDocument(found);
     const revokedKeys = new Set(list.ok ? list.document.keys.map((entry) => entry.keyId) : []);
     const revokedDigests = new Set(list.ok ? list.document.digests.map((entry) => entry.digest) : []);
-    const roles = this.roleKeyIds(found.pin);
+    let roles: Set<string>;
+    try {
+      roles = this.roleKeyIds(found.pin, await this.requireRootWalk(found.pin, this.now()));
+    } catch {
+      return [];
+    }
     const targets: AdminRevocationTarget[] = found.document.approvers
       .filter((entry) => !roles.has(entry.keyId) && !revokedKeys.has(entry.keyId))
       .map((entry) => ({ kind: 'key' as const, keyId: entry.keyId, label: entry.name }));
@@ -1407,7 +1418,7 @@ export class AdminSession {
 
         const inputs = await this.inputsOf(pin);
         const now = this.now();
-        await this.requireRootWalk(pin, now);
+        const rootWalk = await this.requireRootWalk(pin, now);
         const found = await this.trustRootDocument(pin);
         if (!found.ok) throw new AdminError(found.message);
         const list = await this.revocationsDocument(found);
@@ -1433,7 +1444,7 @@ export class AdminSession {
           target = { keyId: picked.key.keyId, label: known ? known.name : this.msg('admin.p2.label.otherKey', { keyId: picked.key.keyId }), certificates: null };
         }
         if (target) {
-          if (this.roleKeyIds(pin).has(target.keyId)) throw new AdminError(this.msg('admin.p2.err.cannotRevokeRole'));
+          if (this.roleKeyIds(pin, rootWalk).has(target.keyId)) throw new AdminError(this.msg('admin.p2.err.cannotRevokeRole'));
           if (list.document.keys.some((entry) => entry.keyId === target!.keyId)) throw new AdminError(this.msg('admin.p2.err.alreadyRevoked'));
           if (request.kind === 'other' && !found.document.approvers.some((entry) => entry.keyId === target!.keyId)) target.certificates = await this.certificatesNaming(pin, target.keyId);
         }

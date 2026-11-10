@@ -750,6 +750,8 @@ async function loadDocs(): Promise<void> {
   } finally {
     docsLoading = false;
   }
+  // A template switch while this load was in flight: load again for the template now shown.
+  if (forTemplate !== template && is2b(template)) { void loadDocs(); return; }
   draw();
 }
 
@@ -843,12 +845,12 @@ function targetDetail(pane: HTMLElement): void {
       h('td', {}, button(tr('admin.p2.btn.choose'), () => pick({ kind: 'key', keyId: a.keyId, label: a.label }), { id: `target-${a.keyId.slice(7, 15)}` }))))));
 
   pane.append(h('h2', {}, tr('admin.p2.label.targetSkills')));
-  const reviewedDigests = new Set(revTargets.filter((x) => x.kind === 'digest').map((x) => (x as { digest: string }).digest));
+  const reviewedPairs = new Set(revTargets.filter((x) => x.kind === 'digest').map((x) => { const d = x as { digest: string; instanceId: string }; return `${d.digest}|${d.instanceId}`; }));
   if (revSkills.length === 0) pane.append(h('p', { class: 'hint' }, tr('admin.screen.noSkill')));
   else pane.append(h('table', { class: 'tbl' },
     h('tr', {}, h('th', {}, 'Skill'), h('th', {}, tr('admin.inspect.version')), h('th', {}, ''), h('th', {}, '')),
     ...revSkills.map((row) => {
-      const usable = row.reviewed && row.digest !== null && reviewedDigests.has(row.digest);
+      const usable = row.reviewed && row.digest !== null && reviewedPairs.has(`${row.digest}|${row.instanceId}`);
       const action = row.digest === null ? null
         : usable ? button(tr('admin.p2.btn.choose'), () => pick({ kind: 'digest', digest: row.digest!, instanceId: row.instanceId, label: `${row.name} · ${short(row.digest)}` }), { id: `target-skill-${row.name}` })
         : row.reviewed ? h('span', { class: 'hint', style: 'margin:0' }, tr('admin.p2.err.alreadyRevoked'))
