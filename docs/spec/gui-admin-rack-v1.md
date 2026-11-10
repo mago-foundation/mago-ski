@@ -4,6 +4,8 @@ Status: **draft.** Phase 1, hardened in phase 1.1 ([design](../design/gui-admin-
 
 The [GUI](../../gui/README.md) began as a read-only companion: it showed how installed Skills change and what the host policy decides, and never signed anything. This document adds an **administration rack**, so approvers and administrators can do in the GUI everything they can do with the CLI, in fixed chains of devices (templates), next to the observation rack.
 
+The GUI shows every text in Korean or English (see [the i18n design](../design/gui-i18n.md)); the Korean texts quoted in this spec are the Korean catalog entries in `gui/src/i18n/messages.ts`.
+
 ## Principles
 
 1. **Authority is cryptographic.** What an approver or administrator can do is decided by the private keys they hold and by the signed trust documents, exactly as for the CLI. Hosts accept a certificate, trust root, revocation list or root event only if its signature verifies against the organisation's root. The GUI recognising a role is guidance and a safety interlock, never a source of authority: a modified GUI that shows an employee the root devices still cannot produce a document any host accepts.

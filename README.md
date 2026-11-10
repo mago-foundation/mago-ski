@@ -104,6 +104,22 @@ mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 o
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
 | **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Never writes host state. Its administration rack lets an approver sign certificates, with the role proven by the approver's key against an admin-owned organisation pin ([spec](docs/spec/gui-admin-rack-v1.md)) | [gui/README.md](gui/README.md) |
 
+## Desktop GUI
+
+The desktop GUI (PoC) shows its texts in English or Korean. It follows the system language and has a language switch in the header. See [gui/README.md](gui/README.md).
+
+![The observation tab: three Skills, one changed, with the file diff](docs/images/gui-observe.png)
+
+The observation tab lists the installed Skills and shows what changed in the selected one since the version you remember.
+
+![The admin tab: the organisation pin and the template picker](docs/images/gui-admin-templates.png)
+
+The admin tab shows the organisation pin and the fixed templates an approver or administrator works through.
+
+![The Approve template with an approver key loaded and a Skill in INSPECT](docs/images/gui-admin-approve.png)
+
+In the Approve template the approver's key is loaded (IDENTITY) and INSPECT shows the exact version of a Skill before anything is signed.
+
 ## Verdicts
 
 `VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead). See [docs/spec/verification.md](docs/spec/verification.md).
