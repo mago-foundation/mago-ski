@@ -1,6 +1,6 @@
 # Design: administration rack phase 2 (approvers, revocation, refresh, timestamp)
 
-Status: v10, 2a ready for implementation. Precedence: [Decisions (v10)](#decisions-v10) > [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
+Status: v12, 2b ready for implementation. Precedence: [Decisions for 2b (v12)](#decisions-for-2b-v12) > [2a code review fixes (v11)](#2a-code-review-fixes-v11) > [Decisions (v10)](#decisions-v10) > [Decisions (v9)](#decisions-v9) > [Decisions (v8)](#decisions-v8) > [Decisions (v7)](#decisions-v7) > [Decisions (v6)](#decisions-v6) > [Decisions (v5)](#decisions-v5) > [Decisions (v4)](#decisions-v4) > [Decisions (v3)](#decisions-v3) > earlier sections.
 
 Builds on [the hardening design](gui-admin-hardening.md) (phase 1.1; its v5 > v4 > v3 > earlier sections), which must be merged first: native dialogs with cooldown, timeout and one-dialog-at-a-time (D8, D9); the queue, synchronous `dropKey` and generations; `dialogSafe`; typed engine failures; the GUI rollback memory (`admin-state.json`); `review` records. Behaviour: [`docs/spec/gui-admin-rack-v1.md`](../spec/gui-admin-rack-v1.md), whose phase 2 sections this design updates (see [Spec changes](#spec-changes)).
 
@@ -1387,3 +1387,116 @@ These fixes come from the two Goldfish code reviews of `25ffd25..da58894`. Neith
     - A GUI test: an expired revocation list that the trust-root change does not fix makes Sign refuse with `consequenceToFailed`, and no signing dialog opens.
     - `tests/preview-import.test.ts` also scans `.mjs`, `.cjs` and `gui/tests`.
     - Tests for items 2, 3, 6 and 7.
+
+## Decisions for 2b (v12)
+
+These decisions resolve the 2b comprehension and readiness checks run against `dev` at `4a0bbbe`, where 2a is merged. Where they differ from an earlier section, they win.
+
+### P1. Memory on reads stays (readiness B1)
+
+- **`readPin` keeps recording** the versions it loads and verifies (`recordVersions: true`), as hardening D2 and D5 decided. That record is the rollback memory: it remembers the newest documents this computer has verified.
+- **What "never writes" means.** The sentences "never writes" in U1, A1 and A9 apply to:
+  - the **preview** (`loadTrustForPreview`);
+  - the forbidden-key and root-walk checks inside a signing method, which use `recordVersions: false`.
+
+  A view that calls `pin()` records like any other read.
+- **U3's post-commit `loadPolicyRoot(..., { recordVersions: true })`** stays. If it fails, `memoryWarning` is set.
+
+### P2. When the current documents do not verify (comprehension B1)
+
+For every write (trust root, revocations, timestamp), when `from` fails:
+- the dialog shows `consequenceFromFailed`;
+- it then shows the `to` side's summary: `admin.p2.policyCheck.done` and the `admin.p2.policyCheck.line` rows, counted under the documents as they will be after signing.
+
+For a trust-root or revocation write in a freshness organisation, the summary is counted with `skipFreshness`, and `freshnessBlock` is still shown (T8 item 8). T5's "only `fromFailed`" is replaced. The admin always sees what signing produces.
+
+### P3. Revoke targets from certificates (comprehension B2, m1)
+
+- **Which certificate keys are offered.** A key taken from a discovered certificate is offered only if that certificate's signature verifies under the public key the certificate names. Forging one is therefore impossible for a key whose private half the forger does not hold.
+- **Label.** Such a target is labelled `admin.p2.label.certTarget`: `{skill} · 현재 승인자가 아님` / `{skill} · not a current approver`.
+- **Retired and former recovery keys** that sign certificates are revocable. Only the active root, the active recovery set and the active timestamp key are refused (`cannotRevokeRole`).
+
+### P4. Root-event counter (comprehension B3)
+
+- **The counter shown** for root events is the walk's last sequence number: `root_events_after + count`.
+- **First seen.** `firstSeen` compares that number with `rootEvents[root].sequence` in the memory snapshot (W9).
+
+### P5. Data and order for 2b (readiness B2, B3)
+
+**The Skill list for TARGET.**
+- Type: `AdminRevocationSkill { instanceId: string; name: string; digest: string | null; reviewed: boolean; error: string | null }`.
+- New IPC channel `admin:revocation-skills`, with no arguments.
+- It is built from the same Skill set as the consequence (`skillSet(pin)`), with the instance ids that `review()` accepts.
+- `reviewed` means a review record exists for the armed key, the generation, the instance and the digest.
+- Digest targets come only from reviewed records (V14).
+
+**Sign timestamp checks run in this order**; the first that fails decides:
+1. `current('timestamp')`;
+2. no freshness gives `noFreshness`, and the template is disabled;
+3. revoked root gives `rootRevoked`;
+4. expired trust root gives `trustRootExpiredRenew`;
+5. expired revocation list gives `revocationsExpiredRefresh`;
+6. no allowed lifetime gives `maxLifetimeShort`, and the template is disabled;
+7. `prepareTimestamp` with the minimums: `TimestampUnreadableError` gives `timestampUnreadable`, and `StaleDocumentError` gives `stale`;
+8. `consequence.toFailed` gives `consequenceToFailed`.
+
+**`AdminTimestampView`** is derived as follows:
+
+| Field | Source |
+|---|---|
+| `configured` | freshness is set |
+| `path` | `freshness.timestampPath` |
+| `keyId`, `version`, `expiresAt` | parsed from the envelope and payload, with no key check |
+| `readable` | the parse succeeded |
+| `matches` | `loadTrustForPreview(memoryPolicy(pin), now, { skipFreshness: false }).ok` |
+| `maxLifetime` | `freshness.maxLifetimeMs`, formatted |
+
+**`AdminRevocationsView`** reads the list with `readRevocationsForUpdate(bytes, activeRootKeyId, rootPublicKey)`, where `rootPublicKey` comes from T1, with no expiry check.
+
+### P6. New catalog keys (readiness B4)
+
+| Key | ko | en |
+|---|---|---|
+| `admin.p2.label.revocationLifetime` | 폐기 목록 기간 | Revocation list lifetime |
+| `admin.p2.label.timestampLifetime` | 타임스탬프 기간 | Timestamp lifetime |
+| `admin.p2.label.reason` | 사유 | Reason |
+| `admin.p2.label.certTarget` | {skill} · 현재 승인자가 아님 | {skill} · not a current approver |
+| `admin.p2.dev.target` | TARGET | TARGET |
+| `admin.p2.dev.revoke` | REVOKE | REVOKE |
+| `admin.p2.dev.refresh` | REVOCATION REFRESH | REVOCATION REFRESH |
+| `admin.p2.dev.timestamp` | TIMESTAMP | TIMESTAMP |
+
+The refresh dialog's previous-expiry line reuses `admin.dialog.renew.lineFrom`.
+
+### P7. Required implementation details (readiness, non-blocking)
+
+**Engine calls.**
+- `prepareRevocationsChange` gets `rootPublicKey` from T1.
+- `prepareTimestamp` gets `walk` from U1's memory-checked `loadPolicyRoot`.
+- The consequence is called as the 2a code does: `consequence(pin, now, override, kind)`, with `{ revocations: signPreparedRevocations(p, key) }` or `{ timestamp: signPreparedTimestamp(p, key) }`.
+
+**Service.**
+- `checkReason(reason, max)`: revoke passes 512. The REVOKE form enforces 512 too, with the same message.
+- **Restoring a claimed review record.** If the commit fails after the confirm, the claimed record is restored when the generation is unchanged. This applies to revoke-digest, and also, from now on, to approve's existing claim.
+- **Read failures.** `trustRootDocument` maps any read or verify failure that is not the previous-root case to `admin.p2.err.rolesUnknown`, with the reason (U2).
+
+**Renderer.**
+- **Freshness note.** Both uses of `admin.p2.notice.freshnessCli` switch to `admin.p2.notice.freshnessTemplate`. `freshnessCli` is deleted from the catalog, and `p2-texts.test.ts` is updated.
+- **Devices.** `DeviceKey` and `states()` gain `target`, `revoke`, `refresh` and `timestamp`, following the TRUST ROOT pattern.
+  - TARGET rows call `api.admin.review(instanceId)`.
+  - REVOKE stays disabled until a target is chosen and a valid reason is typed.
+- **Lifetime constants.** `REVOCATION_LIFETIMES = ['7d', '30d']` (default `30d`) and `TIMESTAMP_LIFETIMES = ['6h', '12h', '24h']` go next to the existing lifetime constants.
+
+**IPC.** Seven channels, adding `admin:revocation-skills` to V11's six. Each gets a parser in `gui/src/main/ipc-args.ts` with tests, a handler in `main.ts`, and entries in `preload.cts` and `RendererApi`.
+
+**Tests.**
+- GUI tests for every 2b flow and every refusal in P5's order.
+- A test that previews and refused writes leave `admin-state.json` byte-identical (only reads record).
+- A test that a forged certificate (bad signature) is not offered as a target.
+- Fixtures: `setupRecoveryOrg(t, { freshness: true })` and the 2a pin fixture in `gui/tests/admin-p2.test.ts`. `writeV2Pin` is not needed.
+
+**Screenshots.**
+- `docs/images/gui-admin-revoke.png`, `gui-admin-refresh.png` and `gui-admin-timestamp.png`, taken in a demo freshness organisation with one reviewed Skill and an approver certificate.
+- They are added to `README.md` and `gui/README.md` after the approvers shot.
+
+**Order of the Sign timestamp and revoked-root checks (m3).** P5's order applies. The static check, freshness, comes before the root check.
