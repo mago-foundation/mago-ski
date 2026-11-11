@@ -23,7 +23,7 @@ export interface ClaudeCodeSettingsInput {
   envPath?: string;
 }
 
-const SAFE_PATH = /^\/[A-Za-z0-9._/-]+$/u; // the command is parsed by a shell: no spaces, quotes or metacharacters
+const SAFE_PATH = /^\/[A-Za-z0-9._/@-]+$/u; // the command is parsed by a shell: no spaces, quotes or metacharacters
 
 export function claudeCodeManagedSettings(input: ClaudeCodeSettingsInput): Record<string, unknown> {
   const { mode, nodePath, hookEntry, configPath, hookTimeoutSec, selfDeadlineMs } = input;

@@ -168,6 +168,8 @@ export interface GateService {
   readonly sockets: { decision: string; admin: string };
   /** Effective decision connection cap, valid after start(). */
   readonly decisionCap: number;
+  /** Why the stores could not be opened at start(); undefined when they opened. The service stays up and answers trust-unavailable. */
+  readonly startError: string | undefined;
 }
 
 const SESSION = /^pid:([1-9][0-9]{0,9})$/u;
@@ -270,6 +272,7 @@ export function createGateService(config: GateServiceConfig): GateService {
   let trust: TrustStore | undefined;
   let admission: AdmissionStore | undefined;
   let ready = false;
+  let startError: string | undefined;
   const servers: net.Server[] = [];
   const live = new Set<net.Socket>();
   let queue: Promise<unknown> = Promise.resolve();
@@ -552,7 +555,7 @@ export function createGateService(config: GateServiceConfig): GateService {
 
   async function admin(raw: unknown): Promise<AdminResult> {
     if (!isRecord(raw) || typeof raw['cmd'] !== 'string') throw new Error('command must be an object with cmd');
-    if (!ready || !trust || !admission) return { ok: false, error: 'service is not ready' };
+    if (!ready || !trust || !admission) return { ok: false, error: `service is not ready${startError ? `: ${startError}` : ''}` };
     switch (raw['cmd']) {
       case 'status': {
         onlyKeys(raw, []);
@@ -620,6 +623,7 @@ export function createGateService(config: GateServiceConfig): GateService {
   return {
     sockets,
     get decisionCap() { return decisionCap; },
+    get startError() { return startError; },
     handleDecision,
     handleAdmin,
 
@@ -640,7 +644,7 @@ export function createGateService(config: GateServiceConfig): GateService {
           refresher = setInterval(() => { void serial(refreshNow).catch(() => {}); }, config.refreshIntervalMs ?? 60_000);
           refresher.unref();
         }
-      } catch { ready = false; } // stay up and answer trust-unavailable
+      } catch (e) { ready = false; startError = e instanceof Error ? e.message : String(e); } // stay up and answer trust-unavailable; status reports why
       const soft = config.nofileLimit ?? await nofileSoftLimit();
       if (!(soft - 260 >= 16)) throw new Error(`RLIMIT_NOFILE soft limit ${soft} is too low (need at least 276)`);
       const somax = await (config.somaxconn ?? readSomaxconn)().catch(() => Infinity);
