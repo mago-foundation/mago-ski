@@ -1,6 +1,8 @@
 // Client of the gate service's admin socket: one JSON request line out, one JSON reply line back (mirrors `serveOnce`
 // in service.ts). Transport problems throw; an `ok: false` reply is returned as data.
+import { lstat } from 'node:fs/promises';
 import net from 'node:net';
+import path from 'node:path';
 import { parseStrictJson } from './strict-json.ts';
 
 /** The service's admin processing deadline is 60 s; the client waits a little longer (design G10). */
@@ -42,3 +44,17 @@ export const askAdmin: AskAdmin = (socketPath, command, deadlineMs = ADMIN_DEADL
     });
     sock.on('close', () => finish(() => reject(new Error('the gate closed the connection without a reply'))));
   });
+
+/**
+ * Before connecting: the admin socket's folder is a real folder owned by `uid` with mode 0700, and the socket in it is a
+ * socket owned by `uid`. A folder or socket someone else could replace is not trusted with a trust root or a Skill.
+ */
+export async function checkAdminSocket(adminDir: string, uid: number): Promise<void> {
+  const dir = await lstat(adminDir).catch((e: NodeJS.ErrnoException) => { throw new Error(`cannot reach the gate: ${adminDir}: ${e.code ?? 'error'}; is the service running?`); });
+  if (dir.isSymbolicLink() || !dir.isDirectory()) throw new Error(`${adminDir} must be a real folder`);
+  if (dir.uid !== uid || (dir.mode & 0o777) !== 0o700) throw new Error(`${adminDir} must be owned by root with mode 0700; the admin socket is not trusted`);
+  const sock = path.join(adminDir, 'admin.sock');
+  const info = await lstat(sock).catch((e: NodeJS.ErrnoException) => { throw new Error(`cannot reach the gate: ${sock}: ${e.code ?? 'error'}; is the service running?`); });
+  if (!info.isSocket()) throw new Error(`${sock} is not a socket; the admin socket is not trusted`);
+  if (info.uid !== uid) throw new Error(`${sock} must be owned by root; the admin socket is not trusted`);
+}

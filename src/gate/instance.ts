@@ -85,8 +85,12 @@ export function instancePaths(host: Host, base = '/'): InstancePaths {
 const require = createRequire(import.meta.url);
 /** `mago-ski <version>` from package.json, not a constant. */
 export function buildId(): string {
-  try { return `mago-ski ${(require('#package.json') as { version?: string }).version ?? 'unknown'}`; } catch { return 'mago-ski unknown'; }
+  const version = (require('#package.json') as { version?: unknown }).version; // throws when package.json cannot be read
+  if (typeof version !== 'string' || version === '') throw new Error('cannot read the version from package.json');
+  return `mago-ski ${version}`;
 }
+
+export const missingInstanceMessage = (host: Host): string => `no gate instance for ${host}; run mago-ski gate init --host ${host}`;
 
 const KEYS = ['v', 'host', 'mode', 'root_fingerprint', 'host_exes', 'state_dir', 'generations_dir', 'managed_dir',
   'decision_socket_dir', 'admin_socket_dir', 'inbox_dir', 'build_id'];

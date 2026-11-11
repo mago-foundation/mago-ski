@@ -3,9 +3,8 @@
 // puts a moved-aside file back if a write fails; doctor reads and reports. All functions take their environment as
 // parameters (`base`, `rootUid`, `platform`, ...) so tests can run them against a temporary tree and the current user.
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, readdir, readFile, realpath, rename } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from 'node:fs/promises';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isRecord, parseCanonicalJsonBytes, serializeCanonicalJson } from '../canonical-json.ts';
@@ -14,9 +13,9 @@ import { validateKeyId } from '../keys.ts';
 import type { Mode } from '../policy.ts';
 import { claudeCodeManagedSettings } from './adapters/claude-code-settings.ts';
 import { codexRequirementsToml } from './adapters/codex-requirements.ts';
-import { askAdmin, type AskAdmin } from './admin-client.ts';
+import { askAdmin, checkAdminSocket, type AskAdmin } from './admin-client.ts';
 import { MODES } from './contract.ts';
-import { buildId, HOSTS, instancePaths, isHost, readInstanceConfig, type Host, type InstanceConfig } from './instance.ts';
+import { buildId, HOSTS, instancePaths, isHost, missingInstanceMessage, readInstanceConfig, type Host, type InstanceConfig } from './instance.ts';
 import { assertGatePlatform } from './proc.ts';
 
 /** What the hook may and the service must do within these limits (the values the live tests ran with). */
@@ -72,12 +71,22 @@ export async function checkRootOwnedTree(target: string, uid: number, stopAt = '
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** A host binary: a regular ELF executable (a script would allowlist its interpreter), root-owned along its whole chain. */
+/**
+ * A host binary: a regular ELF executable (a script would allowlist its interpreter), root-owned along its whole chain.
+ * It is opened without following a link; the type and owner are checked on the descriptor, and only then are its first 4 bytes read.
+ */
 export async function checkHostExe(exe: string, uid: number, stopAt = '/'): Promise<void> {
   const info = await lstat(exe);
   if (!info.isFile()) throw new Error(`${exe} is not a regular file`);
-  const head = (await readRegularFile(exe, 'host binary', Number.MAX_SAFE_INTEGER).then((b) => b.subarray(0, 4)));
-  if (!head.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) throw new Error(`${exe} is not an ELF executable (a script would allowlist its interpreter)`);
+  const handle = await open(exe, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const fd = await handle.stat();
+    if (!fd.isFile()) throw new Error(`${exe} is not a regular file`);
+    if (fd.uid !== uid || (fd.mode & 0o022) !== 0) throw new Error(NOT_ROOT(exe));
+    const head = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(head, 0, 4, 0);
+    if (bytesRead !== 4 || !head.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) throw new Error(`${exe} is not an ELF executable (a script would allowlist its interpreter)`);
+  } finally { await handle.close(); }
   await checkRootOwnedChain(exe, uid, stopAt);
 }
 
@@ -153,24 +162,18 @@ async function toolchainProblems(host: Host, tc: Toolchain, seams: Seams): Promi
 
 /* --------------------------------------------------------------------------------------------- host binaries */
 
-function loginPath(): string {
-  const user = process.env['SUDO_USER'];
-  if (user && /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/u.test(user) && user !== 'root') {
-    try { return execFileSync('su', ['-l', user, '-c', 'printf %s "$PATH"'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { /* root's PATH */ }
-  }
-  return process.env['PATH'] ?? '';
-}
-
-/** The host's default binary: its name on the invoking user's login PATH (SUDO_USER) when present, else root's PATH. */
+/** The host's default binary: its name on root's own PATH (the invoking user's PATH is never consulted). */
 export function defaultHostExe(host: Host): string {
-  const name = host === 'claude-code' ? 'claude' : 'codex';
-  for (const dir of loginPath().split(':')) {
+  const name = hostBinaryName(host);
+  for (const dir of (process.env['PATH'] ?? '').split(':')) {
     if (dir === '' || !path.isAbsolute(dir)) continue;
     const candidate = path.join(dir, name);
     if (existsSync(candidate)) return candidate;
   }
-  throw new Error(`${name} was not found on PATH; pass --host-exe PATH`);
+  throw new Error(`${name} was not found on root's PATH; pass --host-exe PATH`);
 }
+
+const hostBinaryName = (host: Host): string => (host === 'claude-code' ? 'claude' : 'codex');
 
 /* ---------------------------------------------------------------------------------------------------- planning */
 
@@ -192,6 +195,8 @@ export interface PlannedDir { path: string; mode: number }
 export interface InitPlan {
   host: Host;
   mode: Mode;
+  /** The real host binaries the gate will allow (shown by `gate init`). */
+  hostExes: string[];
   /** In write order: instance config, hook config, unit, drop-in, the host config, then the two manifests. */
   files: PlannedFile[];
   /** Leaf folders to create (parents first); missing parents are created `0755`. */
@@ -244,13 +249,21 @@ export function instanceFromOptions(o: { host: Host; mode: Mode; rootFingerprint
   };
 }
 
-function manifestText(files: PlannedFile[]): string {
-  return serializeCanonicalJson({ v: 1, files: files.map((f) => ({ path: f.path, sha256: sha256(f.content) })).sort((a, b) => (a.path < b.path ? -1 : 1)) });
+/** `previous` entries stay unless a planned file has the same path (the shared manifest is written by both hosts). */
+function manifestText(files: PlannedFile[], previous?: Map<string, string>): string {
+  const entries = new Map(previous ?? []);
+  for (const f of files) entries.set(f.path, sha256(f.content));
+  return serializeCanonicalJson({ v: 1, files: [...entries].map(([p, h]) => ({ path: p, sha256: h })).sort((a, b) => (a.path < b.path ? -1 : 1)) });
 }
 
-async function readManifest(file: string): Promise<Map<string, string> | undefined> {
+/** A manifest is read only if it is a root-owned regular file that others cannot write. */
+async function readManifest(file: string, uid: number): Promise<Map<string, string> | undefined> {
   let raw: unknown;
-  try { raw = parseCanonicalJsonBytes(await readRegularFile(file, 'manifest', 1024 * 1024), 'manifest'); } catch { return undefined; }
+  try {
+    const info = await lstat(file);
+    if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) return undefined;
+    raw = parseCanonicalJsonBytes(await readRegularFile(file, 'manifest', 1024 * 1024), 'manifest');
+  } catch { return undefined; }
   if (!isRecord(raw) || raw['v'] !== 1 || !Array.isArray(raw['files'])) return undefined;
   const out = new Map<string, string>();
   for (const f of raw['files']) if (isRecord(f) && typeof f['path'] === 'string' && typeof f['sha256'] === 'string') out.set(f['path'], f['sha256']);
@@ -282,9 +295,12 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
       exe = given ?? (opts.resolveHostExe ?? defaultHostExe)(host);
       if (!path.isAbsolute(exe)) throw new Error(`${exe} must be an absolute path`);
       exe = await realpath(exe);
+      // A binary found by itself must look like the host's (a `claude` symlink to python3 is refused); an explicit --host-exe may be named anything.
+      if (given === undefined && !path.basename(exe).startsWith(hostBinaryName(host)))
+        throw new Error(`${exe} (the real path of the ${hostBinaryName(host)} found on PATH) is not named ${hostBinaryName(host)}*; check it, then pass it with --host-exe`);
       await checkHostExe(exe, uid, stop);
     } catch (e) {
-      const fallback = given ?? `/usr/bin/${host === 'claude-code' ? 'claude' : 'codex'}`;
+      const fallback = given ?? `/usr/bin/${hostBinaryName(host)}`;
       problems.push(`${message(e)}; host binaries must be root-owned (not in a user's home): pass --host-exe PATH`);
       exe = fallback;
     }
@@ -306,8 +322,8 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
   const shared = files.filter((f) => f.role === 'unit');
 
   // Ownership by manifest (G5, N1): a file is ours when its hash equals its entry in this host's or the shared manifest.
-  const own = await readManifest(p.manifest);
-  const sharedOwn = await readManifest(p.sharedManifest);
+  const own = await readManifest(p.manifest, uid);
+  const sharedOwn = await readManifest(p.sharedManifest, uid);
   const foreign: string[] = [];
   for (const f of files) {
     const info = await lstat(f.path).catch((e: unknown) => { if (errnoCode(e) === 'ENOENT' || errnoCode(e) === 'ENOTDIR') return undefined; throw e; });
@@ -319,8 +335,11 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     }
     if (!ours) foreign.push(f.path);
   }
+  // The manifests themselves: an existing one that is not a root-owned regular manifest is foreign too.
+  for (const [m, read] of [[p.manifest, own], [p.sharedManifest, sharedOwn]] as const)
+    if (read === undefined && await lstat(m).then(() => true, (e: unknown) => { if (errnoCode(e) === 'ENOENT' || errnoCode(e) === 'ENOTDIR') return false; throw e; })) foreign.push(m);
   files.push({ path: p.manifest, content: manifestText(hostOwn), mode: 0o644, role: 'manifest' },
-    { path: p.sharedManifest, content: manifestText(shared), mode: 0o644, role: 'shared-manifest' });
+    { path: p.sharedManifest, content: manifestText(shared, sharedOwn), mode: 0o644, role: 'shared-manifest' });
 
   const dirs: PlannedDir[] = [
     { path: p.configDir, mode: 0o755 }, { path: p.stateRoot, mode: 0o755 }, { path: p.stateDir, mode: 0o700 },
@@ -332,7 +351,7 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     `mago-ski gate trust --host ${host} --trust-root FILE --revocations FILE`,
     `mago-ski gate doctor --host ${host}`,
   ];
-  return { host, mode, files, dirs, foreign, problems, rerun, next };
+  return { host, mode, hostExes, files, dirs, foreign, problems, rerun, next };
 }
 
 /* ----------------------------------------------------------------------------------------------------- applying */
@@ -342,7 +361,17 @@ export interface ApplyResult { written: string[]; backups: { from: string; to: s
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/gu, '').replace(/\.\d+Z$/u, 'Z');
 
-async function ensureDir(dir: string, mode: number): Promise<boolean> {
+/** Sets the mode through an open descriptor (no path race), after checking that the descriptor is a folder owned by `uid`. */
+async function fchmodDir(dir: string, mode: number, uid: number): Promise<void> {
+  const handle = await open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isDirectory() || info.uid !== uid) throw new Error(`${dir} must be a real folder owned by root`);
+    await handle.chmod(mode);
+  } finally { await handle.close(); }
+}
+
+async function ensureDir(dir: string, mode: number, uid: number): Promise<boolean> {
   const missing: string[] = [];
   for (let d = dir; ; d = path.dirname(d)) {
     const info = await lstat(d).catch((e: unknown) => { if (errnoCode(e) === 'ENOENT') return undefined; throw e; });
@@ -356,41 +385,75 @@ async function ensureDir(dir: string, mode: number): Promise<boolean> {
   for (const m of missing) {
     const want = m === dir ? mode : 0o755; // parents are root-owned 0755, the leaf has its stated mode (umask must not change it)
     await mkdir(m, { mode: want });
-    await chmod(m, want);
+    await fchmodDir(m, want, uid);
   }
-  if (missing.length === 0) await chmod(dir, mode);
+  if (missing.length === 0) await fchmodDir(dir, mode, uid);
   return missing.length > 0;
 }
 
+/** Every planned folder that exists, or else its nearest existing ancestor, up to `stop`: root-owned, not writable by others. */
+async function checkPlannedFolders(plan: InitPlan, uid: number, stop: string): Promise<void> {
+  for (const d of plan.dirs) {
+    let existing = path.resolve(d.path);
+    while (!(await lstat(existing).then(() => true, (e: unknown) => { if (errnoCode(e) === 'ENOENT') return false; throw e; }))) {
+      const up = path.dirname(existing);
+      if (up === existing) break;
+      existing = up;
+    }
+    await checkRootOwnedChain(existing, uid, stop);
+  }
+}
+
+const sameFile = (a: { dev: number; ino: number }, b: { dev: number; ino: number }): boolean => a.dev === b.dev && a.ino === b.ino;
+
 /**
- * Writes the plan (G5, v3 decision 3). Refuses first (problems, foreign files without `force`); with `force` renames each
- * foreign file to `<path>.mago-ski-bak-<stamp>` before writing; creates the folders; writes each file atomically in plan
- * order (the host config after the other configs, the manifests last). A failed write puts every moved-aside file back.
+ * Writes the plan (G5, v3 decision 3, v4 items 2-3). First it refuses (problems, foreign files without `force`, any planned
+ * folder or ancestor not owned by root or writable by others), before any rename or write. Then each foreign file is hard-linked
+ * to `<path>.mago-ski-bak-<stamp>` (the original stays in place), the folders are made, and each file is written with an atomic
+ * rename that replaces the original in one step: the host never lacks a config file. After a failure, a backup is put back
+ * only over a path this run did not write, and the message lists what is new, what was restored and what stays as a backup.
  */
 export async function applyInit(plan: InitPlan, opts: ApplyOptions = {}): Promise<ApplyResult> {
   if (plan.problems.length > 0) throw new Error(plan.problems.join('\n'));
   if (plan.foreign.length > 0 && !opts.force)
     throw new Error(plan.foreign.map((f) => `${f} exists and was not written by mago-ski; merge it by hand (mago-ski gate init --print) or pass --force`).join('\n'));
+  const uid = opts.rootUid ?? 0;
+  await checkPlannedFolders(plan, uid, opts.base ?? '/');
   const result: ApplyResult = { written: [], backups: [], dirs: [] };
   const suffix = `.mago-ski-bak-${stamp((opts.now ?? (() => new Date()))())}`;
   try {
-    for (const f of plan.foreign) { // a failed rename stops the command before anything is written
+    for (const f of plan.foreign) { // a failed link stops the command before anything is written
       const to = `${f}${suffix}`;
-      await rename(f, to);
+      await link(f, to);
       result.backups.push({ from: f, to });
     }
-    for (const d of plan.dirs) if (await ensureDir(d.path, d.mode)) result.dirs.push(d.path);
+    for (const d of plan.dirs) if (await ensureDir(d.path, d.mode, uid)) result.dirs.push(d.path);
     for (const f of plan.files) {
       await writeFileAtomic(f.path, Buffer.from(f.content, 'utf8'), f.mode);
-      await chmod(f.path, f.mode);
+      const handle = await open(f.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try { await handle.chmod(f.mode); } finally { await handle.close(); }
       result.written.push(f.path);
     }
   } catch (e) {
-    const failed: string[] = [];
-    for (const b of result.backups.reverse()) { try { await rename(b.to, b.from); } catch { failed.push(b.to); } }
-    const restored = failed.length > 0 ? ` Could not move back: ${failed.join(', ')}.` : result.backups.length > 0 ? ' Moved-aside files were put back.' : '';
-    const partial = result.written.length > 0 ? ` Files already written (not in the manifest, so the next run treats them as foreign; check them and use --force): ${result.written.join(', ')}.` : '';
-    throw new Error(`gate init failed: ${message(e)}.${restored}${partial}`);
+    const written = new Set(result.written);
+    const restored: string[] = [];
+    const kept: string[] = [];
+    for (const b of result.backups) {
+      if (written.has(b.from)) { kept.push(`${b.from} (original kept as ${b.to})`); continue; }
+      try {
+        const [now, bak] = await Promise.all([lstat(b.from).catch(() => undefined), lstat(b.to)]);
+        if (now && sameFile(now, bak)) await unlink(b.to); // untouched: the original is still in place, the extra link goes
+        else if (!now) await rename(b.to, b.from);
+        else { kept.push(`${b.from} (original kept as ${b.to})`); continue; }
+        restored.push(b.from);
+      } catch { kept.push(`${b.from} (original kept as ${b.to})`); }
+    }
+    const fresh = result.written.filter((w) => !result.backups.some((b) => b.from === w));
+    const lines = [`gate init failed: ${message(e)}.`];
+    if (fresh.length > 0) lines.push(`New files written (not in the manifest, so the next run treats them as foreign; check them and use --force): ${fresh.join(', ')}.`);
+    if (restored.length > 0) lines.push(`Original put back, not changed: ${restored.join(', ')}.`);
+    if (kept.length > 0) lines.push(`Replaced by new content; the original stays as a backup: ${kept.join(', ')}.`);
+    throw new Error(lines.join(' '));
   }
   return result;
 }
@@ -409,6 +472,13 @@ export interface DoctorOptions extends Seams {
   procMounts?: () => Promise<string>;
 }
 
+/** lstat: a regular file (not a symlink) owned by `uid` and not writable by group or others. */
+async function trustedRegularFile(file: string, uid: number): Promise<void> {
+  const info = await lstat(file);
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${file} must be a regular file, not a symlink`);
+  if (info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(NOT_ROOT(file));
+}
+
 /** Read-only checks, in the order of the design (v1 section 6, G6, G12). Never throws. */
 export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
@@ -423,11 +493,11 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
 
   let cfg: InstanceConfig | undefined;
   await attempt('instance config', p.instance, async () => {
-    cfg = await readInstanceConfig(p.instance, uid);
+    try { cfg = await readInstanceConfig(p.instance, uid); } catch (e) { throw errnoCode(e) === 'ENOENT' ? new Error(missingInstanceMessage(host)) : e; } // lstat: a root-owned regular file, not a symlink
     if (cfg.host !== host) throw new Error(`${p.instance} is for host ${cfg.host}`);
     return `${p.instance} (mode ${cfg.mode})`;
   });
-  if (!cfg) { for (const c of ['host binaries', 'hook entry', 'node', 'managed folder', 'host config', 'service', 'trust', 'mode']) add(c, 'SKIP', 'no usable instance config'); return out; }
+  if (!cfg) { for (const c of ['host binaries', 'hook entry', 'node', 'managed folder', 'host config', 'unit', 'drop-in', 'service', 'trust', 'mode']) add(c, 'SKIP', 'no usable instance config'); return out; }
   const c: InstanceConfig = cfg;
 
   for (const exe of c.host_exes) await attempt('host binaries', exe, async () => { await checkHostExe(exe, uid, stop); return exe; });
@@ -469,7 +539,16 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
       throw new Error(otherMatches ? `${p.hostConfig} is the ${other} configuration but the instance is ${c.mode}; run gate init again` : `${p.hostConfig} differs from what gate init would write now; run gate init again (it keeps a backup with --force)`);
     }
   } catch (e) { add('host config', 'FAIL', message(e)); }
+  // The unit and the drop-in: root-owned regular files with the content the plan would write.
+  for (const [label, file, expected] of [['unit', p.unit, unitText(tc)], ['drop-in', p.dropin, dropinText(c, p.stateRoot)]] as const) {
+    try {
+      await trustedRegularFile(file, uid);
+      if (sha256(await readFile(file)) !== sha256(expected)) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
+      add(label, 'PASS', `${file} matches what gate init writes`);
+    } catch (e) { add(label, 'FAIL', message(e)); }
+  }
   try {
+    await trustedRegularFile(p.hook, uid);
     if (sha256(await readFile(p.hook)) !== sha256(hookExpected)) throw new Error(`${p.hook} differs from what gate init would write now; run gate init again`);
     add('hook config', 'PASS', `${p.hook} matches what gate init writes`);
   } catch (e) { add('hook config', 'FAIL', message(e)); }
@@ -482,7 +561,12 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   } else {
     const decision = path.join(c.decision_socket_dir, 'decision.sock');
     const sock = await lstat(decision).then((s) => s.isSocket(), () => false);
+    let adminTrusted = true;
+    if (sock && existsSync(c.admin_socket_dir)) {
+      try { await checkAdminSocket(c.admin_socket_dir, uid); } catch (e) { adminTrusted = false; add('admin socket', 'FAIL', message(e)); }
+    }
     if (!sock) add('service', 'FAIL', `${decision} does not exist; is the service running? (systemctl status mago-ski-gate@${host})`);
+    else if (!adminTrusted) add('service', 'SKIP', 'the admin socket is not trusted (see the admin socket check)');
     else {
       try {
         const r = await (opts.ask ?? askAdmin)(path.join(c.admin_socket_dir, 'admin.sock'), { cmd: 'status' }, 10_000);
@@ -500,6 +584,10 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     else add('trust', 'FAIL', `trust is not accepted: ${String(status['trust'])}; run mago-ski gate trust --host ${host}`);
   }
 
+  if (status) {
+    if (status['root_fingerprint'] === c.root_fingerprint) add('root fingerprint', 'PASS', `the service uses ${c.root_fingerprint}`);
+    else add('root fingerprint', 'FAIL', `the service uses ${String(status['root_fingerprint'])} but the instance config says ${c.root_fingerprint}; restart the service`);
+  }
   const mismatches: string[] = [];
   if (status && status['mode'] !== c.mode) mismatches.push(`the service runs in ${String(status['mode'])} but the instance config says ${c.mode}; restart the service`);
   if (hostFileMode && hostFileMode !== c.mode) mismatches.push(`the host config is for ${hostFileMode}`);

@@ -500,6 +500,8 @@ interface Parsed {
 
 /* The actual boolean flags that should take no value. */
 const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print']);
+/* Only `gate init` takes these; everywhere else they are refused, as before 0.4.0. */
+const GATE_INIT_ONLY = new Set(['--force', '--print']);
 
 /* flags Map: A map of flags to their values. */
 function addFlag(flags: Map<string, string[]>, flag: string, value: string): void {
@@ -560,7 +562,7 @@ function allow(
 
   /* Check boolean flags for validity. */
   for (const flag of parsed.booleans)
-    if (!BOOLEAN_FLAGS.has(flag) && !allowed.includes(flag))
+    if (!allowed.includes(flag) && (GATE_INIT_ONLY.has(flag) || !BOOLEAN_FLAGS.has(flag)))
       throw new UsageError(`Unsupported option ${flag}`);
 
   /* Check positional arguments count. */
@@ -1070,14 +1072,28 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
   const out = (line: string): void => { process.stdout.write(`${line}\n`); };
   const setup = await import('./gate/setup.ts');
   const inst = await import('./gate/instance.ts');
-  const { askAdmin } = await import('./gate/admin-client.ts');
-  const ask = seams.ask ?? askAdmin;
+  const { askAdmin, checkAdminSocket } = await import('./gate/admin-client.ts');
+  /* The real client first checks that the admin socket folder and the socket are root's (item 5). */
+  const ask: AskAdmin = seams.ask ?? (async (socketPath, command, deadlineMs) => {
+    await checkAdminSocket(path.dirname(socketPath), seams.rootUid ?? 0);
+    return await askAdmin(socketPath, command, deadlineMs);
+  });
   const base = seams.base ?? '/';
   const uid = seams.rootUid ?? 0;
+  /* The instance config; a missing one is a usage error (exit 2) with the command that makes it. */
+  const loadInstance = async (host: Host) => {
+    try {
+      return await inst.readInstanceConfig(inst.instancePaths(host, base).instance, uid);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT')
+        throw new Error(inst.missingInstanceMessage(host));
+      throw error;
+    }
+  };
 
   switch (sub) {
     case 'init': {
-      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox'], 0, ['--host-exe']);
+      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--force', '--print'], 0, ['--host-exe']);
       onlyBooleans(parsed, ['--force', '--print', '--json']);
       const mode = optional(parsed, '--mode');
       if (mode !== undefined && mode !== 'shadow' && mode !== 'enforce')
@@ -1105,15 +1121,16 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
           process.stderr.write(`warning: ${problem}\n`);
         for (const foreign of plan.foreign)
           process.stderr.write(`note: ${foreign} exists and was not written by mago-ski; init would refuse unless --force is given\n`);
-        return 0;
+        return plan.problems.length > 0 ? 1 : 0; // init would refuse these: everything is printed first, then the exit code says so
       }
       const result = await setup.applyInit(plan, { force: parsed.booleans.has('--force'), base, rootUid: uid });
       if (json)
-        print({ host: plan.host, mode: plan.mode, written: result.written, created: result.dirs, moved_aside: result.backups, next: plan.next });
+        print({ host: plan.host, mode: plan.mode, host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, next: plan.next });
       else {
         for (const b of result.backups) out(`moved ${b.from} -> ${b.to}`);
         for (const d of result.dirs) out(`created ${d}`);
         for (const w of result.written) out(`wrote ${w}`);
+        out(`host binaries: ${plan.hostExes.join(', ')}`);
         out(`mode: ${plan.mode}${plan.mode === 'shadow' ? ' (nothing is blocked; re-run with --mode enforce to enforce)' : ''}`);
         out('next:');
         for (const n of plan.next) out(`  ${n}`);
@@ -1127,7 +1144,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
       needRoot();
       const host = gateHost(parsed);
       const p = inst.instancePaths(host, base);
-      const cfg = await inst.readInstanceConfig(p.instance, uid);
+      const cfg = await loadInstance(host);
       if (cfg.host !== host)
         throw new Error(`${p.instance} is for host ${cfg.host}`);
       const { createGateService } = await import('./gate/service.ts');
@@ -1136,6 +1153,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         await service.start();
       } catch (error) {
         process.stderr.write(`mago-ski gate: cannot start: ${(error as Error)?.message ?? 'failed'}\n`);
+        await service.stop().catch(() => {}); // a listener that did start must not keep the process alive
         return 1;
       }
       if (service.startError)
@@ -1150,7 +1168,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
       allow(parsed, ['--host'], 0);
       onlyBooleans(parsed, ['--json']);
       const checks = await setup.doctor(gateHost(parsed), {
-        base, rootUid: uid, ask,
+        base, rootUid: uid, ...(seams.ask ? { ask: seams.ask } : {}),
         ...(seams.uid !== undefined ? { uid: seams.uid } : {}),
         ...(seams.platform ? { platform: seams.platform } : {}), ...(seams.installRoot ? { installRoot: seams.installRoot } : {}),
         ...(seams.nodePath ? { nodePath: seams.nodePath } : {}), ...(seams.envPath ? { envPath: seams.envPath } : {}),
@@ -1167,7 +1185,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
 
   // The remaining commands talk to the running service's admin socket.
   const talk = async (host: Host, command: Record<string, unknown>) => {
-    const cfg = await inst.readInstanceConfig(inst.instancePaths(host, base).instance, uid);
+    const cfg = await loadInstance(host);
     if (cfg.host !== host)
       throw new Error(`the instance config is for host ${cfg.host}`);
     return { cfg, reply: await ask(`${cfg.admin_socket_dir}/admin.sock`, command) };
@@ -1200,8 +1218,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         cmd: 'install', skill_name: name, source_dir: dir, certificate_b64: await b64(one(parsed, '--certificate'), 'Certificate'),
       });
       if (!reply.ok) return refused(reply.error);
-      if (json) print({ skill: name, digest: reply['digest'], managed_path: path.join(cfg.managed_dir, name), created: reply['created'] });
-      else out(`installed ${name} digest=${String(reply['digest'])} path=${path.join(cfg.managed_dir, name)}`);
+      out(`installed ${name} digest=${String(reply['digest'])} path=${path.join(cfg.managed_dir, name)}`);
       return 0;
     }
     case 'uninstall': {
@@ -1235,9 +1252,10 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         throw new Error('gate status needs root: the admin socket is readable only by root; run this with sudo');
       const { reply } = await talk(gateHost(parsed), { cmd: 'status' });
       if (!reply.ok) return refused(reply.error);
+      const exit = reply['ready'] === true ? 0 : 1;
       if (json) {
         print(reply);
-        return 0;
+        return exit;
       }
       const log = (reply['log'] ?? {}) as Record<string, unknown>;
       out(`mode: ${String(reply['mode'])}`);
@@ -1245,7 +1263,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
       out(`trust: ${String(reply['trust'])}`);
       out(`revocation list valid until: ${String(reply['revocationsExpiresAt'])}`);
       out(`decision log: ${String(log['state'])}`);
-      return 0;
+      return exit;
     }
   }
 }
