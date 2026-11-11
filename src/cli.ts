@@ -67,6 +67,7 @@ COMPANY GATE (Linux, run as root)
   gate install           Install an approved Skill through the gate
   gate uninstall         Remove a Skill from the gate
   gate refresh           Re-read the inbox's trust documents
+  gate prune-removed     Drop old entries from the Codex removed-names file
   gate status            Show the running gate's state
   gate doctor            Check an installation, read-only
   Run "mago-ski gate" for the details.
@@ -122,6 +123,7 @@ Each host (claude-code, codex) has its own instance, named by host.
   install     Install an approved Skill (a folder and its certificate) through the gate
   uninstall   Remove a Skill from the gate
   refresh     Make the gate re-read its inbox of trust documents
+  prune-removed  Drop old entries from the Codex removed-names file
   status      Show the running gate's state
   doctor      Read-only checks of one installation
 
@@ -130,7 +132,7 @@ admin socket is 0600. Run "mago-ski gate <command> --help" for a command's optio
 
 Exit codes: 0 success; 1 a doctor FAIL, or the gate answered that it refused; 2 usage, input or transport error.
 
-Codex is audit-level in this release: "gate init --host codex --mode enforce" is refused (see docs/hosts/codex.md).`,
+Codex enforcement depends on organisation controls; read docs/hosts/codex.md before enabling enforce.`,
 
   'gate init': `Usage: mago-ski gate init --host claude-code|codex --root-fingerprint ID [options]
 
@@ -140,17 +142,26 @@ It does not run systemctl; it prints the commands to run.
   --host H                  claude-code or codex
   --root-fingerprint ID     the organisation's root key id (sha256:<64 hex>), as printed by "root init"
   --mode shadow|enforce     default shadow (decisions are logged, nothing is blocked). enforce also applies Claude Code's
-                            managed locks to every user of this machine. Codex enforce is refused for now.
+                            managed locks to every user of this machine. Codex enforce depends on organisation controls
+                            (docs/hosts/codex.md).
   --host-exe PATH           the real host binary (repeatable). Default: claude or codex on the invoking user's login PATH
                             (SUDO_USER) or root's PATH. It must be a root-owned ELF binary.
   --inbox DIR               a folder the gate reads trust-root.json and revocations.json from
+  --user-home DIR           Codex: a user's home the profile covers (repeatable). Default: every home in /etc/passwd with
+                            uid 1000 or above and a login shell. Each home's Skill roots get deny_read, and its
+                            .codex/skills/.system moves to <home>/.codex/mago-ski-backup/system-<UTC>.
+  --codex-home DIR          Codex: a non-default CODEX_HOME the profile covers (repeatable)
+  --no-deny-read            Codex: leave deny_read out of requirements.toml
+  --lock-user-skill-folders Codex: make ~/.agents, ~/.agents/skills and ~/.codex/skills empty, root-owned and immutable
+                            (chattr +i) in every listed home. Stops if the attribute cannot be set.
   --force                   move aside (to <file>.mago-ski-bak-<time>) host files that mago-ski did not write, then replace them
   --print                   print every file that would be written and write nothing (no root needed)
   --json                    machine-readable output
 
 Writes (root-owned): /etc/mago-ski/gate/<host>.json, <host>-hook.json, <host>.manifest.json, shared.manifest.json,
 /etc/systemd/system/mago-ski-gate@.service and mago-ski-gate@<host>.service.d/paths.conf, and the host's settings
-(Claude Code: /etc/claude-code/managed-settings.json; Codex: /etc/codex/requirements.toml). Creates the state,
+(Claude Code: /etc/claude-code/managed-settings.json; Codex: /etc/codex/requirements.toml and
+/etc/codex/managed_config.toml). Creates the state,
 generations and managed Skill folders.
 
 Refuses when the installed package, the node that runs the hooks or a host binary could be edited by a user: an
@@ -183,6 +194,13 @@ Hides the Skill from the host and removes it from the gate's records. Exit 0; 1 
 
 Makes the gate re-read its inbox (trust-root.json and revocations.json) now. Needs an instance made with --inbox;
 otherwise it prints "no inbox configured" and exits 2. Exit 0; 1 the gate refused; 2 usage or transport error.`,
+
+  'gate prune-removed': `Usage: mago-ski gate prune-removed --host codex [--older-than-days N]
+
+The gate records the Skills it removed in <managed folder>/.mago-ski-removed-names.json (at most 4096 entries; the oldest
+go first). This drops entries older than N days (default 90, at least 7), so the file stays below its cap. Blocking rests
+on the removed link, so pruning only loses the clear message for an old name.
+Exit 0; 1 the gate refused; 2 usage or transport error.`,
 
   'gate status': `Usage: mago-ski gate status --host H [--json]
 
@@ -499,9 +517,9 @@ interface Parsed {
 }
 
 /* The actual boolean flags that should take no value. */
-const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print']);
+const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders']);
 /* Only `gate init` takes these; everywhere else they are refused, as before 0.4.0. */
-const GATE_INIT_ONLY = new Set(['--force', '--print']);
+const GATE_INIT_ONLY = new Set(['--force', '--print', '--no-deny-read', '--lock-user-skill-folders']);
 
 /* flags Map: A map of flags to their values. */
 function addFlag(flags: Map<string, string[]>, flag: string, value: string): void {
@@ -1032,16 +1050,16 @@ async function runVerifyAll(
 /* ******************************************************************************************  */
 
 /* Test seams: production passes none (base "/", root uid 0, the real platform, the real admin client). */
-export interface GateCliSeams extends Pick<InitOptions, 'base' | 'rootUid' | 'platform' | 'installRoot' | 'nodePath' | 'envPath' | 'checkExec' | 'resolveHostExe'> {
+export interface GateCliSeams extends Pick<InitOptions, 'base' | 'rootUid' | 'platform' | 'installRoot' | 'nodePath' | 'envPath' | 'checkExec' | 'resolveHostExe' | 'chattr' | 'isImmutable'> {
   /** The calling uid (default process.getuid()). */
   uid?: number;
   ask?: AskAdmin;
   /** `gate run` stops when this settles (default: SIGTERM or SIGINT). */
   stop?: Promise<void>;
-  doctor?: Pick<DoctorOptions, 'somaxconn' | 'procMounts'>;
+  doctor?: Pick<DoctorOptions, 'somaxconn' | 'procMounts' | 'codexVersion' | 'isImmutable'>;
 }
 
-const GATE_SUBS = ['init', 'run', 'trust', 'install', 'uninstall', 'refresh', 'status', 'doctor'];
+const GATE_SUBS = ['init', 'run', 'trust', 'install', 'uninstall', 'refresh', 'prune-removed', 'status', 'doctor'];
 
 /* Only the listed boolean flags are accepted (--help is handled before). */
 function onlyBooleans(parsed: Parsed, accepted: string[]): void {
@@ -1093,8 +1111,8 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
 
   switch (sub) {
     case 'init': {
-      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--force', '--print'], 0, ['--host-exe']);
-      onlyBooleans(parsed, ['--force', '--print', '--json']);
+      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--user-home', '--codex-home', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders'], 0, ['--host-exe', '--user-home', '--codex-home']);
+      onlyBooleans(parsed, ['--force', '--print', '--json', '--no-deny-read', '--lock-user-skill-folders']);
       const mode = optional(parsed, '--mode');
       if (mode !== undefined && mode !== 'shadow' && mode !== 'enforce')
         throw new UsageError('--mode must be shadow or enforce');
@@ -1105,6 +1123,11 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         host: gateHost(parsed), rootFingerprint: one(parsed, '--root-fingerprint'),
         ...(mode ? { mode } : {}), ...(parsed.flags.get('--host-exe') ? { hostExes: parsed.flags.get('--host-exe')! } : {}),
         ...(inbox ? { inbox } : {}),
+        ...(parsed.flags.get('--user-home') ? { userHomes: parsed.flags.get('--user-home')! } : {}),
+        ...(parsed.flags.get('--codex-home') ? { codexHomes: parsed.flags.get('--codex-home')! } : {}),
+        ...(parsed.booleans.has('--no-deny-read') ? { noDenyRead: true } : {}),
+        ...(parsed.booleans.has('--lock-user-skill-folders') ? { lockUserSkillFolders: true } : {}),
+        ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}),
         ...(seams.base !== undefined ? { base: seams.base } : {}), ...(seams.rootUid !== undefined ? { rootUid: seams.rootUid } : {}),
         ...(seams.platform ? { platform: seams.platform } : {}), ...(seams.installRoot ? { installRoot: seams.installRoot } : {}),
         ...(seams.nodePath ? { nodePath: seams.nodePath } : {}), ...(seams.envPath ? { envPath: seams.envPath } : {}),
@@ -1121,17 +1144,24 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
           process.stderr.write(`warning: ${problem}\n`);
         for (const foreign of plan.foreign)
           process.stderr.write(`note: ${foreign} exists and was not written by mago-ski; init would refuse unless --force is given\n`);
+        for (const a of plan.actions)
+          process.stderr.write(a.kind === 'move-system' ? `note: init would move ${a.from} to ${a.to}\n` : `note: init would lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)\n`);
         return plan.problems.length > 0 ? 1 : 0; // init would refuse these: everything is printed first, then the exit code says so
       }
-      const result = await setup.applyInit(plan, { force: parsed.booleans.has('--force'), base, rootUid: uid });
+      for (const a of plan.actions)
+        if (!json) out(a.kind === 'move-system' ? `will move ${a.from} -> ${a.to}` : `will lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)`);
+      const result = await setup.applyInit(plan, { force: parsed.booleans.has('--force'), base, rootUid: uid, ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}) });
       if (json)
-        print({ host: plan.host, mode: plan.mode, host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, next: plan.next });
+        print({ host: plan.host, mode: plan.mode, host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, moved_system: result.movedSystem, locked: result.locked, next: plan.next });
       else {
         for (const b of result.backups) out(`moved ${b.from} -> ${b.to}`);
         for (const d of result.dirs) out(`created ${d}`);
         for (const w of result.written) out(`wrote ${w}`);
+        for (const m of result.movedSystem) out(`moved ${m.from} -> ${m.to}`);
+        for (const l of result.locked) out(`locked ${l}`);
         out(`host binaries: ${plan.hostExes.join(', ')}`);
         out(`mode: ${plan.mode}${plan.mode === 'shadow' ? ' (nothing is blocked; re-run with --mode enforce to enforce)' : ''}`);
+        if (plan.host === 'codex' && plan.mode === 'enforce') out(setup.CODEX_ENFORCE_NOTE);
         out('next:');
         for (const n of plan.next) out(`  ${n}`);
       }
@@ -1228,6 +1258,18 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
       const { reply } = await talk(gateHost(parsed), { cmd: 'uninstall', skill_name: parsed.positional[0]! });
       if (!reply.ok) return refused(reply.error);
       out(`uninstalled ${parsed.positional[0]}`);
+      return 0;
+    }
+    case 'prune-removed': {
+      allow(parsed, ['--host', '--older-than-days'], 0);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const raw = optional(parsed, '--older-than-days');
+      if (raw !== undefined && !/^[0-9]{1,5}$/u.test(raw))
+        throw new UsageError('--older-than-days must be a whole number of days');
+      const { reply } = await talk(gateHost(parsed), { cmd: 'prune-removed', ...(raw !== undefined ? { older_than_days: Number(raw) } : {}) });
+      if (!reply.ok) return refused(reply.error);
+      out(`pruned ${String(reply['pruned'])} removed name(s); ${String(reply['remaining'])} remain`);
       return 0;
     }
     case 'refresh': {

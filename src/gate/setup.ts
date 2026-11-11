@@ -3,7 +3,8 @@
 // puts a moved-aside file back if a write fails; doctor reads and reports. All functions take their environment as
 // parameters (`base`, `rootUid`, `platform`, ...) so tests can run them against a temporary tree and the current user.
 import { createHash } from 'node:crypto';
-import { link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, chown, link, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { constants as fsConstants, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,18 +13,19 @@ import { readRegularFile, writeFileAtomic } from '../fs-safe.ts';
 import { validateKeyId } from '../keys.ts';
 import type { Mode } from '../policy.ts';
 import { claudeCodeManagedSettings } from './adapters/claude-code-settings.ts';
-import { codexRequirementsToml } from './adapters/codex-requirements.ts';
+import { codexManagedConfigToml, codexRequirementsToml } from './adapters/codex-requirements.ts';
 import { askAdmin, checkAdminSocket, type AskAdmin } from './admin-client.ts';
 import { MODES } from './contract.ts';
-import { buildId, HOSTS, instancePaths, isHost, missingInstanceMessage, readInstanceConfig, type Host, type InstanceConfig } from './instance.ts';
+import { buildId, HOSTS, instancePaths, isHost, missingInstanceMessage, readInstanceConfig, type Host, type InstanceConfig, type InstancePaths } from './instance.ts';
 import { assertGatePlatform } from './proc.ts';
+import { parseStrictJson } from './strict-json.ts';
 
 /** What the hook may and the service must do within these limits (the values the live tests ran with). */
 export const HOOK_TIMEOUT_SEC = 5;
 export const SELF_DEADLINE_MS = 3000;
 export const CLIENT_DEADLINE_MS = 1500;
 
-export const CODEX_ENFORCE_REFUSAL = 'Codex enforcement is not complete yet (see docs/hosts/codex.md); use --mode shadow';
+export const CODEX_ENFORCE_NOTE = 'Codex enforcement depends on organisation controls; read docs/hosts/codex.md before enabling enforce';
 
 /** Same set as the two generators' SAFE_PATH: these paths go unquoted into a shell command, a TOML string and a unit file. */
 const SAFE_PATH = /^\/[A-Za-z0-9._/@-]+$/u;
@@ -175,6 +177,100 @@ export function defaultHostExe(host: Host): string {
 
 const hostBinaryName = (host: Host): string => (host === 'claude-code' ? 'claude' : 'codex');
 
+
+/* ------------------------------------------------------------------------------------------ Codex homes (C5, D3, E1) */
+
+function cleanDir(value: string, flag: string, problems: string[]): string | undefined {
+  const v = value.replace(/(?<=.)\/+$/u, '');
+  if (!path.isAbsolute(v) || !SAFE_PATH.test(v) || v === '/') { problems.push(`${flag} ${value} must be an absolute folder (letters, digits and . _ / @ - only)`); return undefined; }
+  return v;
+}
+
+/** `--user-home` (repeatable) or else every passwd home with uid 1000 or above and a login shell. */
+async function chooseHomes(opts: InitOptions, problems: string[]): Promise<string[]> {
+  if (opts.userHomes && opts.userHomes.length > 0)
+    return [...new Set(opts.userHomes.map((h) => cleanDir(h, '--user-home', problems)).filter((h): h is string => h !== undefined))];
+  const out: string[] = [];
+  const text = await readFile(path.join(opts.base ?? '/', 'etc', 'passwd'), 'utf8').catch(() => '');
+  for (const line of text.split('\n')) {
+    const f = line.split(':');
+    const uid = Number(f[2]);
+    if (f.length < 7 || !Number.isInteger(uid) || uid < 1000 || uid === 65534) continue;
+    if (/(^|\/)(nologin|false|sync|halt|shutdown)$/u.test(f[6]!) || f[6] === '') continue;
+    const home = cleanDir(f[5]!, `the home of ${f[0]}`, problems);
+    if (home && !out.includes(home)) out.push(home);
+  }
+  return out;
+}
+
+const defaultChattr = (target: string): Promise<void> => new Promise((resolve, reject) => {
+  execFile('chattr', ['+i', target], { timeout: 10_000 }, (e, _o, stderr) => (e ? reject(new Error(`chattr +i ${target} failed: ${String(stderr).trim() || e.message}`)) : resolve()));
+});
+const defaultIsImmutable = (target: string): Promise<boolean> => new Promise((resolve) => {
+  execFile('lsattr', ['-d', target], { timeout: 10_000 }, (e, out) => resolve(!e && /^\S*i\S*\s/u.test(String(out))));
+});
+
+/** `.system` moves (F5, F7.6) and, with `--lock-user-skill-folders`, the lock of each listed home (E1). Refusals go to `problems`. */
+async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: string[]): Promise<PlannedAction[]> {
+  const out: PlannedAction[] = [];
+  const stampNow = stamp((opts.now ?? (() => new Date()))());
+  const isDir = async (d: string): Promise<boolean> => (await lstat(d).catch(() => undefined))?.isDirectory() === true;
+  for (const [root, backupParent] of [...homes.userHomes.map((h) => [`${h}/.codex`, `${h}/.codex`] as const), ...homes.codexHomes.map((h) => [h, h] as const)])
+    if (await isDir(`${root}/skills/.system`)) out.push({ kind: 'move-system', from: `${root}/skills/.system`, to: `${backupParent}/mago-ski-backup/system-${stampNow}` });
+  if (opts.lockUserSkillFolders) {
+    if (homes.userHomes.length === 0) problems.push('--lock-user-skill-folders needs at least one home (--user-home DIR)');
+    for (const home of homes.userHomes) {
+      const info = await lstat(home).catch(() => undefined);
+      if (!info?.isDirectory()) { problems.push(`${home} is not a folder; cannot lock its Skill folders`); continue; }
+      for (const dir of [`${home}/.agents/skills`, `${home}/.codex/skills`]) {
+        const entries = await readdir(dir).catch(() => [] as string[]);
+        const left = entries.filter((e) => !(dir.endsWith('/.codex/skills') && e === '.system'));
+        if (left.length > 0) problems.push(`${dir} already holds ${left.slice(0, 3).join(', ')}${left.length > 3 ? ', ...' : ''}; move or remove it before locking (a locked folder is created empty)`);
+      }
+      out.push({ kind: 'lock', home, owner: { uid: info.uid, gid: info.gid } });
+    }
+  }
+  return out;
+}
+
+/** Plan: moves first, then locks. Each move needs the target folder free. */
+async function runHomeActions(actions: readonly PlannedAction[], opts: ApplyOptions, rootUid: number): Promise<{ moved: { from: string; to: string }[]; locked: string[] }> {
+  const moved: { from: string; to: string }[] = [];
+  const locked: string[] = [];
+  for (const a of actions) {
+    if (a.kind !== 'move-system') continue;
+    await mkdir(path.dirname(a.to), { recursive: true, mode: 0o755 });
+    await rename(a.from, a.to);
+    moved.push({ from: a.from, to: a.to });
+  }
+  const chattr = opts.chattr ?? defaultChattr;
+  const isImmutable = opts.isImmutable ?? defaultIsImmutable;
+  const gid = rootUid === 0 ? 0 : (process.getgid?.() ?? 0);
+  for (const a of actions) {
+    if (a.kind !== 'lock') continue;
+    const codex = `${a.home}/.codex`;
+    if (!(await lstat(codex).catch(() => undefined))) { // Codex writes here, so it stays the user's own folder
+      await mkdir(codex, { mode: 0o700 });
+      if (a.owner) await chown(codex, a.owner.uid, a.owner.gid).catch(() => {});
+    }
+    const agents = `${a.home}/.agents`;
+    for (const dir of [agents, `${agents}/skills`, `${codex}/skills`]) {
+      if (await isImmutable(dir)) continue; // a re-run
+      await mkdir(dir, { mode: 0o755 }).catch((e: unknown) => { if (errnoCode(e) !== 'EEXIST') throw e; });
+      const info = await lstat(dir);
+      if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${dir} must be a real folder to be locked`);
+      await chown(dir, rootUid, gid);
+      await chmod(dir, 0o755);
+    }
+    for (const dir of [`${agents}/skills`, `${codex}/skills`, agents]) { // children first: an immutable parent would still allow it, but the order is the plan's
+      if (await isImmutable(dir)) { locked.push(dir); continue; }
+      await chattr(dir); // a failure (an unsupported file system) stops the command
+      locked.push(dir);
+    }
+  }
+  return { moved, locked };
+}
+
 /* ---------------------------------------------------------------------------------------------------- planning */
 
 export interface InitOptions extends Seams {
@@ -186,14 +282,36 @@ export interface InitOptions extends Seams {
   inbox?: string;
   /** Tests: replaces the PATH lookup of the default host binary. */
   resolveHostExe?: (host: Host) => string;
+  /** Codex: `--user-home DIR` (repeatable). Default: every home in `<base>/etc/passwd` with uid 1000 or above and a login shell. */
+  userHomes?: string[];
+  /** Codex: `--codex-home DIR` (repeatable), a non-default CODEX_HOME. */
+  codexHomes?: string[];
+  /** Codex: `--no-deny-read` leaves deny_read out of requirements.toml. */
+  noDenyRead?: boolean;
+  /** Codex: `--lock-user-skill-folders`, see planLock. */
+  lockUserSkillFolders?: boolean;
+  /** Tests: sets the immutable attribute on a path (default `chattr +i`). A failure stops the command. */
+  chattr?: (target: string) => Promise<void>;
+  /** Tests: reads the immutable attribute (default `lsattr -d`). */
+  isImmutable?: (target: string) => Promise<boolean>;
+  now?: () => Date;
 }
 
-export type FileRole = 'instance' | 'hook' | 'unit' | 'dropin' | 'host' | 'manifest' | 'shared-manifest';
+export type FileRole = 'instance' | 'hook' | 'unit' | 'dropin' | 'host' | 'managed-config' | 'manifest' | 'shared-manifest';
 export interface PlannedFile { path: string; content: string; mode: number; role: FileRole }
 export interface PlannedDir { path: string; mode: number }
 
+/** Work on user homes that `gate init --host codex` does after the files are written (printed in the plan). */
+export type PlannedAction =
+  | { kind: 'move-system'; from: string; to: string }
+  | { kind: 'lock'; home: string; owner: { uid: number; gid: number } | undefined };
+
 export interface InitPlan {
   host: Host;
+  /** Codex: the homes and CODEX_HOMEs the profile covers (also in the hook config), and the roots deny_read lists. */
+  homes: CodexHomes;
+  denyRoots: string[];
+  actions: PlannedAction[];
   mode: Mode;
   /** The real host binaries the gate will allow (shown by `gate init`). */
   hostExes: string[];
@@ -224,19 +342,29 @@ export function dropinText(cfg: Pick<InstanceConfig, 'managed_dir'>, stateRoot: 
 }
 
 /** Hook config (G10): exactly these keys, plus Codex's two. */
-export function hookConfigText(host: Host, cfg: InstanceConfig): string {
+export interface CodexHomes { userHomes: string[]; codexHomes: string[] }
+
+export function hookConfigText(host: Host, cfg: InstanceConfig, homes: CodexHomes = { userHomes: [], codexHomes: [] }): string {
   return serializeCanonicalJson({
     v: 1, socket: path.join(cfg.decision_socket_dir, 'decision.sock'), mode: cfg.mode, host_exes: cfg.host_exes,
     client_deadline_ms: CLIENT_DEADLINE_MS, self_deadline_ms: SELF_DEADLINE_MS,
-    ...(host === 'codex' ? { admin_root: cfg.managed_dir, skill_roots: [] } : {}),
+    ...(host === 'codex' ? { admin_root: cfg.managed_dir, skill_roots: [], user_homes: homes.userHomes, codex_homes: homes.codexHomes } : {}),
   });
 }
 
+/** The fixed user Skill roots the requirements file denies reads of (D3: the roots of every listed home and CODEX_HOME). */
+export function codexDenyRoots(homes: CodexHomes): string[] {
+  return [
+    ...homes.userHomes.flatMap((h) => [`${h}/.codex/skills`, `${h}/.codex/skills/.system`, `${h}/.agents/skills`]),
+    ...homes.codexHomes.flatMap((h) => [`${h}/skills`, `${h}/skills/.system`]),
+  ];
+}
+
 /** The host's own configuration file for this instance. */
-export function hostConfigText(host: Host, mode: Mode, tc: Toolchain, hookConfigPath: string): string {
+export function hostConfigText(host: Host, mode: Mode, tc: Toolchain, hookConfigPath: string, denyRoots: string[] = []): string {
   const common = { mode, nodePath: tc.nodePath, hookEntry: tc.hookEntry, configPath: hookConfigPath, hookTimeoutSec: HOOK_TIMEOUT_SEC, selfDeadlineMs: SELF_DEADLINE_MS, envPath: tc.envPath };
   if (host === 'claude-code') return `${JSON.stringify(claudeCodeManagedSettings(common), null, 2)}\n`;
-  return codexRequirementsToml({ ...common, userSkillRoots: [] }); // stream 2 decides the per-user roots
+  return codexRequirementsToml({ ...common, userSkillRoots: denyRoots });
 }
 
 export function instanceFromOptions(o: { host: Host; mode: Mode; rootFingerprint: string; hostExes: string[]; inbox?: string | undefined; base?: string | undefined }): InstanceConfig {
@@ -278,7 +406,6 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
   validateKeyId(opts.rootFingerprint, '--root-fingerprint');
   const mode = opts.mode ?? 'shadow';
   if (!MODES.includes(mode)) throw new Error('--mode must be shadow or enforce');
-  if (host === 'codex' && mode === 'enforce') throw new Error(CODEX_ENFORCE_REFUSAL);
   if (opts.inbox !== undefined && (!path.isAbsolute(opts.inbox) || !SAFE_PATH.test(opts.inbox))) throw new Error('--inbox must be an absolute path');
   const uid = opts.rootUid ?? 0;
   const stop = opts.base ?? '/';
@@ -311,12 +438,22 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     if (!SAFE_PATH.test(q)) throw new Error(`${q} contains characters that are not allowed in a unit or hook command (only letters, digits and . _ / @ - are accepted)`);
 
   const cfg = instanceFromOptions({ host, mode, rootFingerprint: opts.rootFingerprint, hostExes, inbox: opts.inbox, base: opts.base });
+  const homes: CodexHomes = { userHomes: [], codexHomes: [] };
+  const actions: PlannedAction[] = [];
+  if (host === 'codex') {
+    homes.userHomes = await chooseHomes(opts, problems);
+    homes.codexHomes = (opts.codexHomes ?? []).map((h) => cleanDir(h, '--codex-home', problems)).filter((h): h is string => h !== undefined);
+    actions.push(...await planHomeActions(homes, opts, problems));
+  } else if (opts.userHomes?.length || opts.codexHomes?.length || opts.noDenyRead || opts.lockUserSkillFolders)
+    throw new Error('--user-home, --codex-home, --no-deny-read and --lock-user-skill-folders are for --host codex');
+  const denyRoots = host === 'codex' && !opts.noDenyRead ? codexDenyRoots(homes) : [];
   const files: PlannedFile[] = [
     { path: p.instance, content: serializeCanonicalJson(cfg), mode: 0o644, role: 'instance' },
-    { path: p.hook, content: hookConfigText(host, cfg), mode: 0o644, role: 'hook' },
+    { path: p.hook, content: hookConfigText(host, cfg, homes), mode: 0o644, role: 'hook' },
     { path: p.unit, content: unitText(tc), mode: 0o644, role: 'unit' },
     { path: p.dropin, content: dropinText(cfg, p.stateRoot), mode: 0o644, role: 'dropin' },
-    { path: p.hostConfig, content: hostConfigText(host, mode, tc, p.hook), mode: 0o644, role: 'host' }, // last of the configs
+    { path: p.hostConfig, content: hostConfigText(host, mode, tc, p.hook, denyRoots), mode: 0o644, role: 'host' }, // last of the configs
+    ...(p.managedConfig ? [{ path: p.managedConfig, content: codexManagedConfigToml(), mode: 0o644, role: 'managed-config' as const }] : []),
   ];
   const hostOwn = files.filter((f) => f.role !== 'unit');
   const shared = files.filter((f) => f.role === 'unit');
@@ -351,13 +488,13 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     `mago-ski gate trust --host ${host} --trust-root FILE --revocations FILE`,
     `mago-ski gate doctor --host ${host}`,
   ];
-  return { host, mode, hostExes, files, dirs, foreign, problems, rerun, next };
+  return { host, mode, homes, denyRoots, actions, hostExes, files, dirs, foreign, problems, rerun, next };
 }
 
 /* ----------------------------------------------------------------------------------------------------- applying */
 
-export interface ApplyOptions { force?: boolean; base?: string; rootUid?: number; now?: () => Date }
-export interface ApplyResult { written: string[]; backups: { from: string; to: string }[]; dirs: string[] }
+export interface ApplyOptions { force?: boolean; base?: string; rootUid?: number; now?: () => Date; chattr?: (target: string) => Promise<void>; isImmutable?: (target: string) => Promise<boolean> }
+export interface ApplyResult { written: string[]; backups: { from: string; to: string }[]; dirs: string[]; movedSystem: { from: string; to: string }[]; locked: string[] }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/gu, '').replace(/\.\d+Z$/u, 'Z');
 
@@ -419,7 +556,7 @@ export async function applyInit(plan: InitPlan, opts: ApplyOptions = {}): Promis
     throw new Error(plan.foreign.map((f) => `${f} exists and was not written by mago-ski; merge it by hand (mago-ski gate init --print) or pass --force`).join('\n'));
   const uid = opts.rootUid ?? 0;
   await checkPlannedFolders(plan, uid, opts.base ?? '/');
-  const result: ApplyResult = { written: [], backups: [], dirs: [] };
+  const result: ApplyResult = { written: [], backups: [], dirs: [], movedSystem: [], locked: [] };
   const suffix = `.mago-ski-bak-${stamp((opts.now ?? (() => new Date()))())}`;
   try {
     for (const f of plan.foreign) { // a failed link stops the command before anything is written
@@ -434,6 +571,8 @@ export async function applyInit(plan: InitPlan, opts: ApplyOptions = {}): Promis
       try { await handle.chmod(f.mode); } finally { await handle.close(); }
       result.written.push(f.path);
     }
+    const home = await runHomeActions(plan.actions, opts, uid); // after every file: a refused plan or a failed write never moves user data
+    result.movedSystem = home.moved; result.locked = home.locked;
   } catch (e) {
     const written = new Set(result.written);
     const restored: string[] = [];
@@ -470,6 +609,10 @@ export interface DoctorOptions extends Seams {
   /** Tests: replace the two kernel settings read for warnings. */
   somaxconn?: () => Promise<number>;
   procMounts?: () => Promise<string>;
+  /** Codex: the output of `codex --version` for a host binary (default: runs it). */
+  codexVersion?: (exe: string) => Promise<string>;
+  /** Codex: the immutable attribute of a path (default `lsattr -d`). */
+  isImmutable?: (target: string) => Promise<boolean>;
 }
 
 /** lstat: a regular file (not a symlink) owned by `uid` and not writable by group or others. */
@@ -523,10 +666,13 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   }
 
   // Host config and hook config: exact content of what `gate init` would write now.
-  const hookExpected = hookConfigText(host, c);
+  // Codex: the listed homes live in the hook config (the instance config does not know them); deny_read is present or not as written.
+  const homes: CodexHomes = (host === 'codex' ? await readHookHomes(p.hook) : undefined) ?? { userHomes: [], codexHomes: [] };
+  const denyRoots = host === 'codex' && /^deny_read = /mu.test(await readFile(p.hostConfig, 'utf8').catch(() => '')) ? codexDenyRoots(homes) : [];
+  const hookExpected = hookConfigText(host, c, homes);
   let hostFileMode: Mode | undefined;
   try {
-    const expected = hostConfigText(host, c.mode, tc, p.hook);
+    const expected = hostConfigText(host, c.mode, tc, p.hook, denyRoots);
     const info = await lstat(p.hostConfig);
     if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${p.hostConfig} must be a regular file owned by root and not writable by others`);
     const have = sha256(await readFile(p.hostConfig));
@@ -534,7 +680,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     else {
       const other = c.mode === 'shadow' ? 'enforce' : 'shadow';
       let otherMatches = false;
-      try { otherMatches = have === sha256(hostConfigText(host, other, tc, p.hook)); } catch { /* codex enforce is not generated */ }
+      try { otherMatches = have === sha256(hostConfigText(host, other, tc, p.hook, denyRoots)); } catch { /* not generated */ }
       if (otherMatches) hostFileMode = other;
       throw new Error(otherMatches ? `${p.hostConfig} is the ${other} configuration but the instance is ${c.mode}; run gate init again` : `${p.hostConfig} differs from what gate init would write now; run gate init again (it keeps a backup with --force)`);
     }
@@ -552,6 +698,8 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     if (sha256(await readFile(p.hook)) !== sha256(hookExpected)) throw new Error(`${p.hook} differs from what gate init would write now; run gate init again`);
     add('hook config', 'PASS', `${p.hook} matches what gate init writes`);
   } catch (e) { add('hook config', 'FAIL', message(e)); }
+
+  if (host === 'codex') await codexDoctor(c, p, homes, uid, opts, add);
 
   // Service, trust, mode: need the admin socket (root).
   const callerUid = opts.uid ?? process.getuid?.() ?? -1;
@@ -588,6 +736,14 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     if (status['root_fingerprint'] === c.root_fingerprint) add('root fingerprint', 'PASS', `the service uses ${c.root_fingerprint}`);
     else add('root fingerprint', 'FAIL', `the service uses ${String(status['root_fingerprint'])} but the instance config says ${c.root_fingerprint}; restart the service`);
   }
+  if (host === 'codex' && status) {
+    const mism = Array.isArray(status['nameMismatch']) ? status['nameMismatch'] : [];
+    if (mism.length > 0) add('name mismatch', 'FAIL', `installed Skills whose SKILL.md does not start with one plain "name:" line equal to the install name (hidden in enforce): ${mism.join(', ')}`);
+    else add('name mismatch', 'PASS', 'every installed Skill has a plain name line equal to its install name');
+    const removed = isRecord(status['removedNames']) ? status['removedNames'] : {};
+    if (removed['full'] === true) add('removed names', 'WARN', `the removed-names file is full (${String(removed['evicted'])} oldest entries evicted); run: mago-ski gate prune-removed --host codex --older-than-days 90`);
+    else if (typeof removed['error'] === 'string') add('removed names', 'WARN', `the removed-names file could not be written: ${removed['error']}`);
+  }
   const mismatches: string[] = [];
   if (status && status['mode'] !== c.mode) mismatches.push(`the service runs in ${String(status['mode'])} but the instance config says ${c.mode}; restart the service`);
   if (hostFileMode && hostFileMode !== c.mode) mismatches.push(`the host config is for ${hostFileMode}`);
@@ -605,4 +761,82 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     if (mounts.split('\n').some((l) => /^\S+ \/proc /u.test(l) && /hidepid=(?!0|off)/u.test(l))) add('proc mount', 'WARN', '/proc is mounted with hidepid: other users\' sessions stay open longer before they are reaped');
   } catch { /* unreadable: no warning */ }
   return out;
+}
+
+/* ---------------------------------------------------------------------------------------------- Codex doctor checks */
+
+async function readHookHomes(file: string): Promise<CodexHomes | undefined> {
+  try {
+    const raw = parseStrictJson(await readFile(file));
+    if (!isRecord(raw)) return undefined;
+    const list = (v: unknown): string[] | undefined => (Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]) : undefined);
+    const userHomes = list(raw['user_homes']);
+    const codexHomes = list(raw['codex_homes']);
+    return userHomes && codexHomes ? { userHomes, codexHomes } : undefined;
+  } catch { return undefined; }
+}
+
+/** True when a SKILL.md (any case) exists under `root`, entering dot folders and following links; bounded. */
+async function hasSkillFile(root: string, skip: (rel: string) => boolean = () => false): Promise<boolean> {
+  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
+  let dirs = 0;
+  for (let i = 0; i < queue.length && dirs < 5000; i++) {
+    const { dir, depth } = queue[i]!;
+    dirs++;
+    for (const name of await readdir(dir).catch(() => [] as string[])) {
+      if (skip(path.relative(root, path.join(dir, name)))) continue;
+      if (/^skill\.md$/iu.test(name)) return true;
+      if (depth < 8 && (await stat(path.join(dir, name)).catch(() => undefined))?.isDirectory()) queue.push({ dir: path.join(dir, name), depth: depth + 1 });
+    }
+  }
+  return false;
+}
+
+const defaultCodexVersion = (exe: string): Promise<string> => new Promise((resolve, reject) => {
+  execFile(exe, ['--version'], { timeout: 5000, env: {} }, (e, out) => (e ? reject(e) : resolve(String(out))));
+});
+
+async function codexDoctor(c: InstanceConfig, p: InstancePaths, homes: CodexHomes, uid: number, opts: DoctorOptions,
+  add: (check: string, result: CheckResult, detail: string) => void): Promise<void> {
+  // managed_config.toml: exact content, root-owned.
+  try {
+    const file = p.managedConfig!;
+    const info = await lstat(file);
+    if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${file} must be a regular file owned by root and not writable by others`);
+    if (sha256(await readFile(file)) !== sha256(codexManagedConfigToml())) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
+    add('managed config', 'PASS', `${file} matches what gate init writes`);
+  } catch (e) { add('managed config', 'FAIL', errnoCode(e) === 'ENOENT' ? `${p.managedConfig} does not exist; run gate init again` : message(e)); }
+  // The hook config must list the homes (an unlisted HOME blocks bare mentions).
+  const listed = homes.userHomes.length > 0 || homes.codexHomes.length > 0;
+  if (!listed) add('user homes', 'WARN', 'no home is listed (gate init --user-home DIR): the hook cannot recognise any HOME, so bare mentions are blocked');
+  // Non-admin Skills in a listed home (the menu route, D1): FAIL.
+  const withSkills: string[] = [];
+  const withSystem: string[] = [];
+  for (const h of homes.userHomes) {
+    for (const d of [`${h}/.agents/skills`, `${h}/.codex/skills`]) if (await hasSkillFile(d, (rel) => rel === '.system' || rel.startsWith('.system/'))) withSkills.push(d);
+    if (await lstat(`${h}/.codex/skills/.system`).then(() => true, () => false)) withSystem.push(`${h}/.codex/skills/.system`);
+  }
+  for (const h of homes.codexHomes) {
+    if (await hasSkillFile(`${h}/skills`, (rel) => rel === '.system' || rel.startsWith('.system/'))) withSkills.push(`${h}/skills`);
+    if (await lstat(`${h}/skills/.system`).then(() => true, () => false)) withSystem.push(`${h}/skills/.system`);
+  }
+  if (withSkills.length > 0) add('user Skills', 'FAIL', `a listed home has Skills that Codex would list (a menu pick reaches the model with no hook): ${withSkills.join(', ')}`);
+  else add('user Skills', 'PASS', 'no SKILL.md under the listed homes');
+  if (withSystem.length > 0) add('.system folder', 'FAIL', `${withSystem.join(', ')} exists; the profile turns bundled Skills off, so move it away (gate init does, into <home>/.codex/mago-ski-backup/)`);
+  else add('.system folder', 'PASS', 'no .system folder under the listed homes');
+  // The optional lock (E1).
+  if (homes.userHomes.length > 0) {
+    const isImmutable = opts.isImmutable ?? defaultIsImmutable;
+    const open: string[] = [];
+    for (const h of homes.userHomes) for (const d of [`${h}/.agents/skills`, `${h}/.codex/skills`]) if (!(await isImmutable(d))) open.push(d);
+    if (open.length > 0) add('Skill folder lock', 'WARN', `not locked (gate init --lock-user-skill-folders): ${open.join(', ')}`);
+    else add('Skill folder lock', 'PASS', 'the user Skill folders are locked (immutable)');
+  }
+  // The Codex version the profile was verified on.
+  try {
+    const out = await (opts.codexVersion ?? defaultCodexVersion)(c.host_exes[0]!);
+    const m = /(\d+)\.(\d+)\.(\d+)/u.exec(out);
+    if (m && m[1] === '0' && m[2] === '166') add('codex version', 'PASS', `codex ${m[0]}`);
+    else add('codex version', 'WARN', `untested Codex version${m ? ` ${m[0]}` : ''}: the profile was verified on 0.166.x`);
+  } catch { add('codex version', 'WARN', 'untested Codex version: codex --version could not be run'); }
 }
