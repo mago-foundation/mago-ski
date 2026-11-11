@@ -19,10 +19,9 @@ import http from 'node:http';
 import path from 'node:path';
 import { codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
 import type { Mode } from '../../src/policy.ts';
-import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
 const CODEX = process.env.CODEX_BIN ? realpathSync(process.env.CODEX_BIN) : '';
-const HOOK_ENTRY = path.join(REPO, 'src/gate/adapters/codex-hook.ts');
 const ADMIN_ROOT = '/etc/codex';
 const ADMIN_SKILLS = path.join(ADMIN_ROOT, 'skills');
 const SKILLS = ['approved-skill', 'other-skill', 'project-skill', 'user-skill'];
@@ -87,19 +86,10 @@ type World = GateWorld & { base: string; unmount: () => Promise<void>; hookConfi
 
 async function world(base: string): Promise<World> {
   const root = await liveRoot('mago-live-cx-');
-  const unmount = await overlay(ADMIN_ROOT, path.join(root, 'etc-codex'));
-  let self: World | undefined; // configure() runs on start(), after world() has returned
-  const w = await gateWorld(root, {
-    hostExe: CODEX, managedDir: ADMIN_SKILLS,
-    async configure(service, mode, state) {
-      self!.hookConfig = path.join(state, 'codex-hook.json');
-      await writeFile(self!.hookConfig, JSON.stringify({
-        v: 1, socket: service.sockets.decision, mode, host_exes: [CODEX], admin_root: ADMIN_SKILLS, client_deadline_ms: 1500, self_deadline_ms: 3000,
-      }), { mode: 0o644 });
-    },
-  });
-  self = Object.assign(w, { base, unmount, hookConfig: '' });
-  return self;
+  // gate init writes the hook config and requirements.toml into <base>/etc/codex; the host reads them through this bind mount.
+  const unmount = await overlay(ADMIN_ROOT, path.join(liveBase(root), 'etc', 'codex'));
+  const w = await gateWorld(root, { host: 'codex', hostExe: CODEX });
+  return Object.assign(w, { base, unmount, hookConfig: w.paths.hook });
 }
 
 // ---------- one codex exec run ----------
@@ -123,7 +113,7 @@ async function runCodex(w: World, name: string, run: Run) {
     `model = "gpt-5.1-codex"\nmodel_provider = "faux"\n[model_providers.faux]\nname = "faux"\nbase_url = "${w.base}"\nwire_api = "responses"\nenv_key = "FAUX_KEY"\n`);
   // The requirements file, as the installer writes it for this user (deny_read needs the user's fixed Skill roots).
   await writeFile(path.join(ADMIN_ROOT, 'requirements.toml'), codexRequirementsToml({
-    mode: w.mode, nodePath: NODE, hookEntry: HOOK_ENTRY, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
+    mode: w.mode, nodePath: NODE, hookEntry: w.hookEntry, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
     userSkillRoots: [path.join(codexHome, 'skills'), path.join(codexHome, 'skills', '.system'), path.join(home, '.agents', 'skills')],
   }), { mode: 0o644 });
 

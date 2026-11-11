@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'node:test';
@@ -22,7 +22,12 @@ export function daysAfter(base: Date, days: number): Date {
 export async function tempDir(t: TestContext, prefix = 'mago-ski-test-'): Promise<string> {
   // Resolved, because macOS temp dirs sit under /var, a symlink to /private/var.
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
-  t.after(async () => await rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // Sealed gate generations are read-only folders; a non-root user cannot delete inside them until they are writable again.
+    const entries = await readdir(directory, { recursive: true, withFileTypes: true }).catch(() => []);
+    for (const e of entries) if (e.isDirectory()) await chmod(path.join(e.parentPath, e.name), 0o755).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
   return directory;
 }
 
