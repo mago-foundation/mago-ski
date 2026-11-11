@@ -84,10 +84,10 @@
 // and are NOT logged, so a local user flooding the world-accessible socket cannot rotate older records out of the decision
 // log faster than that rate allows for each uid it can name (default 10/s: about 4 KiB/s of records per named uid).
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, readdir, readFile, rename, symlink, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { isRecord, MAX_CANONICAL_JSON_BYTES } from '../canonical-json.ts';
+import { isRecord, MAX_CANONICAL_JSON_BYTES, serializeCanonicalJson } from '../canonical-json.ts';
 import { readRegularFile, writeFileAtomic } from '../fs-safe.ts';
 import { validateDigest, validateSkillName } from '../names.ts';
 import type { Mode } from '../policy.ts';
@@ -96,6 +96,7 @@ import { evaluateCertificate, VERDICT_RANK, type Verdict } from '../verify.ts';
 import { openDecisionLog, type DecisionLog } from './decision-log.ts';
 import { MAX_SESSIONS, openAdmissionStore, type AdmissionStore, type MutationResult } from './admission.ts';
 import { parseGateRequest, serializeGateResult, type GateRequest, type GateResult } from './contract.ts';
+import { plainNameLine } from './adapters/codex-names.ts';
 import { installSkill } from './generations.ts';
 import { assertGatePlatform, bootId, bootMs, NotLiveError, nofileSoftLimit, processFacts, processInfo } from './proc.ts';
 import { parseStrictJson, DEFAULT_STRICT_JSON_LIMITS } from './strict-json.ts';
@@ -146,6 +147,8 @@ export interface GateServiceConfig {
   inboxDir?: string;
   /** Inbox check period (default 60000 ms); only used when inboxDir is set. */
   refreshIntervalMs?: number;
+  /** Period of the reconcile that runs inside the admin queue whether or not an inbox is set (default 60000 ms). */
+  reconcileIntervalMs?: number;
   /** Decision log directory (default `<stateDir>/log`), build/profile id written into every record, retention. */
   logDir?: string;
   buildId?: string;
@@ -178,6 +181,14 @@ const MAX_CERT_BYTES = 256 * 1024;
 const MAX_CERTS_PER_DIGEST = 16;
 const ADMIN_LIMITS = { maxBytes: 12 * 1024 * 1024, maxDepth: 4, maxMembers: 8, maxStringLength: 6 * 1024 * 1024 };
 const hex = (digest: string): string => validateDigest(digest).slice('sha256:'.length);
+export const REMOVED_NAMES_FILE = '.mago-ski-removed-names.json';
+export const REMOVED_NAMES_TYPE = 'mago-ski.gate.removed-names.v1';
+export const REMOVED_NAMES_CAP = 4096;
+const REMOVED_NAMES_READ_LIMIT = 1024 * 1024;
+const REMOVED_LIMITS = { maxBytes: REMOVED_NAMES_READ_LIMIT, maxDepth: 4, maxMembers: REMOVED_NAMES_CAP + 4, maxStringLength: 1024 };
+const MAX_SKILL_MD_BYTES = 64 * 1024;
+const NAME_REFUSAL = (name: string): string => `SKILL.md must start its frontmatter with one plain line "name: ${name}" so every host names it the same`;
+interface RemovedEntry { name: string; digest: string; kind: 'revoked' | 'uninstalled'; at: string }
 
 function b64(value: unknown, label: string, max: number): Buffer {
   if (typeof value !== 'string') throw new Error(`${label} must be a base64 string`);
@@ -330,6 +341,7 @@ export function createGateService(config: GateServiceConfig): GateService {
   });
   let reaper: NodeJS.Timeout | undefined;
   let refresher: NodeJS.Timeout | undefined;
+  let reconciler: NodeJS.Timeout | undefined;
 
   /** Engine verdict for exactly this Skill name and digest under the trust context of this moment. */
   const verdictCache = new Map<string, { verdict: Verdict; at: number }>();
@@ -503,14 +515,106 @@ export function createGateService(config: GateServiceConfig): GateService {
     try { await rename(tmp, file); } catch (e) { await unlink(tmp).catch(() => {}); throw e; }
   }
 
-  // REFRESH + RECONCILE (admin queue only). The inbox is offered to the trust store; a rejected or unreadable inbox changes
-  // nothing and extends nothing. Reconcile then re-checks the CURRENT generation of every installed Skill (cache bypassed):
-  // enforce uninstalls a non-VERIFIED one (no fallback to an older generation), shadow only records would-uninstall.
-  // When trust is not ready nothing can be evaluated, so nothing is uninstalled (decisions already deny in enforce).
+  // REFRESH + RECONCILE (admin queue only; the periodic one too, design codex-profile.md E2, F1, F2, F6.4, F7.1). The inbox is
+  // offered to the trust store; a rejected or unreadable inbox changes nothing and extends nothing. Reconcile then re-checks the
+  // CURRENT generation of every installed Skill (cache bypassed). SERVABLE = VERIFIED, no nested SKILL.md, plain `name:` equal
+  // to the install name. ENFORCE: a non-VERIFIED Skill is uninstalled (name recorded in the removed-names file first, no
+  // fallback to an older generation); a VERIFIED but not servable one, or one whose evidence cannot be read, is HIDDEN (link
+  // removed, install kept); when trust is not ready every installed Skill is hidden (fail closed), and re-linked once trust
+  // is ready again, only if servable. Every uninstall, hide and restore is a durable decision-log record of event `reconcile`.
+  // SHADOW: nothing is hidden; would-uninstall / would-hide are logged once and listed in status.
   const refreshStatus: { atBootMs: number | null; result: string; reason?: string } = { atBootMs: null, result: 'never' };
   let autoUninstalled: { name: string; digest: string; verdict: string; bootMs: number }[] = [];
   let wouldUninstall: { name: string; digest: string; verdict: string }[] = [];
+  let nameMismatch: string[] = [];
+  const hidden = new Map<string, string>(); // names hidden by reconcile in this process, with the reason
+  const loggedWould = new Set<string>();
+  const removedStatus = { count: 0, full: false, evicted: 0, error: null as string | null };
   let reconcileError: string | null = null; // last reconcile failure (decisions still deny per digest; this is visibility)
+
+  const removedFile = path.join(managedDir, REMOVED_NAMES_FILE);
+  async function readRemoved(): Promise<RemovedEntry[]> {
+    let bytes: Buffer;
+    try { bytes = await readRegularFile(removedFile, 'removed names', REMOVED_NAMES_READ_LIMIT); }
+    catch (e) { if (['ENOENT', 'ENOTDIR'].includes((e as NodeJS.ErrnoException).code ?? '')) return []; throw e; }
+    const raw = parseStrictJson(bytes, REMOVED_LIMITS);
+    if (!isRecord(raw) || raw['type'] !== REMOVED_NAMES_TYPE || !Array.isArray(raw['entries'])) throw new Error('removed-names file is malformed');
+    return raw['entries'].map((e): RemovedEntry => {
+      if (!isRecord(e) || typeof e['name'] !== 'string' || typeof e['digest'] !== 'string' || typeof e['at'] !== 'string' || (e['kind'] !== 'revoked' && e['kind'] !== 'uninstalled'))
+        throw new Error('removed-names entry is malformed');
+      return { name: e['name'], digest: e['digest'], kind: e['kind'], at: e['at'] };
+    });
+  }
+  async function writeRemoved(entries: RemovedEntry[]): Promise<void> {
+    removedStatus.count = entries.length;
+    await writeFileAtomic(removedFile, Buffer.from(serializeCanonicalJson({ type: REMOVED_NAMES_TYPE, entries }), 'utf8'), 0o644);
+  }
+  /** Records name and digest before the link is removed. Never throws (revocation never fails because of this file): a failure shows in status. */
+  async function recordRemoved(name: string, digest: string, kind: RemovedEntry['kind']): Promise<void> {
+    try {
+      let entries = (await readRemoved()).filter((e) => !(e.name === name && e.digest === hex(digest)));
+      entries.push({ name, digest: hex(digest), kind, at: formatTimestamp(now()) });
+      if (entries.length > REMOVED_NAMES_CAP) { // full: the oldest entries go; blocking rests on the link, so only the message is lost
+        const drop = entries.length - REMOVED_NAMES_CAP;
+        entries = [...entries].sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0)).slice(drop);
+        removedStatus.full = true; removedStatus.evicted += drop;
+      }
+      await writeRemoved(entries);
+      removedStatus.error = null;
+    } catch (e) { removedStatus.error = e instanceof Error ? e.message.slice(0, 200) : 'failed'; }
+  }
+  async function forgetRemoved(name: string): Promise<void> {
+    try {
+      const entries = await readRemoved();
+      const kept = entries.filter((e) => e.name !== name);
+      if (kept.length !== entries.length) await writeRemoved(kept);
+      removedStatus.error = null;
+    } catch (e) { removedStatus.error = e instanceof Error ? e.message.slice(0, 200) : 'failed'; }
+  }
+
+  /** One durable decision-log record of event `reconcile`; a failure is counted like any best-effort record. */
+  async function logReconcile(result: string, skill: string | null, digest: string | null, versions?: { trustRootVersion: number; revocationsVersion: number }): Promise<void> {
+    try {
+      const log = await getLog();
+      await log.append({
+        bootMs: await bootMs(), mode, action: mode === 'shadow' ? 'observe' : 'deny', event: 'reconcile', session: null, skill,
+        digests: digest ? [digest] : [], trustRootVersion: versions?.trustRootVersion ?? null, revocationsVersion: versions?.revocationsVersion ?? null,
+        result, build: config.buildId ?? 'gate-service/v1', elapsedMs: 0,
+      }, true);
+      logHealthy = true;
+    } catch { logHealthy = false; degradedCount++; }
+  }
+  const logOnce = async (key: string, result: string, skill: string | null, digest: string | null): Promise<void> => {
+    if (loggedWould.has(key)) return;
+    loggedWould.add(key);
+    await logReconcile(result, skill, digest);
+  };
+
+  /** Why a generation is not servable (nested SKILL.md, a name that is not the install name), or null. Reads the generation that is linked. */
+  async function notServable(name: string, digest: string): Promise<string | null> {
+    const dir = path.join(generationsDir, name, hex(digest));
+    const nested = await nestedSkillFile(dir);
+    if (nested !== null) return `nested SKILL.md at ${nested}`;
+    return await plainName(dir) === name ? null : 'name-mismatch';
+  }
+  async function nestedSkillFile(dir: string): Promise<string | null> {
+    for (const rel of await readdir(dir, { recursive: true })) if (path.basename(rel).toLowerCase() === 'skill.md' && rel !== 'SKILL.md') return rel;
+    return null;
+  }
+  async function plainName(dir: string): Promise<string | null> {
+    try { return plainNameLine(await readRegularFile(path.join(dir, 'SKILL.md'), 'SKILL.md', MAX_SKILL_MD_BYTES)); } catch { return null; }
+  }
+  /** Removes a generation this install just created (sealed read-only folders need their mode back first). */
+  async function removeGeneration(name: string, digest: string): Promise<void> {
+    const gen = path.join(generationsDir, name, hex(digest));
+    for (const e of await readdir(gen, { recursive: true, withFileTypes: true }).catch(() => [])) if (e.isDirectory()) await chmod(path.join(e.parentPath, e.name), 0o755).catch(() => {});
+    await chmod(gen, 0o755).catch(() => {});
+    await rm(gen, { recursive: true, force: true });
+    await rm(`${gen}.manifest.json`, { force: true });
+  }
+  async function linkedTo(name: string, digest: string): Promise<boolean> {
+    try { return await readlink(path.join(managedDir, name)) === path.join(generationsDir, name, hex(digest)); } catch { return false; }
+  }
 
   // Never throws: a failure is recorded in status; decisions still evaluate every digest, so this is defence in depth.
   async function reconcileInstalls(): Promise<{ name: string; digest: string; verdict: string }[]> {
@@ -521,19 +625,53 @@ export function createGateService(config: GateServiceConfig): GateService {
   async function reconcileOnce(): Promise<{ name: string; digest: string; verdict: string }[]> {
     const gone: { name: string; digest: string; verdict: string }[] = [];
     wouldUninstall = [];
-    if (!trust || !admission || !(await trust.current(now())).ready) return gone;
-    for (const { name, digest } of await admission.installed()) {
+    if (!trust || !admission) return gone;
+    const installed = await admission.installed();
+    const current = await trust.current(now());
+    const versions = current.ready ? current.versions : undefined;
+    const enforce = mode !== 'shadow';
+    const mismatched: string[] = [];
+    const hide = async (name: string, digest: string, reason: string): Promise<void> => {
+      if (!enforce) { await logOnce(`would-hide|${name}|${digest}|${reason}`, `would-hide:${reason}`, name, digest); return; }
+      await hostLink(name, null);
+      if (hidden.get(name) !== reason) { hidden.set(name, reason); await logReconcile(reason.startsWith('trust-') ? `hide-all:${reason}` : `hide:${reason}`, name, digest, versions); }
+    };
+    if (!current.ready) { // fail closed: nothing can be evaluated, so nothing is served (enforce)
+      for (const { name, digest } of installed) { try { await hide(name, digest, `trust-${current.reason}`); } catch (e) { reconcileError = e instanceof Error ? e.message.slice(0, 200) : 'hide failed'; } }
+      nameMismatch = [];
+      return gone;
+    }
+    for (const { name, digest } of installed) {
       let verdict: Verdict;
-      try { verdict = await check(name, digest, undefined, true); } catch { continue; } // unreadable evidence: leave as is
-      if (verdict === 'VERIFIED') continue;
-      if (mode === 'shadow') { wouldUninstall.push({ name, digest, verdict }); continue; }
-      await hostLink(name, null); // hide it from hosts first; a failure stops here and is reported as reconcileError
-      const ms = await bootMs();
-      if ((await admission.uninstall(name, ms)).ok) {
-        gone.push({ name, digest, verdict });
-        autoUninstalled = [...autoUninstalled, { name, digest, verdict, bootMs: ms }].slice(-100);
+      try { verdict = await check(name, digest, undefined, true); }
+      catch { await hide(name, digest, 'evidence-unreadable'); continue; } // unreadable evidence: hidden, not skipped
+      if (verdict !== 'VERIFIED') {
+        if (!enforce) { wouldUninstall.push({ name, digest, verdict }); await logOnce(`would-uninstall|${name}|${digest}|${verdict}`, `would-uninstall:${verdict}`, name, digest); continue; }
+        await recordRemoved(name, digest, 'revoked'); // before the link goes
+        await hostLink(name, null); // hide it from hosts first; a failure stops here and is reported as reconcileError
+        const ms = await bootMs();
+        if ((await admission.uninstall(name, ms)).ok) {
+          gone.push({ name, digest, verdict });
+          hidden.delete(name);
+          autoUninstalled = [...autoUninstalled, { name, digest, verdict, bootMs: ms }].slice(-100);
+          await logReconcile(`uninstall:${verdict}`, name, digest, versions);
+        }
+        continue;
+      }
+      let problem: string | null;
+      try { problem = await notServable(name, digest); } catch { problem = 'unreadable'; }
+      if (problem !== null) {
+        mismatched.push(name);
+        await hide(name, digest, problem.startsWith('nested') ? 'nested-skill-md' : problem);
+        continue;
+      }
+      if (enforce && (hidden.has(name) || !(await linkedTo(name, digest)))) { // servable again (trust recovered) or never linked: restore
+        await hostLink(name, digest);
+        hidden.delete(name);
+        await logReconcile('restore', name, digest, versions);
       }
     }
+    nameMismatch = mismatched;
     return gone;
   }
 
@@ -565,7 +703,8 @@ export function createGateService(config: GateServiceConfig): GateService {
           ok: true, ready: ready && health === 'ready', mode, trust: c.ready ? 'ready' : c.reason, admission: health, root_fingerprint: config.rootFingerprint,
           revocationsExpiresAt: c.ready ? formatTimestamp(c.context.revocations.expiresAt) : null, // the remaining offline window
           log: { state: dlog && logHealthy ? 'ready' : 'degraded', degradedCount, unattributed: { ...unattributed }, rateLimited, ...(dlog?.status() ?? { segment: null, lastSeq: 0, chainBreaks: 0 }) },
-          lastRefresh: { ...refreshStatus }, reconcileError, autoUninstalled, wouldUninstall,
+          lastRefresh: { ...refreshStatus }, reconcileError, autoUninstalled, wouldUninstall, nameMismatch: [...nameMismatch], hidden: [...hidden.keys()],
+          removedNames: { count: removedStatus.count, full: removedStatus.full, evicted: removedStatus.evicted, error: removedStatus.error },
         };
       }
       case 'accept-trust': {
@@ -592,19 +731,47 @@ export function createGateService(config: GateServiceConfig): GateService {
         });
         if (!r.ok) return { ok: false, error: `${r.reason}: ${r.detail}` };
         const digest = r.manifest.treeDigest;
+        // Name and nested-file checks (codex-profile.md C4, E3, E6, F6.2): on the generation that will be linked, before the
+        // certificate is stored and before anything is linked. A generation this call created is removed again.
+        const gen = path.join(generationsDir, name, hex(digest));
+        let refusal: string | null = null;
+        const nested = await nestedSkillFile(gen).catch(() => 'unreadable');
+        if (nested !== null) refusal = `the Skill contains another SKILL.md at ${nested}; a nested Skill would be loaded without being approved`;
+        else if (await plainName(gen) !== name) refusal = NAME_REFUSAL(name);
+        if (refusal !== null) {
+          if (r.created) await removeGeneration(name, digest).catch(() => {});
+          return { ok: false, error: refusal };
+        }
         await storeCertificate(name, digest, cert);
         await hostLink(name, digest); // hosts can load it from here on
         const p = await stamped((ms) => admission!.publish(name, digest, ms)); // after the generation is visible
-        if (p.ok) return { ok: true, digest, created: r.created };
+        if (p.ok) { hidden.delete(name); await forgetRemoved(name); return { ok: true, digest, created: r.created }; }
         await hostLink(name, null).catch(() => {}); // not recorded: hide it rather than serve unrecorded bytes
         return { ok: false, error: `publish refused: ${p.reason}` };
       }
       case 'uninstall': {
         onlyKeys(raw, ['skill_name']);
         const name = validateSkillName(raw['skill_name']);
+        const there = (await admission.installed()).find((i) => i.name === name);
+        if (there) await recordRemoved(name, there.digest, 'uninstalled'); // before the link goes
         await hostLink(name, null); // hidden from hosts before the record changes
         const u = await admission.uninstall(name, await bootMs());
+        hidden.delete(name);
         return u.ok ? { ok: true } : { ok: false, error: `uninstall refused: ${u.reason}` };
+      }
+      case 'prune-removed': { // drops removed-names entries older than N days (age only; blocking rests on the link)
+        const keys = Object.hasOwn(raw, 'older_than_days') ? ['older_than_days'] : [];
+        onlyKeys(raw, keys);
+        const days = keys.length === 0 ? 90 : raw['older_than_days'];
+        if (typeof days !== 'number' || !Number.isInteger(days) || days < 7) return { ok: false, error: 'older_than_days must be at least 7' };
+        const cutoff = now().getTime() - days * 86_400_000;
+        const entries = await readRemoved().catch(() => undefined);
+        if (!entries) return { ok: false, error: 'removed-names file is unreadable or malformed' };
+        const kept = entries.filter((e) => !(Date.parse(e.at) < cutoff));
+        if (kept.length !== entries.length) await writeRemoved(kept);
+        else removedStatus.count = entries.length;
+        if (kept.length < REMOVED_NAMES_CAP) removedStatus.full = false;
+        return { ok: true, pruned: entries.length - kept.length, remaining: kept.length };
       }
       case 'refresh': {
         onlyKeys(raw, []);
@@ -641,6 +808,10 @@ export function createGateService(config: GateServiceConfig): GateService {
         await exclusive(sweep).catch(() => {});
         reaper = setInterval(() => { void exclusive(sweep).catch(() => {}); }, 60_000);
         reaper.unref();
+        reconciler = setInterval(() => { void serial(reconcileInstalls).catch(() => {}); }, config.reconcileIntervalMs ?? 60_000);
+        reconciler.unref();
+        await readRemoved().then((e) => { removedStatus.count = e.length; }, () => {});
+        await serial(reconcileInstalls).catch(() => {}); // a restart with stale trust must hide at once
         if (config.inboxDir) {
           refresher = setInterval(() => { void serial(refreshNow).catch(() => {}); }, config.refreshIntervalMs ?? 60_000);
           refresher.unref();
@@ -668,6 +839,7 @@ export function createGateService(config: GateServiceConfig): GateService {
     async stop() {
       if (reaper) clearInterval(reaper);
       if (refresher) clearInterval(refresher);
+      if (reconciler) clearInterval(reconciler);
       await dlog?.close().catch(() => {});
       await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => { s.close(() => r()); for (const c of live) c.destroy(); })));
     },

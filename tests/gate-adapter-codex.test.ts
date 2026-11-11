@@ -588,7 +588,8 @@ test('codex hook: admin Skills the service publishes (links to generations) are 
   silent(await host.hook([cfg, 'enforce', UID], submit(`use [$alpha](${managed}/alpha/SKILL.md)`)));
   denied(await host.hook([cfg, 'enforce', UID], submit('use $alpha')), MSG_MASKED);
   await revoke(digest); // enforce: the service removes the link, so the Skill is gone from the admin root
-  assert.deepEqual(await readdir(managed), []);
+  assert.deepEqual((await readdir(managed)).filter((e) => !e.startsWith('.')), []);
+  assert.ok((await readdir(managed)).includes('.mago-ski-removed-names.json')); // the service records what it removed (C3)
 });
 
 test('codex hook: commit 1 security rules hold with an empty walk (H1, H2) and for every tool with a command', async (t) => {
@@ -654,8 +655,8 @@ test('codex hook: a digest mention is asked as the install name, and blocked onc
   silent(await run(`use $${digest.slice('sha256:'.length)}`)); // digest folder name: asked as `alpha`, VERIFIED
   await revoke(digest);
   assert.deepEqual((await readdir(managed)).filter((e) => !e.startsWith('.')), []);
-  // Before the service writes a removed-names file (C3) the name is simply unknown, so it passes unasked.
-  silent(await run(`use $${digest.slice('sha256:'.length)}`));
+  denied(await run(`use $${digest.slice('sha256:'.length)}`), MSG_NOT_ADMIN); // the removed digest is never asked
+  denied(await run('use $alpha'), MSG_NOT_ADMIN); // nor the removed name
 });
 
 test('codex hook: a SKILL.md that is not plain, unreadable or colliding makes the walk incomplete (E4)', { skip: LINUX_ONLY }, async (t) => {
