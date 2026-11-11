@@ -293,3 +293,41 @@ Replies are `{ v: 1, ok: true, … }` or `{ v: 1, ok: false, error }`.
   - enforce mode changes Claude Code for every user of the machine, because it applies the managed locks (managed hooks only, strict plugin customisation, no bundled Skills, plugins off);
   - Node must be installed system-wide and root-owned, so a per-user Node (nvm, volta) is refused by design.
 - **`docs/hosts/claude-code.md`** names the tested version (2.1.318) and the interactive-session status (stream 4).
+
+## Decisions (v3)
+
+These decisions resolve the v2 confirmation. Where they differ from v1 or v2, v3 wins.
+
+1. **Shared files (N1).** The template unit `mago-ski-gate@.service` is shared by both hosts. It is recorded in a shared manifest, `/etc/mago-ski/gate/shared.manifest.json`, with the same format as G5. A file counts as ours when its SHA-256 matches its entry in either the host's manifest or the shared manifest. Re-running `gate init` for either host rewrites the template, because it is identical for every host, and updates the shared manifest.
+2. **Folder modes (N2).** Each leaf folder gets its own mode:
+
+   | Folder | Mode |
+   |---|---|
+   | `state_dir` | `0700` |
+   | `generations_dir` | `0755` |
+   | `managed_dir` | `0755` |
+   | `/etc/mago-ski/gate` | `0755` |
+
+   Hosts run as the employee and must be able to follow `managed_dir` links into `generations_dir`. `generations.ts` already makes their contents `0555` and `0444`.
+3. **Write order and failure (B7).** `applyInit` works in this order:
+   1. Compute the whole plan, and refuse on any foreign file unless `--force` is given.
+   2. With `--force`, rename the foreign files aside.
+   3. Create the folders.
+   4. Write each file with `writeFileAtomic`, in this order: instance config, hook config, unit and drop-in, then the host config file **last**.
+   5. Write the manifests last of all.
+
+   If a write fails after a foreign file was renamed aside, `applyInit` renames that file back before exiting non-zero. The host is then never left without its config. A file from a failed run is not in the manifest, so the next run treats it as foreign, and the message says to use `--force` after checking it.
+4. **Test seam for the trust check (B9).**
+   - `checkRootOwnedTree(path, uid, stopAt = '/')` stops walking parents at `stopAt`. Production passes `/`. Tests pass their temporary base, and skip the `process.execPath` chain with `checkExec: false`.
+   - Service and doctor tests are marked `skip: LINUX_ONLY`.
+   - Pure planning tests (`planInit` output, refusals, manifest logic) run on every platform, because `planInit` takes `platform` as a parameter.
+5. **`gate run` when not ready (B8).** It stays up and is not ready: `start()` keeps listening, as today, so `status` can report `startError`. It prints the error once to stderr at start. It exits 1 only when `start()` throws.
+
+   `doctor` fails the service check unless `ok`, `ready` and `log.state === 'ready'` are all true.
+6. **Codex hook config.** It adds `admin_root` (= `managed_dir`) and `skill_roots` (`[]` until stream 2) to the shared keys. These are the keys `codex.ts` `loadCodexConfig` reads.
+7. **`--host-exe`.** It can be repeated, and its values form `host_exes`.
+8. **`ExecStart` paths.** The paths must match `SAFE_PATH` (G3), so they need no quoting. `gate init` refuses otherwise.
+9. **Help.** A bare `mago-ski gate` or `mago-ski gate --help` prints the gate command list.
+10. **Version and packaging.** `build_id` reads `package.json`. The version bump to 0.4.0 belongs to the release PR, not to this stream. `docs/gate-setup.md` is a repository doc, not a packaged file.
+11. **Docs scope for Codex (B11).** Stream 1's docs describe the Codex host as audit-level, and `capabilities.md` keeps "Blocking in Claude Code and Codex" under *Built, not released* for Codex. Claude Code moves to *works today*. Stream 2 rewrites the Codex wording from its own design.
+12. **Further `doctor` checks.** `doctor` also checks `<install>/package.json` and `/usr/bin/env` with the same ownership rule (B5 residual).
