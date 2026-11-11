@@ -399,3 +399,23 @@ Test: `gate init` on a home with `.system`, then `doctor`: the `.system` check p
    - shadow mode: reconcile hides nothing, and an unapproved mention is logged and not blocked.
 
    Differential fuzzing against the loader (missing test 9) is rejected. The loader takes the name from the same parser the oracle already calls.
+
+### F7. Consistency fixes (v4 confirmation)
+
+1. **Name mismatches.** F6.4 overrides E6's "No automatic action is taken" and C4's "not removed automatically". In enforce mode, reconcile **hides** a mismatched install, and it is still reported in `nameMismatch`. In shadow mode, it is only reported.
+2. **D6's menu and expiry wording.**
+   - D6's "the menu route therefore never offers a stale admin Skill" is replaced by F2's windows.
+   - D6's expiry uninstall is enforce-only, as F6.4 says.
+   - In C6, "approved Skills that changed, expired or were revoked (blocked …)" applies to typed and linked uses. Menu picks follow F2.
+   - A revocation's time bound is operational: it takes effect when the administrator runs `gate trust` or `gate refresh`. The 60 s expiry bound holds when the admin queue is idle, and is otherwise delayed by the running admin command.
+3. **The service is down versus hooks failing open.** These are two different cases:
+   - The hook runs but cannot reach the decision socket. The merged hook then returns a block: it fails closed.
+   - The hook process crashes, times out or is killed. Codex then continues: it fails open. This is C6 row 2.
+4. **Fuzzing rejected: the corrected premise.** A `name:` comes from `parse_skill_frontmatter_metadata`, which the oracle calls. The default name for a Skill without `name:` comes from the folder name in `host.rs`. That case is covered by the digest key (F6.1) and its live test, not by the oracle. Install refuses Skills without a plain `name:` in any case (C4).
+5. **Dot-prefixed folders.**
+   - If the live test shows that Codex loads a dot-prefixed Skill folder, the adapter counts dot folders in user, `CODEX_HOME` and repo roots toward `found`. It keeps skipping them only in the admin root, which holds `.mago-ski-*` files.
+   - `doctor` then FAILs on them like any other user Skill.
+   - If Codex does not load them, the skip stays everywhere.
+
+   The coder implements whichever the live run shows, and cites the run. Until a live run is possible, the default is to **count** them, which fails closed.
+6. **Listed `--codex-home` folders.** `.system` in a listed `CODEX_HOME` moves to `<CODEX_HOME>/mago-ski-backup/system-<UTC>`, in the same way as a home.
