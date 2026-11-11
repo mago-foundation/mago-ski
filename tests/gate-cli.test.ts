@@ -1,17 +1,18 @@
 // `mago-ski gate ...` (design docs/design/gate-cli.md). Planning tests run on every platform (planInit takes `platform`);
 // anything that starts the service or reads /proc is LINUX_ONLY. The tree is a temporary `base`, the owner the test user.
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runCli, type GateCliSeams } from '../src/cli.ts';
+import { serializeCanonicalJson } from '../src/canonical-json.ts';
 import { claudeCodeManagedSettings } from '../src/gate/adapters/claude-code-settings.ts';
 import { codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
 import { askAdmin, TIMEOUT_MESSAGE, type AskAdmin } from '../src/gate/admin-client.ts';
 import { instancePaths, instanceToServiceConfig, parseInstanceConfig, readInstanceConfig, type Host } from '../src/gate/instance.ts';
 import { createGateService } from '../src/gate/service.ts';
-import { applyInit, checkRootOwnedChain, checkRootOwnedTree, doctor, planInit, type InitOptions } from '../src/gate/setup.ts';
+import { applyInit, checkRootOwnedChain, checkRootOwnedTree, defaultHostExe, doctor, planInit, type InitOptions } from '../src/gate/setup.ts';
 import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
 
 const UID = process.getuid!();
@@ -195,13 +196,16 @@ test('a foreign host file is refused before any write, named, and --force moves 
   assert.ok(r.backups.some((b) => b.from === p.hostConfig && b.to === `${p.hostConfig}.mago-ski-bak-20261111T102030Z`));
   assert.equal(await readFile(`${p.hostConfig}.mago-ski-bak-20261111T102030Z`, 'utf8'), '{"theirs":true}\n');
   assert.match(await readFile(p.hostConfig, 'utf8'), /hooks/u);
+  assert.equal(await readFile(`${p.hook}.mago-ski-bak-20261111T102030Z`, 'utf8'), 'mine\n');
+  assert.equal(await readFile(p.hook, 'utf8'), plan.files.find((f) => f.path === p.hook)!.content);
+  assert.equal(await readFile(p.hostConfig, 'utf8'), plan.files.find((f) => f.path === p.hostConfig)!.content);
 
   // an edited file that mago-ski wrote is no longer ours either
   await writeFile(p.hostConfig, '{"edited":true}\n');
   assert.deepEqual((await planInit(w.opts('claude-code'))).foreign, [p.hostConfig]);
 });
 
-test('a failed write puts the moved-aside file back and leaves no manifest', async (t) => {
+test('a failed --force run keeps the host config in place, restores what it did not write and says which is which', async (t) => {
   const w = await world(t);
   const p = instancePaths('claude-code', w.base);
   await mkdir(path.dirname(p.hostConfig), { recursive: true });
@@ -209,10 +213,114 @@ test('a failed write puts the moved-aside file back and leaves no manifest', asy
   await mkdir(path.dirname(p.dropinDir), { recursive: true });
   await writeFile(p.dropinDir, 'a file where a folder must go\n');
   const plan = await planInit(w.opts('claude-code'));
-  await assert.rejects(applyInit(plan, { force: true, base: w.base, rootUid: UID }), /gate init failed.*put back/su);
+  await assert.rejects(applyInit(plan, { force: true, base: w.base, rootUid: UID }), /gate init failed.*Original put back, not changed: .*managed-settings\.json/su);
   assert.equal(await readFile(p.hostConfig, 'utf8'), 'theirs\n');
   assert.equal(await exists(p.manifest), false);
   assert.equal((await readdir(path.dirname(p.hostConfig))).some((n) => n.includes('mago-ski-bak')), false);
+});
+
+test('a failure after the host config was replaced keeps the new content, keeps the backup and lists new, restored and kept files', async (t) => {
+  const w = await world(t);
+  const p = instancePaths('claude-code', w.base);
+  await mkdir(path.dirname(p.hostConfig), { recursive: true });
+  await writeFile(p.hostConfig, 'theirs\n');
+  await mkdir(path.dirname(p.hook), { recursive: true });
+  await writeFile(p.hook, 'hook theirs\n');
+  const plan = await planInit(w.opts('claude-code'));
+  // the manifests are written last: a folder where the shared manifest goes makes the run fail after the host config was replaced
+  await mkdir(p.sharedManifest);
+  const bad = await planInit(w.opts('claude-code'));
+  assert.ok(bad.foreign.includes(p.sharedManifest)); // an existing manifest that is not a regular file is foreign too
+  assert.deepEqual(plan.foreign.sort(), [p.hook, p.hostConfig].sort());
+  await assert.rejects(applyInit({ ...plan, foreign: [...plan.foreign] }, { force: true, base: w.base, rootUid: UID, now: () => new Date('2026-11-11T10:20:30Z') }), (e: Error) =>
+    /gate init failed/u.test(e.message) && /New files written/u.test(e.message) && /Replaced by new content; the original stays as a backup/u.test(e.message) && !/put back/u.test(e.message));
+  assert.equal(await readFile(`${p.hostConfig}.mago-ski-bak-20261111T102030Z`, 'utf8'), 'theirs\n');
+  assert.equal(await readFile(p.hostConfig, 'utf8'), plan.files.find((f) => f.path === p.hostConfig)!.content);
+  assert.equal(await readFile(`${p.hook}.mago-ski-bak-20261111T102030Z`, 'utf8'), 'hook theirs\n');
+  assert.equal(await readFile(p.hook, 'utf8'), plan.files.find((f) => f.path === p.hook)!.content);
+});
+
+test('applyInit checks every planned folder and its ancestors before it renames or writes anything', async (t) => {
+  const w = await world(t);
+  const p = instancePaths('claude-code', w.base);
+  await mkdir(path.dirname(p.hostConfig), { recursive: true });
+  await writeFile(p.hostConfig, 'theirs\n');
+  const plan = await planInit(w.opts('claude-code'));
+  assert.deepEqual(plan.foreign, [p.hostConfig]);
+  // a chain owned by another uid: refused, the foreign file is not touched, no backup, nothing written
+  await assert.rejects(applyInit(plan, { force: true, base: w.base, rootUid: UID + 1 }), /must be owned by root/u);
+  assert.equal(await readFile(p.hostConfig, 'utf8'), 'theirs\n');
+  assert.equal((await readdir(path.dirname(p.hostConfig))).some((n) => n.includes('mago-ski-bak')), false);
+  assert.equal(await exists(p.instance), false);
+  // a user-owned (here: group-writable) existing folder: refused before any write, and not chmodded
+  await mkdir(p.configDir, { recursive: true });
+  await chmod(p.configDir, 0o775);
+  await assert.rejects(applyInit(plan, { force: true, base: w.base, rootUid: UID }), /etc\/mago-ski\/gate must be owned by root/u);
+  assert.equal((await stat(p.configDir)).mode & 0o777, 0o775);
+  assert.equal(await readFile(p.hostConfig, 'utf8'), 'theirs\n');
+  assert.equal(await exists(p.instance), false);
+  assert.equal(await exists(path.join(p.stateRoot, 'state')), false);
+  // a writable ancestor of a folder that does not exist yet
+  await chmod(p.configDir, 0o755);
+  await mkdir(path.join(w.base, 'var', 'lib'), { recursive: true });
+  await chmod(path.join(w.base, 'var', 'lib'), 0o777);
+  await assert.rejects(applyInit(plan, { force: true, base: w.base, rootUid: UID }), /var\/lib must be owned by root/u);
+  assert.equal(await exists(p.instance), false);
+});
+
+test('an existing state folder at 0755 becomes 0700 (fchmod)', async (t) => {
+  const w = await world(t);
+  const p = instancePaths('claude-code', w.base);
+  await mkdir(p.stateDir, { recursive: true });
+  await chmod(p.stateDir, 0o755);
+  await applyInit(await planInit(w.opts('claude-code')), { base: w.base, rootUid: UID });
+  assert.equal((await stat(p.stateDir)).mode & 0o777, 0o700);
+});
+
+test('the shared manifest merges entries and an unreadable manifest counts as foreign', async (t) => {
+  const w = await world(t);
+  const p = instancePaths('claude-code', w.base);
+  await mkdir(p.configDir, { recursive: true });
+  await writeFile(p.sharedManifest, JSON.stringify({ v: 1, files: [{ path: '/other/unit', sha256: `sha256:${'00'.repeat(32)}` }] }));
+  const plan = await planInit(w.opts('claude-code'));
+  assert.ok(plan.foreign.includes(p.sharedManifest)); // not canonical JSON: not ours
+  await writeFile(p.sharedManifest, serializeCanonicalJson({ v: 1, files: [{ path: '/other/unit', sha256: `sha256:${'00'.repeat(32)}` }] }));
+  const merged = await planInit(w.opts('claude-code'));
+  const entry = JSON.parse(merged.files.find((f) => f.role === 'shared-manifest')!.content) as { files: { path: string }[] };
+  assert.deepEqual(entry.files.map((f) => f.path).sort(), ['/other/unit', p.unit].sort());
+});
+
+test('host binary choice: root PATH only, name must start with the host, ELF and root-owned; the summary prints host_exes', async (t) => {
+  const w = await world(t);
+  // a `claude` that is really python3 (a symlink to a differently named ELF): refused without --host-exe
+  const dir = path.join(w.base, 'usr', 'sbin');
+  await mkdir(dir, { recursive: true });
+  const python = path.join(dir, 'python3');
+  await writeFile(python, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 0]));
+  const link = path.join(dir, 'claude');
+  await symlink(python, link);
+  const refused = await planInit(w.opts('claude-code', { hostExes: undefined as never, resolveHostExe: () => link }));
+  assert.match(refused.problems.join('\n'), /python3.*is not named claude\*.*--host-exe/u);
+  // given explicitly, the same binary is accepted
+  const explicit = await planInit(w.opts('claude-code', { hostExes: [link] }));
+  assert.deepEqual(explicit.problems, []);
+  assert.deepEqual(explicit.hostExes, [python]);
+  // a versioned name is fine by default
+  const versioned = path.join(dir, 'claude-2.1');
+  await writeFile(versioned, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 0]));
+  assert.deepEqual((await planInit(w.opts('claude-code', { hostExes: undefined as never, resolveHostExe: () => versioned }))).problems, []);
+  // the default lookup uses root's PATH, never SUDO_USER
+  const oldPath = process.env['PATH'];
+  const oldSudo = process.env['SUDO_USER'];
+  process.env['PATH'] = '/nonexistent-dir';
+  process.env['SUDO_USER'] = 'nobody';
+  try { assert.throws(() => defaultHostExe('codex'), /was not found on root's PATH; pass --host-exe PATH/u); }
+  finally { process.env['PATH'] = oldPath; if (oldSudo === undefined) delete process.env['SUDO_USER']; else process.env['SUDO_USER'] = oldSudo; }
+  // the CLI prints the chosen binaries, in text and in JSON
+  const text = await run(w, ['gate', 'init', '--host', 'claude-code', '--root-fingerprint', FP, '--host-exe', w.exe]);
+  assert.ok(text.stdout.includes(`host binaries: ${w.exe}`));
+  const json = await run(w, ['gate', 'init', '--host', 'codex', '--root-fingerprint', FP, '--host-exe', w.exe, '--json']);
+  assert.deepEqual(JSON.parse(json.stdout).host_exes, [w.exe]);
 });
 
 /* --------------------------------------------------------------------------------------- trust of the install */
@@ -307,6 +415,19 @@ test('gate CLI: help, usage errors, non-Linux and non-root refusals, --print wri
   assert.match(printed.stdout, /# .*\/etc\/claude-code\/managed-settings\.json \(mode 0644\)/u);
   assert.match(printed.stdout, /# .*claude-code\.manifest\.json/u);
   assert.equal(await exists(path.join(w.base, 'etc')), false);
+  // --print with a plan that init would refuse: everything is printed, then exit 1
+  const script = path.join(w.base, 'usr', 'bin', 'script');
+  await writeFile(script, '#!/bin/sh\n');
+  const bad = await run(w, ['gate', 'init', '--host', 'claude-code', '--root-fingerprint', FP, '--host-exe', script, '--print']);
+  assert.equal(bad.result, 1);
+  assert.match(bad.stdout, /# .*managed-settings\.json/u);
+  assert.match(bad.stderr, /warning: .*not an ELF/u);
+  // --force and --print belong to gate init only
+  for (const flag of ['--force', '--print']) {
+    await assert.rejects(run(w, ['gate', 'doctor', '--host', 'codex', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
+    await assert.rejects(run(w, ['gate', 'run', '--host', 'codex', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
+    await assert.rejects(runCli(['verify-all', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
+  }
   const asJson = await run(w, ['gate', 'init', '--host', 'codex', '--root-fingerprint', FP, '--host-exe', w.exe, '--print', '--json']);
   assert.equal(JSON.parse(asJson.stdout).length, 7);
   assert.equal(await exists(path.join(w.base, 'etc')), false);
@@ -364,6 +485,12 @@ test('gate trust, install, uninstall, refresh and status send the right requests
   const status = await go(['status']);
   assert.match(status.stdout, /mode: shadow\nready: true\ntrust: ready/u);
   assert.equal(JSON.parse((await go(['status', '--json'])).stdout).trust, 'ready');
+  assert.equal(status.result, 0);
+  const notReady = stub(() => ({ v: 1, ok: true, mode: 'shadow', ready: false, trust: 'unavailable', revocationsExpiresAt: null, log: { state: 'degraded' } }));
+  const down = await run(w, ['gate', 'status', '--host', 'claude-code'], { ask: notReady.ask });
+  assert.equal(down.result, 1);
+  assert.match(down.stdout, /ready: false/u);
+  assert.equal((await run(w, ['gate', 'status', '--host', 'claude-code', '--json'], { ask: notReady.ask })).result, 1);
   await assert.rejects(run(w, ['gate', 'status', '--host', 'claude-code'], { ask: ok.ask, uid: UID + 1 }), /needs root/u);
   await assert.rejects(run(w, ['gate', 'trust', '--host', 'claude-code', '--trust-root', trust, '--revocations', rev], { ask: ok.ask, uid: UID + 1 }), /run this with sudo/u);
 
@@ -377,7 +504,7 @@ test('gate trust, install, uninstall, refresh and status send the right requests
   assert.equal(r2.result, 2);
   assert.match(r2.stderr, /no inbox configured/u);
   await assert.rejects(run(w, ['gate', 'refresh', '--host', 'claude-code'], { ask: async () => { throw new Error('cannot reach the gate'); } }), /cannot reach the gate/u);
-  await assert.rejects(run(w, ['gate', 'refresh', '--host', 'codex'], { ask: ok.ask }), /ENOENT/u); // no instance config for that host
+  await assert.rejects(run(w, ['gate', 'refresh', '--host', 'codex'], { ask: ok.ask }), /no gate instance for codex; run mago-ski gate init --host codex/u); // no instance config for that host
 });
 
 /* ------------------------------------------------------------------------------------ the service round trips */
@@ -427,6 +554,7 @@ test('askAdmin round trip against a started service; errors and the deadline', {
 test('doctor against a started test layout: PASS, then each kind of FAIL and the SKIPs', { skip: LINUX_ONLY }, async (t) => {
   const w = await installed(t);
   const org = await setupOrg(t, { now: new Date() });
+  await applyInit(await planInit(w.opts('claude-code', { rootFingerprint: org.rootKeyId })), { base: w.base, rootUid: UID }); // the instance names this org's root
   const dopts = { base: w.base, rootUid: UID, installRoot: w.installRoot, nodePath: w.seams.nodePath!, envPath: w.seams.envPath!, checkExec: false, somaxconn: async () => 4096, procMounts: async () => 'proc /proc proc rw 0 0\n' };
   const byName = (cs: Awaited<ReturnType<typeof doctor>>) => Object.fromEntries(cs.map((c) => [c.check, c]));
 
@@ -443,7 +571,6 @@ test('doctor against a started test layout: PASS, then each kind of FAIL and the
   const svc = createGateService({ ...instanceToServiceConfig(cfg, UID), rootFingerprint: org.rootKeyId, hostExes: [process.execPath] });
   await svc.start();
   t.after(() => svc.stop());
-  // the fingerprint in the instance config differs from the service's here only because the test org is generated: align the file
   const up = byName(await doctor('claude-code', dopts));
   assert.equal(up['service']!.result, 'PASS', up['service']!.detail);
   assert.equal(up['trust']!.result, 'FAIL'); // not accepted yet
@@ -452,6 +579,48 @@ test('doctor against a started test layout: PASS, then each kind of FAIL and the
   assert.equal(trusted['trust']!.result, 'PASS');
   assert.ok(Object.values(trusted).every((c) => c.result !== 'FAIL'), JSON.stringify(trusted));
   assert.equal(trusted['node']!.result, 'SKIP');
+  for (const name of ['unit', 'drop-in', 'hook config', 'root fingerprint', 'host config'])
+    assert.equal(trusted[name]!.result, 'PASS', name);
+
+  // another owner: every ownership check FAILs (rootUid + 1), and the service queries are skipped when the admin socket is not trusted
+  const foreign = byName(await doctor('claude-code', { ...dopts, rootUid: UID + 1 }));
+  assert.equal(foreign['instance config']!.result, 'FAIL');
+  assert.equal(foreign['managed folder']!.result, 'SKIP');
+  const owned = byName(await doctor('claude-code', { ...dopts, rootUid: UID + 1, uid: UID + 1 }));
+  assert.equal(owned['instance config']!.result, 'FAIL');
+  assert.match(owned['instance config']!.detail, /must be owned by root/u);
+  const adminDir = cfg.admin_socket_dir;
+  await chmod(adminDir, 0o750);
+  const loose = byName(await doctor('claude-code', dopts));
+  assert.equal(loose['admin socket']!.result, 'FAIL');
+  assert.match(loose['admin socket']!.detail, /mode 0700/u);
+  assert.equal(loose['service']!.result, 'SKIP');
+  assert.equal(loose['trust']!.result, 'SKIP');
+  await chmod(adminDir, 0o700);
+
+  // the unit, the drop-in and the hook config are compared with the plan; a symlink is not a root-owned regular file
+  const sourceUnit = await readFile(w.p.unit, 'utf8');
+  await writeFile(w.p.unit, `${sourceUnit}# edited\n`);
+  await writeFile(w.p.dropin, '[Service]\nReadWritePaths=/\n');
+  const edited = byName(await doctor('claude-code', dopts));
+  assert.equal(edited['unit']!.result, 'FAIL');
+  assert.equal(edited['drop-in']!.result, 'FAIL');
+  await writeFile(w.p.unit, sourceUnit);
+  await applyInit(await planInit(w.opts('claude-code', { rootFingerprint: org.rootKeyId })), { base: w.base, rootUid: UID, force: true });
+  const hookText = await readFile(w.p.hook, 'utf8');
+  await rm(w.p.hook);
+  await symlink(path.join(w.base, 'elsewhere.json'), w.p.hook);
+  await writeFile(path.join(w.base, 'elsewhere.json'), hookText);
+  const linked = byName(await doctor('claude-code', dopts));
+  assert.equal(linked['hook config']!.result, 'FAIL');
+  assert.match(linked['hook config']!.detail, /symlink/u);
+  await rm(w.p.hook);
+  await writeFile(w.p.hook, hookText);
+
+  // the service's root fingerprint must match the instance config
+  const wrongRoot = await doctor('claude-code', { ...dopts, ask: async () => ({ v: 1, ok: true, ready: true, mode: 'shadow', trust: 'ready', root_fingerprint: FP, log: { state: 'ready' } }) });
+  assert.equal(byName(wrongRoot)['root fingerprint']!.result, 'FAIL');
+  assert.match(byName(wrongRoot)['root fingerprint']!.detail, /instance config says/u);
 
   // not root: the service checks are skipped
   const user = byName(await doctor('claude-code', { ...dopts, uid: UID + 1 }));
@@ -469,7 +638,7 @@ test('doctor against a started test layout: PASS, then each kind of FAIL and the
   assert.equal(broken['proc mount']!.result, 'WARN');
   await chmod(cfg.managed_dir, 0o755);
 
-  const other = await doctor('claude-code', { ...dopts, ask: async () => ({ v: 1, ok: true, ready: true, mode: 'enforce', trust: 'ready', log: { state: 'ready' } }) });
+  const other = await doctor('claude-code', { ...dopts, ask: async () => ({ v: 1, ok: true, ready: true, mode: 'enforce', trust: 'ready', root_fingerprint: org.rootKeyId, log: { state: 'ready' } }) });
   assert.equal(byName(other)['mode']!.result, 'FAIL');
   assert.match(byName(other)['mode']!.detail, /service runs in enforce/u);
 
@@ -524,5 +693,13 @@ test('gate run: serves the admin socket and stops on request; start errors are r
   assert.match(done2.stderr, /running but not ready: .*unsafe permissions/u);
 
   // an instance config that is not there: refused before anything starts
-  await assert.rejects(run(w, ['gate', 'run', '--host', 'codex'], { stop: Promise.resolve() }), /ENOENT/u);
+  await assert.rejects(run(w, ['gate', 'run', '--host', 'codex'], { stop: Promise.resolve() }), /no gate instance for codex; run mago-ski gate init --host codex/u);
+});
+
+test('gate run: when start() throws, the service is stopped and the exit code is 1', { skip: LINUX_ONLY }, async (t) => {
+  const w = await world(t);
+  await applyInit(await planInit(w.opts('claude-code')), { base: w.base, rootUid: UID }); // no run folder: the service cannot create its socket folders
+  const done = await run(w, ['gate', 'run', '--host', 'claude-code'], { stop: new Promise<void>(() => {}) });
+  assert.equal(done.result, 1);
+  assert.match(done.stderr, /cannot start/u);
 });

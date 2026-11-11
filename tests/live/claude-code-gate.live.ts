@@ -17,12 +17,10 @@ import { realpathSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { claudeCodeManagedSettings } from '../../src/gate/adapters/claude-code-settings.ts';
 import type { Mode } from '../../src/policy.ts';
-import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
 const CLAUDE = realpathSync(process.env.CLAUDE_BIN ?? execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim());
-const HOOK_ENTRY = path.join(REPO, 'src/gate/adapters/claude-code-hook.ts');
 const MANAGED_ROOT = '/etc/claude-code';
 const MANAGED_SKILLS = path.join(MANAGED_ROOT, '.claude', 'skills');
 
@@ -105,18 +103,9 @@ type World = GateWorld & { base: string; unmount: () => Promise<void> };
 
 async function world(base: string): Promise<World> {
   const root = await liveRoot('mago-live-cc-');
-  const unmount = await overlay(MANAGED_ROOT, path.join(root, 'etc-claude-code'));
-  await mkdir(path.join(MANAGED_ROOT, '.claude'), { mode: 0o755 });
-  const w = await gateWorld(root, {
-    hostExe: CLAUDE, managedDir: MANAGED_SKILLS,
-    async configure(service, mode, state) {
-      // The hook's config and the managed settings, as an administrator would install them.
-      const config = path.join(state, 'claude-code-hook.json');
-      await writeFile(config, JSON.stringify({ v: 1, socket: service.sockets.decision, mode, host_exes: [CLAUDE], client_deadline_ms: 1500, self_deadline_ms: 3000 }), { mode: 0o644 });
-      const settings = claudeCodeManagedSettings({ mode, nodePath: NODE, hookEntry: HOOK_ENTRY, configPath: config, hookTimeoutSec: 5, selfDeadlineMs: 3000 });
-      await writeFile(path.join(MANAGED_ROOT, 'managed-settings.json'), JSON.stringify(settings, null, 2), { mode: 0o644 });
-    },
-  });
+  // gate init writes the hook config and the managed settings into <base>/etc/claude-code; the host reads them through this bind mount.
+  const unmount = await overlay(MANAGED_ROOT, path.join(liveBase(root), 'etc', 'claude-code'));
+  const w = await gateWorld(root, { host: 'claude-code', hostExe: CLAUDE });
   return Object.assign(w, { base, unmount });
 }
 
