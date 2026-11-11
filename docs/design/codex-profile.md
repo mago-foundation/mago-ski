@@ -246,3 +246,76 @@ The guide states this as a side effect of the profile, and a live test covers it
 - **Homes and `CODEX_HOME`.** `--user-home DIR` and `--codex-home DIR` can both be repeated. `--codex-home` covers a non-default `CODEX_HOME`. The guide says the profile covers only listed homes and default or listed `CODEX_HOME`s.
 - **Before C2.1 merges,** the coder confirms in `ext/skills/src/loader/host.rs` that the default name comes from the realpath's basename, and cites the line. A live test confirms `$<digest>` is the name Codex gives a Skill without a `name:` line.
 - **Tests.** C7 plus: a name different from the install name; null names; BOM; a bare `\r` and CRLF; a stale `.system`; `project_root_markers` from a subdirectory; the menu route (D1); a full removed-names file; prune; reinstall with the same and a new digest.
+
+## Decisions (v3)
+
+These decisions resolve the v2 confirmation. Where they differ from earlier sections, v3 wins.
+
+### E1. The menu route: detected, optionally narrowed, not prevented (HIGH-1)
+
+- **The route.** A Skill folder an employee creates after a check is listed by Codex, and picking it from Codex's menu reaches the model with no hook involved. mago-ski can detect this, but cannot prevent it inside Codex.
+- **C6 and D1 wording.** C6 and D1 are reworded to say exactly that. The guide puts this first, as the main residual.
+- **Detection:**
+  - `gate doctor` FAILs (D1), and can be run on a timer by the organisation.
+  - The GitHub Action checks repositories.
+  - The decision log has no decision for a menu-picked Skill, which an audit can notice.
+- **Narrowing, optional: `gate init --host codex --lock-user-skill-folders`.** For each listed home:
+  - it creates `~/.agents/skills` and `~/.codex/skills` as empty, root-owned `0755` folders, and sets the immutable attribute (`chattr +i`) on both and on `~/.agents`;
+  - an immutable folder cannot be renamed, deleted or added to, even by its parent folder's owner.
+  - A failure to set the attribute (an unsupported filesystem) stops the command.
+
+  It is printed in the plan, and `doctor` WARNs when the lock is not present. The guide says the lock does **not** cover:
+  - a `CODEX_HOME` the user points elsewhere;
+  - repository folders.
+
+  That is why repositories still need the GitHub Action check.
+
+### E2. Reconcile fails closed, and runs in the queue (blockers 1 and 2)
+
+- **When reconcile runs.** The periodic reconcile (every 60 s) runs inside `serial()`, the admin queue, like every admin command.
+- **When trust is not ready, in enforce mode.** This covers an expired list or trust root, a clock moved backwards, and corrupt or missing state. Reconcile **hides** every installed Skill with `hostLink(name, null)`. The install record and its generation are kept. It writes a durable decision-log record of kind `reconcile`, with `{ action: 'hide-all', reason }`.
+- **When trust is ready again,** reconcile re-links every installed Skill whose verdict is VERIFIED, and logs `{ action: 'restore', names }`.
+- **Unreadable evidence** for one Skill (a `catch` at `service.ts:524` today) hides that Skill and logs it. It no longer skips the Skill.
+- **In shadow mode,** reconcile hides nothing and logs what it would have hidden.
+- **Logging.** Every uninstall or hide by reconcile is now a durable decision-log record, as well as the in-memory `autoUninstalled` list.
+
+### E3. Nested Skill files (blocker 3)
+
+- **At install,** an install refuses any tree with a file named `SKILL.md` (case-insensitive) other than the top-level one. The refusal is `the Skill contains another SKILL.md at <path>; a nested Skill would be loaded without being approved`.
+- **At reconcile,** existing installs with such a file are hidden by reconcile and logged.
+- **Hosts.** This applies to every host, because Claude Code also discovers nested Skills.
+
+### E4. Keying every admin Skill (HIGH-2 a–c)
+
+- **Collisions.** Two admin directory names that are equal ignoring case set `incomplete`.
+- **Invariant.** Every admin entry maps its directory key, its digest key and its plain-name key, or sets `incomplete`. Any error reading `SKILL.md` sets `incomplete`: a throw, a file over 64 KiB, a non-regular file, or `EACCES`.
+- **Digest key.** This is the 64-hex digest folder name, lower case, without `sha256:`.
+- **Default name (HIGH-2c).** Before C2 merges, the coder reads the call site of `default_skill_name` (`ext/skills/src/loader/host.rs:396-407`) and the code that discovers each Skill's path. The aim is to establish whether the parent folder is the link name or the realpath's.
+  - If it is the link name, the digest key is unnecessary and is dropped.
+  - If it is the realpath's, the digest key stays.
+
+  A live test settles it either way.
+
+### E5. Whitelist corrections (MEDIUM-4)
+
+- **Reserved words.** The `null`, `bool` and number list is compared case-insensitively. It is: `null`, `~`, `true`, `false`, `yes`, `no`, `on`, `off`, `y` and `n`.
+- **Name shape.** A `name` value must start with a letter (`^[A-Za-z][A-Za-z0-9._-]*$`) and pass `validateSkillName`.
+- **Boundaries.** The frontmatter boundaries follow Codex's `extract_frontmatter` (`skills/src/parser.rs:200-216`). The first line, trimmed, is `---`, and so is a later line, trimmed. The whitelist requires both to be exactly `---`, which is stricter.
+- **Oracle corpus.** It includes documents that trigger Codex's repair step (`parser.rs:50-57, 98-180`), such as duplicate non-name keys and values with `: `, so that the oracle reflects the full parse path.
+
+### E6. Smaller corrections
+
+- **Removed-names size.** The cap is **4096 entries**. Each entry is about 160 bytes of canonical JSON, under the 1 MiB read limit. C7's "not evicted" and its prune test are replaced by D6.
+- **`prune-removed`** runs inside `serial()`. `older_than_days` must be an integer of at least 7; otherwise the reply is `older_than_days must be at least 7`.
+- **Install name check placement.** The check runs after `installSkill` stages the tree, and **before** `storeCertificate` and `hostLink` (`service.ts:592-593`). On failure, the staged generation is removed and nothing is linked.
+- **No host field.** The install name check and the nested-file check run for every host, because both hosts name Skills from frontmatter. The `host` field and its fallback (D7) are withdrawn.
+- **Status.** Reconcile's name-mismatch finding is reported in `status` as `nameMismatch: string[]`, and `doctor` FAILs on it. No automatic action is taken.
+- **Guide (MEDIUM-5).** The guide also says the adapter scans every parent folder for repo Skills, while Codex scans only the working folder. A Skill folder in a parent folder therefore blocks bare mentions without being loaded by Codex.
+- **Tests.** In addition to D7's list:
+  - reconcile while trust is stale hides everything, and restores it later;
+  - a directory-name case collision;
+  - a `nameKey` read error;
+  - a removed-names file with 4096 entries;
+  - an install racing reconcile;
+  - a nested `SKILL.md` refused, and hidden on reconcile;
+  - the `--lock-user-skill-folders` plan, and its refusal when the attribute cannot be set.
