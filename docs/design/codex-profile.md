@@ -319,3 +319,83 @@ These decisions resolve the v2 confirmation. Where they differ from earlier sect
   - an install racing reconcile;
   - a nested `SKILL.md` refused, and hidden on reconcile;
   - the `--lock-user-skill-folders` plan, and its refusal when the attribute cannot be set.
+
+## Decisions (v4)
+
+These decisions resolve the v3 confirmation review. Where they differ from earlier sections, v4 wins.
+
+### Terms
+
+| Term | Meaning |
+|---|---|
+| `found` | The adapter's walk saw at least one non-admin Skill folder: a user root, a listed `CODEX_HOME`, or a repo folder from the working folder upward. |
+| `incomplete` | The walk could not finish or could not key an admin entry (E4). It is treated like `found`. |
+| MASKED | A bare `$name` mention while `found \|\| incomplete` is blocked, because Codex might resolve it to a non-admin Skill. |
+| servable | An installed Skill whose verdict is VERIFIED, with no nested `SKILL.md`, and whose plain `name:` equals the install name. |
+
+X1, T2 and the other X and Y items are in `docs/design/codex-gate-findings.md` (merged).
+
+### F1. Restore uses "servable", not VERIFIED (blocker 1)
+
+E2's restore re-links only **servable** Skills, and so does every reconcile pass. A Skill with a nested `SKILL.md` or a name mismatch therefore stays hidden after trust recovers.
+
+Test: an install with a nested `SKILL.md` is hidden, trust goes stale and recovers, and the Skill is still hidden.
+
+### F2. Admin Skills from the menu: the honest window (blocker 2)
+
+D1's "always VERIFIED" is replaced by the following:
+- **A revocation** takes effect when the gate receives it. `gate trust` and `gate refresh` reconcile at once, inside the same `serial()` call.
+- **An expiry** takes effect at the next reconcile, at most 60 s later.
+- **While the service is down,** nothing is reconciled. Links stay as they were, and the hook blocks typed uses, because the decision socket is unreachable. A menu pick of an installed Skill during the outage is not checked. The unit uses `Restart=always`, and `doctor` FAILs when the service is down.
+
+The guide states all three.
+
+The live test drives the TUI (D1): revoke during an open session, then pick the Skill from the menu, and check nothing is injected. If the harness cannot drive the TUI, the route is recorded as untested and the guide says so. The claim is then made only for typed mentions.
+
+### F3. Linked mentions (blocker 3)
+
+The merged adapter resolves a linked mention by path. F3 makes this explicit:
+- The adapter takes `realpath` of the linked file.
+- The mention is asked only when that realpath is `<real of a current admin entry>/SKILL.md`. Anything else is NOT_ADMIN: another generation, an uninstalled Skill's generation, or a hidden entry.
+- The text of the mention never selects the Skill.
+
+Tests cover a linked mention with an approved name and a path to an unlisted Skill, to an old generation, and to a hidden entry.
+
+### F4. Unlisted homes (blocker 4)
+
+C6's "typed `$name` … blocked" is qualified: **for listed homes and listed `CODEX_HOME`s**.
+
+When the hook's own `CODEX_HOME` or `HOME` is not listed in the instance config, the walk sets `incomplete`, so bare mentions are blocked. The guide keeps the start-up tricks row.
+
+Test: an unlisted `CODEX_HOME` makes a bare mention blocked.
+
+### F5. Where `.system` goes (blocker 5)
+
+- **The backup.** `gate init` moves `.codex/skills/.system` to `<home>/.codex/mago-ski-backup/system-<UTC>`, outside every Skill root.
+- **`--keep-system`** is dropped, because `doctor` would FAIL on it.
+
+Test: `gate init` on a home with `.system`, then `doctor`: the `.system` check passes.
+
+### F6. Smaller decisions
+
+1. **The digest key** is kept unconditionally. E4's "dropped if the link name" branch is removed. The live test still records which name Codex uses.
+2. **The install check** reads `SKILL.md` from the generation path that will be linked: `<generationsDir>/<name>/<hex>/SKILL.md`. The generations tree is root-owned `0755` inside the service's own state. Only the root service writes there, so there is no writer race to test (missing test 11 rejected).
+3. **The C6 table row 1** becomes: *"A Skill folder created after a check is listed, and a menu pick of it reaches the model with no hook. Detected by `doctor` on a timer, the GitHub Action and the decision log; optionally narrowed by `--lock-user-skill-folders`. Not prevented."*
+4. **Shadow mode.**
+   - Revocation uninstalls in every mode, as merged today.
+   - The new actions run only in enforce mode: hide-all, uninstall on expiry, and hiding a nested or mismatched Skill.
+   - In shadow mode they are logged as `would-hide` and `would-uninstall`.
+5. **A non-whitelisted frontmatter line** in an installed Skill still sets `incomplete` (fail closed), and `nameMismatch` makes `doctor` FAIL (finding 6 rejected). New installs cannot reach this state, because install refuses non-plain names. A duplicate key of any kind makes `plainNameLine` return `null`.
+6. **Pruning.** It is by age only (D6). The CLI is `mago-ski gate prune-removed --host codex --older-than-days N`. The `parseStrictJson` limit is `maxMembers: 4096 + 4`.
+7. **The guide adds two residuals**, both covered by the menu-route row:
+   - a user can rename `~/.codex`, taking the locked `skills` child with it, and create a new one. `~/.codex` itself cannot be locked, because Codex writes there. `doctor` detects the new folder.
+   - the GitHub Action sees only committed files, so an untracked `.agents/skills` in a working copy is not seen by it. The adapter's `found` still blocks typed bare mentions there.
+8. **More tests:**
+   - dot-prefixed Skill folders in user and admin roots: whether Codex loads them (live) and that the adapter skips them;
+   - `deny_read` through a symlink and a relative path (live);
+   - plugin, cloud and executor Skills planted before the menu test (live);
+   - each managed key's live effect (live);
+   - mention-token boundaries such as `$a.b`, `$a-b` and `$a:b`;
+   - shadow mode: reconcile hides nothing, and an unapproved mention is logged and not blocked.
+
+   Differential fuzzing against the loader (missing test 9) is rejected. The loader takes the name from the same parser the oracle already calls.
