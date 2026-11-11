@@ -32,7 +32,9 @@ export const askAdmin: AskAdmin = (socketPath, command, deadlineMs = ADMIN_DEADL
       if (nl < 0) return;
       finish(() => {
         try {
-          const reply = parseStrictJson(Buffer.concat(chunks), { maxBytes: MAX_REPLY_BYTES, maxDepth: 16, maxMembers: 256, maxStringLength: MAX_REPLY_BYTES }) as AdminReply;
+          const bytes = Buffer.concat(chunks);
+          parseStrictJson(bytes, { maxBytes: MAX_REPLY_BYTES, maxDepth: 16, maxMembers: 256, maxStringLength: MAX_REPLY_BYTES }); // duplicate keys, depth
+          const reply = JSON.parse(bytes.toString('utf8')) as AdminReply; // the same text, as ordinary objects
           if (typeof reply !== 'object' || reply === null || typeof reply.ok !== 'boolean') throw new Error('shape');
           resolve(reply);
         } catch { reject(new Error('the gate sent a reply that is not valid JSON')); }

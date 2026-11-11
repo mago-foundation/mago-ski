@@ -60,7 +60,7 @@ CHECKING SKILLS
   inspect CERTIFICATE    Print a certificate's contents
   policy check           Check a policy the way a host does
 
-COMPANY GATE  (Linux, run as root)
+COMPANY GATE (Linux, run as root)
   gate init              Write the gate's config, unit and host settings
   gate run               Run the gate service in the foreground (systemd)
   gate trust             Give the running gate the trust documents

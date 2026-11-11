@@ -310,7 +310,7 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
   const sharedOwn = await readManifest(p.sharedManifest);
   const foreign: string[] = [];
   for (const f of files) {
-    const info = await lstat(f.path).catch((e: unknown) => { if (errnoCode(e) === 'ENOENT') return undefined; throw e; });
+    const info = await lstat(f.path).catch((e: unknown) => { if (errnoCode(e) === 'ENOENT' || errnoCode(e) === 'ENOTDIR') return undefined; throw e; });
     if (!info) continue;
     let ours = false;
     if (info.isFile()) {
