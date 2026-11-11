@@ -70,6 +70,8 @@ Keep it skimmable in about a minute. Split large changes into smaller PRs.
 - [ ] **Fail closed:** Anything that cannot be checked is `UNVERIFIABLE` and blocks in enforce mode.
 - [ ] **No credentials to the model:** Keys and secrets never reach the model, logs, outputs or Skill trees.
 - [ ] **No safety claims:** Code and docs do not claim that a certificate makes a Skill safe, or claim OWASP compliance/endorsement.
+- [ ] **Deterministic verdicts:** A verdict depends only on Skill bytes, signed documents, policy and time. No model, classifier or confidence score, and no network access, takes part in the decision.
+- [ ] **Admission only:** The change does not evaluate or filter what an agent does after a Skill is loaded.
 
 ## Documentation
 

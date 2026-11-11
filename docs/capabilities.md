@@ -75,6 +75,8 @@ This part is finished and tested on Linux only. It is not yet packaged and not y
 ## What mago-ski does not do
 
 - It does not decide whether a Skill is safe. An approval only records who approved which version.
+- It does not watch or control what an agent does after a Skill is loaded (tool calls, data, intent). It decides only whether a Skill may be loaded.
+- No AI model takes part in its decisions. Every verdict is computed from the Skill's bytes and signed files, and gives the same result on any machine.
 - It does not run a central Skill store or download service. The administrator hands mago-ski the Skills and approvals.
 - It cannot remove instructions that a session has already read. Those stay until the session is restarted.
 - In Codex, it cannot fully stop Skills that did not come from the administrator, such as Skills inside a project folder. It notices them and blocks most uses, but a determined user can get around it.
