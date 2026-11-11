@@ -331,3 +331,44 @@ These decisions resolve the v2 confirmation. Where they differ from v1 or v2, v3
 10. **Version and packaging.** `build_id` reads `package.json`. The version bump to 0.4.0 belongs to the release PR, not to this stream. `docs/gate-setup.md` is a repository doc, not a packaged file.
 11. **Docs scope for Codex (B11).** Stream 1's docs describe the Codex host as audit-level, and `capabilities.md` keeps "Blocking in Claude Code and Codex" under *Built, not released* for Codex. Claude Code moves to *works today*. Stream 2 rewrites the Codex wording from its own design.
 12. **Further `doctor` checks.** `doctor` also checks `<install>/package.json` and `/usr/bin/env` with the same ownership rule (B5 residual).
+
+## Code review fixes (v4)
+
+These fixes come from the two Goldfish code reviews of `215aad6..508fbd8`. Neither review found a HIGH. Where these fixes differ from earlier sections, they win.
+
+1. **Host binary choice (security M1, M2, L1, L2).**
+   - The `SUDO_USER` login-`PATH` lookup is removed.
+   - The default host binary is `claude` or `codex` from root's own `PATH`. If none is found, `--host-exe` is required.
+   - A binary is accepted only if it is a root-owned ELF executable whose realpath's basename starts with `claude` or `codex`. A binary named otherwise needs an explicit `--host-exe`.
+   - `checkHostExe` reads only the first 4 bytes, through a file descriptor, after the owner check.
+   - `gate init` prints the chosen `host_exes` in its summary.
+2. **Rollback and the fail-open window (security M3, L9, L8, L10, L12).**
+   - **Before any rename or write,** `applyInit` checks every planned folder and its existing ancestors (item 3).
+   - **Backups.** A foreign file is first hard-linked to its backup path. The new content is then written with `writeFileAtomic`, whose atomic rename replaces the original in one step. The host never lacks a config file, even if the command is killed.
+   - **Rollback after a failure.** The command restores a backup only over a path this run did **not** already write. It then reports exactly which files are new, which are restored and which stay as backups.
+   - **Manifest paths** are included in foreign-file detection.
+   - **The shared manifest** merges entries instead of overwriting.
+3. **Folder ownership (security M4, correctness 1, L11).**
+   - **Planned folders.** Before any write, `applyInit` runs `checkRootOwnedChain` on every planned folder that exists, and on each folder's existing ancestors. A folder that is not owned by root, or is writable by group or others, is refused, and is not chmodded.
+   - **Mode changes** are made with `fchmod` on an open descriptor.
+   - **Service start.** `service.start()` also checks `generationsDir` with `ownedDir`, at `0755`, not strict.
+   - **Manifests** are read only if they are root-owned regular files.
+4. **`gate run` after a failed start (correctness 2).** When `start()` throws, `gate run` calls `service.stop()` before returning 1, so no listener keeps the process alive.
+5. **Trusting the socket (security L4).** `doctor` and the admin commands check that the admin socket folder is root-owned `0700`, and that the socket is a socket owned by root, before connecting. `doctor` skips the service queries when the folder checks fail.
+6. **`doctor` coverage (security L5).**
+   - It compares the unit and drop-in content with the plan.
+   - It checks the hook config and the instance config with `lstat`: a root-owned regular file, not a symlink.
+   - `status` gains `root_fingerprint`, and `doctor` FAILs when it differs from the instance config.
+7. **Library surface (security L6).** `src/index.ts` does not export `runCli`'s gate seams. Tests import them from `src/cli.ts` directly.
+8. **Exit codes and messages (security L7; correctness 5, 6, 7, 9).**
+   - `gate init --print` exits 1 when the plan has problems that `init` would refuse, after printing everything.
+   - A missing instance config gives `no gate instance for <host>; run mago-ski gate init --host <host>`, with exit 2.
+   - `gate status` exits 1 when `ready` is not true, as its help says.
+   - The unreachable JSON branch in `gate install` is removed.
+   - `buildId()` throws when `package.json` cannot be read, instead of writing `unknown`.
+9. **Gate-only flags (correctness 8).** `--force` and `--print` are accepted only by `gate init`. Every other command refuses them, as before 0.4.0.
+10. **Tests (correctness 3, 4, and review item i).**
+    - **Ownership.** A chain owned by another uid is refused. `doctor` FAILs with `rootUid + 1`. An existing `state` folder at `0755` becomes `0700`. A user-owned existing folder is refused before any write.
+    - **Rollback.** A `--force` rollback test asserts the final content of each file. A rename-before-check test is added.
+    - **Host binaries.** Choosing the host binary covers a `python3` symlink named `claude` (refused without `--host-exe`) and the printed `host_exes`.
+    - **Live tests.** `tests/live/*.live.ts` switch to `planInit` and `applyInit` with a temporary `base` inside the existing private mount namespace, so the shipped commands are the ones tested live. If the whole-tree ownership check cannot be met in the live layout, the live harness passes `checkExec: false` only for the repository's own source tree, and says so in its header.
