@@ -54,9 +54,9 @@ export function codexRequirementsToml(input: CodexRequirementsInput): string {
   const lines: string[] = [
     '# mago-ski Codex requirements (generated). Evidence: codex-cli 0.163.0 and 0.166.0 / Linux; unverified for other versions.',
     '# Limits: a Skill picked from the menu or sent by an IDE/app-server client reaches the model with no hook (detected by',
-    '# gate doctor, not prevented); hooks fail OPEN when the hook process crashes, times out or is killed; repo Skills cannot be',
-    '# hidden; deny_read covers only the fixed roots listed below; Codex sandboxing needs unprivileged user namespaces, so',
-    '# max_user_namespaces=0 (used for Claude Code) breaks it.',
+    '# gate doctor, not prevented); hooks fail OPEN when the hook process crashes, times out or is killed;',
+    '# repo-scope Skills cannot be hidden; deny_read covers only the fixed roots listed below; Codex sandboxing needs',
+    '# unprivileged user namespaces, so max_user_namespaces=0 (used for Claude Code) breaks it.',
   ];
   if (mode === 'enforce') {
     lines.push(

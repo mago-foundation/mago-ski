@@ -269,7 +269,7 @@ test('codex requirements: shadow has only hooks; enforce has every setting; inpu
   assert.equal(shadow.filter((l) => l === `${cmd}shadow"`).length, 3);
   const enforce = code(codexRequirementsToml({ ...input, mode: 'enforce' }));
   for (const line of ['allow_managed_hooks_only = true', 'allowed_sandbox_modes = ["read-only", "workspace-write"]', '[features]', 'hooks = true', 'plugins = false',
-    'remote_plugin = false', 'apps = false', '[permissions.filesystem]', 'deny_read = ["/home/a/.agents/skills/**", "/home/a/.codex/skills/**"]',
+    'remote_plugin = false', 'apps = false', 'executor_capability_discovery = false', 'executor_capability_discovery_v2 = false', '[permissions.filesystem]', 'deny_read = ["/home/a/.agents/skills/**", "/home/a/.codex/skills/**"]',
     'managed_dir = "/opt/mago-ski/dist/src/gate/adapters"', '[[hooks.SessionStart]]', '[[hooks.UserPromptSubmit]]', 'timeout = 5'])
     assert.ok(enforce.includes(line), line);
   assert.equal(enforce.filter((l) => l === `${cmd}enforce"`).length, 3);

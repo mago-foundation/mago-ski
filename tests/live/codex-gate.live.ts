@@ -17,7 +17,7 @@ import { existsSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { codexManagedConfigToml, codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
 import type { Mode } from '../../src/policy.ts';
 import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
@@ -99,6 +99,8 @@ interface Run {
   /** Unapproved Skills to create: in the project (.agents/skills) and in the user's own folder (~/.codex/skills). */
   projectSkill?: boolean;
   userSkill?: boolean;
+  /** A Skill planted in ~/.codex/skills/.system before Codex starts (the profile turns bundled Skills off). */
+  plantedSystem?: boolean;
 }
 
 async function runCodex(w: World, name: string, run: Run) {
@@ -116,6 +118,10 @@ async function runCodex(w: World, name: string, run: Run) {
     mode: w.mode, nodePath: NODE, hookEntry: w.hookEntry, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
     userSkillRoots: [path.join(codexHome, 'skills'), path.join(codexHome, 'skills', '.system'), path.join(home, '.agents', 'skills')],
   }), { mode: 0o644 });
+
+  // The second managed file of the Codex profile (codex-profile.md C1): bundled and cloud Skills off, descriptions not injected.
+  await writeFile(path.join(ADMIN_ROOT, 'managed_config.toml'), codexManagedConfigToml(), { mode: 0o644 });
+  if (run.plantedSystem) await writeSkill(path.join(codexHome, 'skills', '.system'), 'planted-system-skill');
 
   handOver(dir);
   current = { steps: run.steps ?? [], requests: [] };
@@ -179,6 +185,12 @@ const SCENARIOS: Record<string, Scenario> = {
     // the adapter (MASKING) then blocks every bare mention of an admin Skill. Only the linked form is usable.
     expect: (o) => ({ 'approved body did not reach the model (bare mention blocked)': o.reached['approved-skill'] === false }),
     known: (o) => ({ 'a bare mention of an admin Skill is usable': o.reached['approved-skill'] === true }),
+  },
+  'profile-planted-system': {
+    mode: 'enforce', what: 'profile: a Skill planted in .system is reported, never failing (the managed config removes bundled Skills; whether a planted one is loaded is recorded)',
+    run: () => ({ prompt: 'hello', plantedSystem: true }),
+    expect: (o) => ({ 'the run completed': o.exit === 0 || o.modelCalls > 0 }),
+    known: (o) => ({ 'planted .system Skill is not listed': o.listing?.includes('planted-system-skill') === false }),
   },
   'mention-project': {
     mode: 'enforce', what: 'a mention of a repo Skill is blocked; its body never reaches the model',
