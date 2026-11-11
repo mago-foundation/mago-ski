@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -113,7 +113,7 @@ async function roots(t: TestContext, adminNames: string[] = ['alpha'], userNames
   for (const [dir, names] of [[admin, adminNames], [user, userNames]] as const)
     for (const n of names) {
       await mkdir(path.join(dir, n), { recursive: true });
-      await writeFile(path.join(dir, n, 'SKILL.md'), `---\nname: ${n}\n---\nbody\n`);
+      await writeFile(path.join(dir, n, 'SKILL.md'), `---\nname: ${n}\ndescription: Test ${n}.\n---\nbody\n`);
     }
   return { admin, user };
 }
@@ -359,18 +359,23 @@ test('codex hook: an approved admin Skill still passes when rogue Skills exist; 
   silent(await host.hook([await configFile(t, '/nonexistent/s.sock', dirty, {}, 'shadow'), 'shadow', UID], submit('costs $5')));
 });
 
-test('codex hook: hidden directories are skipped, but an explicitly listed hidden root (.system) is scanned', { skip: LINUX_ONLY }, async (t) => {
+test('codex hook: dot-prefixed Skill folders count toward found in non-admin roots (F7.5); the admin root skips them', { skip: LINUX_ONLY }, async (t) => {
   const base = await tempDir(t);
-  const system = path.join(base, '.codex', 'skills', '.system');
   const user = path.join(base, '.codex', 'skills');
-  await sk(path.join(system, 'skill-installer'), fm('skill-installer'));
   await sk(path.join(user, '.hid', 'h'), fm('hidden-skill'));
   const r = await roots(t, ['alpha'], []);
   const host = fakeHost(t);
-  const without = await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [user] });
-  const withSystem = await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [user, system] });
-  silent(await host.hook([without, 'enforce', UID], submit('$skill-installer $hidden-skill')));
-  blocked(await host.hook([withSystem, 'enforce', UID], submit('$skill-installer')));
+  const cfg = await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [user] });
+  blocked(await host.hook([cfg, 'enforce', UID], submit('$hidden-skill'))); // counted: every token is asked, nobody answers
+  const clean = await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [path.join(base, 'empty')] });
+  silent(await host.hook([clean, 'enforce', UID], submit('$hidden-skill')));
+  // an explicitly listed hidden root (.system) is scanned
+  const system = path.join(base, 'x', '.system');
+  await sk(path.join(system, 'skill-installer'), fm('skill-installer'));
+  blocked(await host.hook([await configFile(t, await fakeServer(t, () => undefined), r, { skill_roots: [system] }), 'enforce', UID], submit('$skill-installer')));
+  // a dot entry in the admin root (the service's own files) is never an admin Skill
+  await mkdir(path.join(r.admin, '.alpha.123.tmp'), { recursive: true });
+  silent(await host.hook([clean, 'enforce', UID], submit('$5')));
 });
 
 test('codex hook: unreadable entries, symlinked SKILL.md and the directory cap fail closed; mention-free prompts pass', { skip: LINUX_ONLY }, async (t) => {
@@ -603,4 +608,120 @@ test('codex hook: commit 1 security rules hold with an empty walk (H1, H2) and f
   silent(await run(other('ls /tmp')));
   silent(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/x' }, cwd: '/' })));
   blocked(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, cwd: '/' }))); // Bash without a command
+});
+
+// --- Codex profile: keying admin Skills by every name Codex can give them (C2, D2, E4, F3, F4) -------------------------------
+const HEX = 'a'.repeat(64);
+/** An admin root whose entries are links to generation-like folders `<gens>/<hex>`, as the service publishes them. */
+async function keyed(t: TestContext, entries: Record<string, { hex?: string; skillMd?: string }>) {
+  const base = await tempDir(t);
+  const admin = path.join(base, 'admin');
+  const gens = path.join(base, 'gens');
+  await mkdir(admin, { recursive: true });
+  const real: Record<string, string> = {};
+  for (const [n, e] of Object.entries(entries)) {
+    const dir = path.join(gens, n, e.hex ?? HEX);
+    await sk(dir, e.skillMd ?? fm(n));
+    await symlink(dir, path.join(admin, n));
+    real[n] = dir;
+  }
+  const r: Roots = { admin, user: path.join(base, 'nothing') };
+  const host = fakeHost(t);
+  const run = async (stdin: string, extra: object = {}, sock?: string) => {
+    const c = await configFile(t, sock ?? await fakeServer(t, () => undefined), r, { skill_roots: [], ...extra });
+    return host.hook([c, 'enforce', UID], stdin.startsWith('{') ? stdin : submit(stdin));
+  };
+  return { admin, base, gens, real, r, run, host };
+}
+
+test('codex hook: an admin Skill is keyed by its directory, its digest folder and its plain name (D2)', { skip: LINUX_ONLY }, async (t) => {
+  const k = await keyed(t, { alpha: { hex: HEX, skillMd: fm('real-name') } });
+  denied(await k.run('use $alpha'), MSG_UNVERIFIED); // directory key: asked (the fake service never answers)
+  denied(await k.run(`use $${HEX}`), MSG_UNVERIFIED); // digest key
+  denied(await k.run(`use $${HEX.toUpperCase()}`), MSG_UNVERIFIED);
+  denied(await k.run('use $real-name'), MSG_UNVERIFIED); // plain `name:` key
+  silent(await k.run('use $other-thing'));
+});
+
+test('codex hook: a digest mention is asked as the install name, and blocked once that Skill is gone (C2.1)', { skip: LINUX_ONLY }, async (t) => {
+  const { svc, install, revoke, managed } = await service(t);
+  const digest = await install('alpha');
+  const r: Roots = { admin: managed, user: path.join(await tempDir(t), 'none') };
+  const host = fakeHost(t);
+  const cfg = await configFile(t, svc.sockets.decision, r, { skill_roots: [] });
+  const run = (s: string) => host.hook([cfg, 'enforce', UID], s.startsWith('{') ? s : submit(s));
+  silent(await run(START));
+  silent(await run(`use $${digest.slice('sha256:'.length)}`)); // digest folder name: asked as `alpha`, VERIFIED
+  await revoke(digest);
+  assert.deepEqual((await readdir(managed)).filter((e) => !e.startsWith('.')), []);
+  // Before the service writes a removed-names file (C3) the name is simply unknown, so it passes unasked.
+  silent(await run(`use $${digest.slice('sha256:'.length)}`));
+});
+
+test('codex hook: a SKILL.md that is not plain, unreadable or colliding makes the walk incomplete (E4)', { skip: LINUX_ONLY }, async (t) => {
+  for (const bad of ['---\nname: "alpha"\ndescription: d\n---\n', '---\nname: alpha\n---\n', 'no frontmatter\n', `---\nname: alpha\ndescription: ${'x'.repeat(70_000)}\n---\n`]) {
+    const k = await keyed(t, { alpha: { skillMd: bad } });
+    blocked(await k.run('use $unrelated'));
+  }
+  const k = await keyed(t, { alpha: {}, beta: { skillMd: fm('alpha') } }); // beta's plain name collides with alpha's directory
+  blocked(await k.run('use $unrelated'));
+  const dup = await keyed(t, { alpha: {}, Alpha: {} }); // equal ignoring case
+  blocked(await dup.run('use $unrelated'));
+  const dangling = await keyed(t, { alpha: {} });
+  await symlink('/nonexistent/x', path.join(dangling.admin, 'gone'));
+  blocked(await dangling.run('use $unrelated'));
+  const ok = await keyed(t, { alpha: {} });
+  silent(await ok.run('use $unrelated'));
+});
+
+test('codex hook: removed names never ask; a bad or oversized removed-names file fails closed (C2.2, D7)', { skip: LINUX_ONLY }, async (t) => {
+  const file = (entries: unknown[], type = 'mago-ski.gate.removed-names.v1') => JSON.stringify({ type, entries });
+  const entry = (name: string, digest = 'b'.repeat(64)) => ({ name, digest, kind: 'revoked', at: '2026-11-01T00:00:00Z' });
+  const k = await keyed(t, { alpha: {} });
+  const removed = path.join(k.admin, '.mago-ski-removed-names.json');
+  let asked = 0;
+  const counting = await fakeServer(t, () => { asked += 1; return undefined; });
+  await writeFile(removed, file([entry('gone')]));
+  denied(await k.run('use $gone', {}, counting), MSG_NOT_ADMIN);
+  denied(await k.run(`use $${'b'.repeat(64)}`, {}, counting), MSG_NOT_ADMIN);
+  denied(await k.run('use $GONE', {}, counting), MSG_NOT_ADMIN);
+  silent(await k.run('use $fine', {}, counting));
+  assert.equal(asked, 0);
+  await writeFile(removed, file([entry('alpha')]));
+  denied(await k.run('use $alpha', {}, counting), MSG_UNVERIFIED); // a name that is linked again is a normal admin Skill
+  for (const bad of ['{', file([], 'other'), file([{ name: 1 }]), file(Array.from({ length: 4097 }, (_, i) => entry(`n${i}`)))]) {
+    await writeFile(removed, bad);
+    blocked(await k.run('use $unrelated'));
+  }
+  await writeFile(removed, file(Array.from({ length: 4096 }, (_, i) => entry(`n${i}`, i.toString(16).padStart(64, '0')))));
+  silent(await k.run('use $unrelated'));
+  denied(await k.run('use $n4095'), MSG_NOT_ADMIN);
+});
+
+test('codex hook: a linked mention is asked only for the current admin entry of that exact file (F3)', { skip: LINUX_ONLY }, async (t) => {
+  const k = await keyed(t, { alpha: {}, beta: {} });
+  const old = path.join(k.gens, 'alpha', 'c'.repeat(64));
+  await sk(old, fm('alpha'));
+  await sk(path.join(k.base, 'unlisted', 'alpha'), fm('alpha'));
+  const link = (name: string, p: string) => `use [$${name}](${p})`;
+  denied(await k.run(link('alpha', `${k.admin}/alpha/SKILL.md`)), MSG_UNVERIFIED); // asked
+  denied(await k.run(link('alpha', `${k.real['alpha']}/SKILL.md`)), MSG_UNVERIFIED); // same file by its real path
+  denied(await k.run(link('alpha', `${old}/SKILL.md`)), MSG_NOT_ADMIN); // an old generation
+  denied(await k.run(link('alpha', `${k.base}/unlisted/alpha/SKILL.md`)), MSG_NOT_ADMIN); // an unlisted Skill
+  denied(await k.run(link('alpha', `${k.admin}/beta/SKILL.md`)), MSG_NOT_ADMIN); // the text does not select the Skill
+  await symlink(k.real['beta']!, path.join(k.admin, '.beta.hidden')); // a hidden entry is no admin entry
+  await unlink(path.join(k.admin, 'beta'));
+  denied(await k.run(link('beta', `${k.admin}/.beta.hidden/SKILL.md`)), MSG_NOT_ADMIN);
+});
+
+test('codex hook: a HOME or CODEX_HOME that the instance does not list makes the walk incomplete (F4)', { skip: LINUX_ONLY }, async (t) => {
+  const k = await keyed(t, { alpha: {} });
+  silent(await k.run('use $other', { user_homes: ['/nonexistent-home'] })); // the fake host's HOME is listed
+  blocked(await k.run('use $other', { user_homes: ['/home/someone-else'] }));
+  blocked(await k.run('use $other', { user_homes: [] }));
+  const codexHome = await tempDir(t);
+  const cfg = async (extra: object) => configFile(t, await fakeServer(t, () => undefined), k.r, { skill_roots: [], ...extra });
+  const host = fakeHost(t, ENTRY, { CODEX_HOME: codexHome });
+  blocked(await host.hook([await cfg({ user_homes: ['/nonexistent-home'] }), 'enforce', UID], submit('use $other')));
+  silent(await host.hook([await cfg({ user_homes: ['/nonexistent-home'], codex_homes: [codexHome] }), 'enforce', UID], submit('use $other')));
 });

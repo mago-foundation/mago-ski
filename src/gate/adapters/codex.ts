@@ -74,11 +74,13 @@
 import { lstat, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { isRecord } from '../../canonical-json.ts';
+import { readRegularFile } from '../../fs-safe.ts';
 import { validateSkillName } from '../../names.ts';
 import type { Mode } from '../../policy.ts';
 import { decideAction, type GateRequest } from '../contract.ts';
 import { parseStrictJson, type StrictJsonLimits } from '../strict-json.ts';
 import { askService, newRequestId } from './client.ts';
+import { plainNameLine } from './codex-names.ts';
 import { loadConfig, MAX_STDIN_BYTES, type HookConfig, type HookDeps, type HookOutcome } from './claude-code.ts';
 import { findHostPid } from './host-pid.ts';
 
@@ -88,6 +90,12 @@ export const DEFAULT_ADMIN_ROOT = '/etc/codex/skills';
 const MAX_ANCESTORS = 64;
 const MAX_ADMIN_NAMES = 16;
 const MAX_ENVIRON_BYTES = 256 * 1024;
+const MAX_SKILL_MD_BYTES = 64 * 1024;
+export const REMOVED_NAMES_FILE = '.mago-ski-removed-names.json';
+export const REMOVED_NAMES_TYPE = 'mago-ski.gate.removed-names.v1';
+export const MAX_REMOVED_NAMES = 4096;
+const MAX_REMOVED_BYTES = 1024 * 1024;
+const REMOVED_LIMITS: StrictJsonLimits = { maxBytes: MAX_REMOVED_BYTES, maxDepth: 4, maxMembers: MAX_REMOVED_NAMES + 4, maxStringLength: 1024 };
 
 const COULD_NOT_VERIFY = 'mago-ski could not verify this Skill; it is blocked until verification works.';
 const MASKED = 'A Skill with this name also exists outside your organisation\'s approved Skills, so a plain mention is blocked. Mention the approved Skill by its link, or remove the other Skill.';
@@ -205,7 +213,7 @@ async function scanRoot(root: string, scan: Scan): Promise<void> {
         }
         if (ls.isSymbolicLink()) isDir = (await stat(p)).isDirectory();
       } catch (e) { if (!gone(e)) scan.incomplete = true; continue; } // a dangling link is ignored, as in Codex
-      if (!isDir || name.startsWith('.') || depth >= MAX_SCAN_DEPTH) continue;
+      if (!isDir || depth >= MAX_SCAN_DEPTH) continue; // dot-prefixed folders are entered too (F7.5: fail closed until a live run shows Codex skips them)
       try {
         const r = await realpath(p);
         if (r.includes('\uFFFD')) { scan.incomplete = true; continue; } // lossy: distinct targets would share one key
@@ -266,14 +274,64 @@ async function dotenvMayMoveHome(codexHome: string): Promise<boolean> {
 }
 
 interface Found {
-  /** admin directory entry names, lower-cased key */ admin: Map<string, string>; adminReal: string | undefined;
+  /** every key (directory name, digest folder name, plain `name:`; lower-cased) -> the admin directory entry */ admin: Map<string, string>;
+  /** admin entry -> realpath of its SKILL.md */ adminFiles: Map<string, string>;
+  /** removed names and digests (lower-cased) */ removed: Set<string>;
+  adminReal: string | undefined;
   anySkill: boolean; roots: string[]; incomplete: boolean; cwd: string | undefined;
+}
+
+/** Keys every admin entry under the names Codex can give it (D2, E4). Any problem sets `incomplete`. */
+async function keyAdmin(adminRoot: string, adminReal: string | undefined, scan: Scan): Promise<{ admin: Map<string, string>; files: Map<string, string> }> {
+  const admin = new Map<string, string>();
+  const files = new Map<string, string>();
+  const entries = (await listRoot(adminRoot)).filter((e) => !e.startsWith('.')).sort();
+  for (const e of entries) { // directory names first: they win a collision
+    const k = e.toLowerCase();
+    if (admin.has(k)) scan.incomplete = true; else admin.set(k, e);
+  }
+  for (const e of entries) {
+    let real: string;
+    try { real = await realpath(path.join(adminRoot, e)); } catch { scan.incomplete = true; continue; }
+    try { files.set(e, await realpath(path.join(real, 'SKILL.md'))); } catch { scan.incomplete = true; }
+    const keys = [path.basename(real).toLowerCase()];
+    try {
+      const name = plainNameLine(await readRegularFile(path.join(real, 'SKILL.md'), 'SKILL.md', MAX_SKILL_MD_BYTES));
+      if (name === null) scan.incomplete = true; else keys.push(name.toLowerCase());
+    } catch { scan.incomplete = true; }
+    for (const k of keys) {
+      const have = admin.get(k);
+      if (have === undefined) admin.set(k, e);
+      else if (have !== e) scan.incomplete = true; // two admin entries claim one name
+    }
+  }
+  void adminReal;
+  return { admin, files };
+}
+
+/** The removed-names file in the admin root (D7). Missing = empty; unreadable or malformed = incomplete. */
+async function readRemoved(adminRoot: string, scan: Scan): Promise<Set<string>> {
+  const out = new Set<string>();
+  const file = path.join(adminRoot, REMOVED_NAMES_FILE);
+  let bytes: Buffer;
+  try { bytes = await readRegularFile(file, 'removed names', MAX_REMOVED_BYTES); }
+  catch (e) { if (gone(e)) return out; scan.incomplete = true; return out; }
+  try {
+    const raw = parseStrictJson(bytes, REMOVED_LIMITS);
+    if (!isRecord(raw) || raw['type'] !== REMOVED_NAMES_TYPE || !Array.isArray(raw['entries']) || raw['entries'].length > MAX_REMOVED_NAMES) throw new Error('bad file');
+    for (const e of raw['entries']) {
+      if (!isRecord(e) || typeof e['name'] !== 'string' || typeof e['digest'] !== 'string') throw new Error('bad entry');
+      out.add(e['name'].toLowerCase()); out.add(e['digest'].toLowerCase());
+    }
+  } catch { scan.incomplete = true; }
+  return out;
 }
 
 async function findSkills(cfg: CodexConfig, cwd: string | undefined, env: HostEnv | undefined): Promise<Found> {
   const scan: Scan = { found: false, realRoots: [], incomplete: false, dirs: 0 };
-  const admin = new Map((await listRoot(cfg.adminRoot)).map((e) => [e.toLowerCase(), e]));
   const adminReal = await realpath(cfg.adminRoot).catch(() => undefined);
+  const { admin, files } = await keyAdmin(cfg.adminRoot, adminReal, scan);
+  const removed = await readRemoved(cfg.adminRoot, scan);
   const roots = new Set(cfg.skillRoots);
   // U+FFFD: Codex hands the hook a lossily decoded cwd, and environ is decoded here as UTF-8, so a non-UTF-8 path would be
   // scanned at a name that does not exist. Fail closed instead.
@@ -281,17 +339,33 @@ async function findSkills(cfg: CodexConfig, cwd: string | undefined, env: HostEn
   const absDir = (v: string | undefined): string | undefined => usable(v) ? path.normalize(v).replace(/(?<=.)\/+$/u, '') : undefined;
   const home = absDir(env?.home);
   // Codex canonicalises a set CODEX_HOME (utils/home-dir find_codex_home), so `..` after a symlink resolves physically.
-  const codexHome = env?.codexHome === undefined || env.codexHome === ''
+  const explicitHome = !(env?.codexHome === undefined || env.codexHome === '');
+  const codexHome = !explicitHome
     ? (home === undefined ? undefined : `${home}/.codex`)
     : usable(env.codexHome) ? await realpath(env.codexHome).then((r) => (usable(r) ? r : undefined), () => undefined) : undefined;
   if (env === undefined || home === undefined || codexHome === undefined) scan.incomplete = true; // fail closed
-  else if (await dotenvMayMoveHome(codexHome)) scan.incomplete = true;
-  else for (const r of [`${codexHome}/skills`, `${codexHome}/skills/.system`, `${home}/.agents/skills`]) roots.add(r);
+  else {
+    if (!(await homesListed(cfg, home, codexHome, explicitHome))) scan.incomplete = true; // F4: not a home the profile covers
+    if (await dotenvMayMoveHome(codexHome)) scan.incomplete = true;
+    else for (const r of [`${codexHome}/skills`, `${codexHome}/skills/.system`, `${home}/.agents/skills`]) roots.add(r);
+  }
   const validCwd = usable(cwd);
   if (!validCwd) scan.incomplete = true;
   else for (const d of ancestors(cwd, scan)) for (const sub of ['.codex/skills', '.agents/skills']) roots.add(path.join(d, sub));
   for (const r of roots) await scanRoot(r, scan);
-  return { admin, adminReal, anySkill: scan.found, roots: [...roots, ...scan.realRoots], incomplete: scan.incomplete, cwd: validCwd ? cwd : undefined };
+  return { admin, adminFiles: files, removed, adminReal, anySkill: scan.found, roots: [...roots, ...scan.realRoots], incomplete: scan.incomplete, cwd: validCwd ? cwd : undefined };
+}
+
+/** F4: with `user_homes` configured, the host's HOME must be listed, and its CODEX_HOME must be `<home>/.codex` or listed. */
+async function homesListed(cfg: CodexConfig, home: string, codexHome: string, explicitHome: boolean): Promise<boolean> {
+  if (cfg.userHomes === undefined) return true; // a config without the key (older or hand-written): not checked
+  const same = async (a: string, b: string): Promise<boolean> => path.normalize(a) === path.normalize(b) || (await realpath(a).catch(() => a)) === (await realpath(b).catch(() => b));
+  let homeOk = false;
+  for (const h of cfg.userHomes) if (await same(h, home)) homeOk = true;
+  if (!homeOk) return false;
+  if (!explicitHome || await same(codexHome, `${home}/.codex`)) return true;
+  for (const h of cfg.codexHomes ?? []) if (await same(h, codexHome)) return true;
+  return false;
 }
 
 /**
@@ -306,10 +380,9 @@ async function adminLinkName(link: string, f: Found): Promise<string | undefined
   if (!path.isAbsolute(stripped) && f.cwd === undefined) return undefined;
   try {
     const real = await realpath(path.resolve(f.cwd ?? '/', stripped));
-    // The service publishes each admin entry as a symlink to its generation (service.ts HOST-VISIBLE SKILLS), so the link
-    // is compared with the resolved `<admin>/<name>/SKILL.md` of each admin entry, not with a path under the admin root.
-    for (const name of f.admin.values())
-      if (await realpath(path.join(f.adminReal, name, 'SKILL.md')).catch(() => undefined) === real) return name;
+    // F3: the realpath of the linked file must be `<real of a CURRENT admin entry>/SKILL.md`. The service publishes each admin
+    // entry as a symlink to its generation, so another generation, an uninstalled Skill's generation or a hidden entry never match.
+    for (const [name, file] of f.adminFiles) if (file === real) return name;
     return undefined;
   } catch { return undefined; }
 }
@@ -342,17 +415,22 @@ function inspectCommand(raw: string, cfg: CodexConfig): { rogue: boolean; admin:
 }
 
 // --- config and parsing -------------------------------------------------------------------------------------------------
-interface CodexConfig extends HookConfig { adminRoot: string; skillRoots: string[] }
+interface CodexConfig extends HookConfig { adminRoot: string; skillRoots: string[]; userHomes: string[] | undefined; codexHomes: string[] | undefined }
 
 /** Codex adapter dependencies: the shared hook ones plus a reader of the host's environment (tests inject it). */
 export interface CodexDeps extends HookDeps { readHostEnv?: (pid: number) => Promise<HostEnv> }
 
 async function loadCodexConfig(file: string, uid: number): Promise<CodexConfig> {
-  const cfg = await loadConfig(file, uid, ['admin_root', 'skill_roots']);
-  const { admin_root: admin = DEFAULT_ADMIN_ROOT, skill_roots: roots = [] } = cfg.raw;
+  const cfg = await loadConfig(file, uid, ['admin_root', 'skill_roots', 'user_homes', 'codex_homes']);
+  const { admin_root: admin = DEFAULT_ADMIN_ROOT, skill_roots: roots = [], user_homes: homes, codex_homes: cHomes } = cfg.raw;
   const abs = (v: unknown): v is string => typeof v === 'string' && path.isAbsolute(v) && !v.includes('\0');
   if (!abs(admin) || !Array.isArray(roots) || roots.length > 64 || !roots.every(abs)) throw new Error('bad Skill roots');
-  return { ...cfg, adminRoot: admin.replace(/\/+$/u, ''), skillRoots: roots.map((r) => r.replace(/\/+$/u, '')) };
+  const list = (v: unknown): string[] | undefined => {
+    if (v === undefined) return undefined;
+    if (!Array.isArray(v) || v.length > 256 || !v.every(abs)) throw new Error('bad home list');
+    return v.map((r) => r.replace(/(?<=.)\/+$/u, ''));
+  };
+  return { ...cfg, adminRoot: admin.replace(/\/+$/u, ''), skillRoots: roots.map((r) => r.replace(/\/+$/u, '')), userHomes: list(homes), codexHomes: list(cHomes) };
 }
 
 function parseHookInput(bytes: Buffer, peek: (k: Kind) => void): Parsed {
@@ -425,8 +503,8 @@ async function runHookInner(argv: readonly string[], deps: CodexDeps, setMode: (
           if (/^(app|mcp|plugin):\/\//u.test(l)) continue; // L1 (exact lower-case schemes, as Codex matches them)
           const a = await adminLinkName(l, f);
           // L2 also needs the link text to name that same admin Skill; `[$rogue](<admin>/alpha/SKILL.md)` is L3.
-          const text = linkNames[i] ?? '';
-          if (a === undefined || text.toLowerCase() !== a.toLowerCase()) {
+          const text = (linkNames[i] ?? '').toLowerCase();
+          if (a === undefined || f.admin.get(text) !== a) {
             if (mode === 'enforce') return block(notAdmin(cfg.adminRoot)); // L3
             continue;
           }
@@ -439,6 +517,11 @@ async function runHookInner(argv: readonly string[], deps: CodexDeps, setMode: (
             continue;
           }
           const adminName = f.admin.get(n.toLowerCase());
+          // C2.2: a removed name (or digest) that is no current admin key is never asked.
+          if (adminName === undefined && f.removed.has(n.toLowerCase())) {
+            if (mode === 'enforce') return block(notAdmin(cfg.adminRoot));
+            continue;
+          }
           if (adminName === undefined && !wide) continue; // T6
           // T2: under wide, an admin name may really select a same-name repo/user Skill.
           if (wide && adminName !== undefined && mode === 'enforce') return block(MASKED);

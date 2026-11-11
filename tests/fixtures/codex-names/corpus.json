@@ -1,0 +1,450 @@
+[
+ {
+  "id": "basic",
+  "doc": "---\nname: alpha\ndescription: Does a thing.\n---\nbody\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "crlf",
+  "doc": "---\r\nname: alpha\r\ndescription: d\r\n---\r\nbody\r\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "extra-keys",
+  "doc": "---\nname: alpha\ndescription: a, b (c) x/y_z-1\nlicense: MIT\n---\nbody\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "blank-line-inside",
+  "doc": "---\nname: alpha\n\ndescription: d\n---\nbody\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "name-last",
+  "doc": "---\ndescription: d\nname: alpha\n---\nbody\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "dots-name",
+  "doc": "---\nname: a.b_c-d\ndescription: d\n---\nbody\n",
+  "plain": "a.b_c-d",
+  "codexName": "a.b_c-d",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "double-quoted",
+  "doc": "---\nname: \"alpha\"\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "single-quoted",
+  "doc": "---\nname: 'alpha'\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "null-word",
+  "doc": "---\nname: null\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "null-upper",
+  "doc": "---\nname: NULL\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "tilde",
+  "doc": "---\nname: ~\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "empty-name",
+  "doc": "---\nname:\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "empty-name-space",
+  "doc": "---\nname: \ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "bool-yes",
+  "doc": "---\nname: yes\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "yes",
+  "note": "YAML 1.1 bool; serde_yaml reads a string",
+  "source": "hand-checked"
+ },
+ {
+  "id": "bool-true",
+  "doc": "---\nname: true\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "true",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "number",
+  "doc": "---\nname: 123\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "123",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "float",
+  "doc": "---\nname: 1.5\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "1.5",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "trailing-space",
+  "doc": "---\nname: alpha \ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "leading-space-value",
+  "doc": "---\nname:  alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "no-space-after-colon",
+  "doc": "---\nname:alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "indented-name",
+  "doc": "---\n  name: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "nested-name",
+  "doc": "---\nmeta:\n  name: evil\nname: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "block-scalar",
+  "doc": "---\ndescription: |\n  name: evil\nname: alpha\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "folded-scalar",
+  "doc": "---\ndescription: >\n  text\nname: alpha\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "duplicate-name",
+  "doc": "---\nname: alpha\nname: beta\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "serde_yaml rejects duplicate keys",
+  "source": "hand-checked"
+ },
+ {
+  "id": "duplicate-other",
+  "doc": "---\nname: alpha\ndescription: d\ndescription: e\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "flow-mapping",
+  "doc": "---\n{name: alpha, description: d}\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "anchor",
+  "doc": "---\nname: &a alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "tag",
+  "doc": "---\nname: !!str alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "merge-key",
+  "doc": "---\n<<: {name: evil}\nname: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "document-end",
+  "doc": "---\nname: alpha\n...\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "directive",
+  "doc": "---\n%YAML 1.2\nname: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "tab-in-value",
+  "doc": "---\nname: alpha\ndescription: a\tb\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "tab-indent",
+  "doc": "---\nname: alpha\n\tdescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "bare-cr",
+  "doc": "---\nname: alpha\rdescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "bare \\r is a YAML line break",
+  "source": "hand-checked"
+ },
+ {
+  "id": "bare-cr-end",
+  "doc": "---\nname: alpha\ndescription: d\r\rname: evil\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "bom",
+  "doc": "﻿---\nname: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "non-ascii-description",
+  "doc": "---\nname: alpha\ndescription: café\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "non-ascii-name",
+  "doc": "---\nname: alphà\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "colon-in-value",
+  "doc": "---\nname: alpha\ndescription: a: b\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "repair step in parser.rs",
+  "source": "hand-checked"
+ },
+ {
+  "id": "missing-description",
+  "doc": "---\nname: alpha\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "Codex rejects a Skill without a description",
+  "source": "hand-checked"
+ },
+ {
+  "id": "empty-description",
+  "doc": "---\nname: alpha\ndescription:\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "null-description",
+  "doc": "---\nname: alpha\ndescription: null\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "name-after-description-only-space",
+  "doc": "---\nname: alpha\ndescription: \n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "uppercase-key",
+  "doc": "---\nName: alpha\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "no-frontmatter",
+  "doc": "# title\nname: alpha\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "unterminated",
+  "doc": "---\nname: alpha\ndescription: d\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "leading-blank",
+  "doc": "\n---\nname: alpha\ndescription: d\n---\n",
+  "plain": null,
+  "codexName": null,
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "closing-with-spaces",
+  "doc": "---\nname: alpha\ndescription: d\n--- \nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "Codex trims; whitelist is stricter",
+  "source": "hand-checked"
+ },
+ {
+  "id": "opening-with-spaces",
+  "doc": "--- \nname: alpha\ndescription: d\n---\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "second-fence-in-body",
+  "doc": "---\nname: alpha\ndescription: d\n---\nbody\n---\nname: evil\n---\n",
+  "plain": "alpha",
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "digit-start-name",
+  "doc": "---\nname: 9lives\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "9lives",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "name-too-long",
+  "doc": "---\nname: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "hash-comment",
+  "doc": "---\nname: alpha # c\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "alpha",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "name-n",
+  "doc": "---\nname: n\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "n",
+  "note": "",
+  "source": "hand-checked"
+ },
+ {
+  "id": "name-off",
+  "doc": "---\nname: Off\ndescription: d\n---\nbody\n",
+  "plain": null,
+  "codexName": "Off",
+  "note": "",
+  "source": "hand-checked"
+ }
+]
