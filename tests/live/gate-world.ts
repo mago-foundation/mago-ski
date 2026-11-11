@@ -1,13 +1,24 @@
 // Shared parts of the gate's live tests (tests/live/*.live.ts): a private mount namespace, a throwaway organisation,
 // and the real gate service with the admin commands an administrator would use. Host-specific parts (the host's
 // managed configuration, the faux model, the scenarios) stay in each live test.
+//
+// The gate is installed with the shipped commands' own functions: `planInit` and `applyInit` write the instance config, hook
+// config, unit, drop-in, the host's settings and the manifests into a temporary `base` folder (inside the private mount
+// namespace; each live test bind-mounts `<base>/etc/<host>` over the host's own /etc folder), and the service is started
+// from the instance config that `init` wrote. The installed package is a root-owned copy of the repository's built `dist`
+// and package.json under `<base>`, so the whole-tree ownership check of `init` is met without weakening it. `checkExec: false`
+// applies only to the node binary and /usr/bin/env, which live outside `<base>` (they are the machine's own). Run
+// `npm run build` first. Codex enforcement is refused by `init` (audit-level in this release), so the Codex live test
+// plans in shadow mode and puts the live mode on the service and the hook config by hand.
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rmdir, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addApprover, approveSkill, initRoot, updateRevocations } from '../../src/admin.ts';
+import { instancePaths, instanceToServiceConfig, readInstanceConfig, type Host } from '../../src/gate/instance.ts';
+import { applyInit, hookConfigText, planInit } from '../../src/gate/setup.ts';
 import { createGateService, type GateService } from '../../src/gate/service.ts';
 import { generateKeyPair } from '../../src/keys.ts';
 import type { Mode } from '../../src/policy.ts';
@@ -69,12 +80,23 @@ export async function writeSkill(dir: string, name: string): Promise<string> {
 }
 
 export interface HostSetup {
+  host: Host;
   /** The host's real binary, as /proc/<pid>/exe shows it. */
   hostExe: string;
-  /** The folder the host loads admin Skills from: the gate's managedDir. */
-  managedDir: string;
-  /** Writes the hook config and the host's managed configuration for this service. */
-  configure: (service: GateService, mode: Mode, stateDir: string) => Promise<void>;
+}
+
+/** The temporary `base` of a live root: what `gate init` writes under, and what each live test bind-mounts the host's /etc folder from. */
+export const liveBase = (root: string): string => path.join(root, 'base');
+
+/** A root-owned copy of the built package under `base` (the install root `init` checks). */
+async function installPackage(base: string): Promise<string> {
+  const installRoot = path.join(base, 'usr', 'lib', 'node_modules', '@mago-foundation', 'mago-ski');
+  if (!existsSync(path.join(REPO, 'dist', 'src', 'cli.js'))) throw new Error('dist/ is missing: run npm run build first');
+  await mkdir(installRoot, { recursive: true });
+  await cp(path.join(REPO, 'dist'), path.join(installRoot, 'dist'), { recursive: true });
+  await cp(path.join(REPO, 'package.json'), path.join(installRoot, 'package.json'));
+  execFileSync('chmod', ['-R', 'go-w', installRoot]);
+  return installRoot;
 }
 
 export interface GateWorld {
@@ -83,6 +105,10 @@ export interface GateWorld {
   service: GateService | null;
   start: (mode: Mode) => Promise<void>;
   stop: () => Promise<void>;
+  /** `<base>/etc/<host>`-relative paths of this instance (config, hook config, managed folder). */
+  paths: ReturnType<typeof instancePaths>;
+  /** The installed hook entry (a copy of dist/ under the base), which the host settings name. */
+  hookEntry: string;
   install: (name: string) => Promise<string>;
   revoke: (name: string) => Promise<unknown>;
   status: () => Promise<unknown>;
@@ -102,24 +128,31 @@ export async function gateWorld(root: string, host: HostSetup): Promise<GateWorl
   const sources = path.join(root, 'sources');
   const digests = new Map<string, string>();
   const b64 = async (file: string) => (await readFile(file)).toString('base64');
-  let generation = 0;
+  const base = liveBase(root);
+  await mkdir(base, { recursive: true, mode: 0o755 });
+  const installRoot = await installPackage(base);
+  const paths = instancePaths(host.host, base);
 
   const w: GateWorld = {
-    root, mode: 'enforce', service: null,
+    root, mode: 'enforce', service: null, paths, hookEntry: path.join(installRoot, 'dist', 'src', 'gate', 'adapters', `${host.host}-hook.js`),
     async start(mode) {
-      generation += 1;
-      const state = path.join(root, `gate-${generation}`);
-      await mkdir(state, { mode: 0o755 });
+      // A fresh gate per start (as before): no state, generations or Skill links of an earlier start.
+      await rm(paths.stateRoot, { recursive: true, force: true });
+      await rm(paths.hostConfig, { force: true });
+      if (existsSync(paths.managedDir)) for (const name of await readdir(paths.managedDir)) await rm(path.join(paths.managedDir, name), { recursive: true, force: true });
       w.mode = mode;
-      w.service = createGateService({
-        stateDir: path.join(state, 'state'), generationsDir: path.join(state, 'gens'), managedDir: host.managedDir,
-        decisionSocketDir: path.join(state, 'dec'), adminSocketDir: path.join(state, 'adm'),
-        rootFingerprint: rootPair.keyId, mode, hostExes: [host.hostExe], rootUid: 0,
+      const plan = await planInit({
+        host: host.host, rootFingerprint: rootPair.keyId, mode: host.host === 'codex' ? 'shadow' : mode, hostExes: [host.hostExe],
+        base, rootUid: 0, installRoot, nodePath: NODE, checkExec: false,
       });
+      await applyInit(plan, { base, rootUid: 0 });
+      const cfg = await readInstanceConfig(paths.instance, 0);
+      if (host.host === 'codex') await writeFile(paths.hook, hookConfigText('codex', { ...cfg, mode }), { mode: 0o644 }); // init refuses codex enforce
+      await mkdir(paths.decisionSocketDir, { recursive: true, mode: 0o755 }); // systemd's RuntimeDirectory in production
+      w.service = createGateService({ ...instanceToServiceConfig(cfg, 0), mode });
       await w.service.start();
       const accepted = await w.service.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(trustRoot), revocations_b64: await b64(revocations) });
       if (!accepted.ok) throw new Error(`accept-trust: ${accepted.error}`);
-      await host.configure(w.service, mode, state);
     },
     async stop() {
       await w.service?.stop();

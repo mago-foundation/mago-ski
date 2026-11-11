@@ -43,7 +43,7 @@ export interface CodexRequirementsInput {
   userSkillRoots: string[];
 }
 
-const SAFE_PATH = /^\/[A-Za-z0-9._/-]+$/u; // also valid inside a TOML basic string and a shell command: nothing to escape
+const SAFE_PATH = /^\/[A-Za-z0-9._/@-]+$/u; // also valid inside a TOML basic string and a shell command: nothing to escape
 const q = (s: string): string => `"${s}"`;
 
 export function codexRequirementsToml(input: CodexRequirementsInput): string {
