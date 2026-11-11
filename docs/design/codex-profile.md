@@ -164,3 +164,85 @@ The documentation subagent writes these from the planner's notes:
 
 1. **Branch.** `feat/0.4.0-codex-profile`. C2, C3 and C4's service part do not depend on stream 1, and can be built now. C5 lands after stream 1 merges.
 2. **Order:** C2 (adapter fixes, with tests), then C1 (generators), C3, C4, and C5 (after stream 1). Live tests last.
+
+## Decisions (v2)
+
+These decisions resolve the v1 Goldfish review. Where they differ from v1, v2 wins.
+
+### D1. The menu route, and the true control (HIGH-1)
+
+- **The route.** Codex's Skill picker runs inside the managed binary and builds structured input that hooks never see. It offers the **listed** Skills. Execution control does not close this.
+- **The control** is that no non-admin Skill is listed:
+  - **Homes.** `gate doctor` **FAILs**, not WARNs, when any listed home has a `SKILL.md` under `.agents/skills`, `.codex/skills` or `$CODEX_HOME/skills`, or has a `.codex/skills/.system` folder (D3).
+  - **Repositories.** They must pass the mago-ski GitHub Action as a required check, and the agent should be started only in checked-out working copies.
+- **Admin Skills picked from the menu** skip the per-use check. The service therefore keeps every installed Skill current, by a periodic reconcile (D6), so a listed admin Skill is always VERIFIED.
+- **The C6 table**, row 1 changes. A menu pick of a non-admin Skill is a residual. It is closed by keeping homes and repos free of non-admin Skills (`doctor` and the GitHub Action), not by execution control.
+- **Live test.** The TUI is driven through a pseudo-terminal: pick from the menu, and check that only admin Skills are offered under the profile. If the harness cannot drive the TUI, the live test records the route as untested, and the guide says so.
+
+### D2. Keying admin Skills by the name Codex gives them (HIGH-2)
+
+In `findSkills`, for each admin entry `e` (dot-entries skipped, which adds the Y4 dot filter to `listRoot`):
+1. `real = realpath(join(adminRoot, e))`. A failure sets `incomplete`.
+2. `digestKey = basename(real).toLowerCase()`.
+3. `nameKey = plainNameLine(<real>/SKILL.md bytes)`. The bytes are read with `readRegularFile`, at most 64 KiB. A result of `null`, meaning not plain, sets `incomplete`.
+4. The keys `e.toLowerCase()`, `digestKey` and `nameKey.toLowerCase()` all map to `e`. On a collision, the directory-name key wins, and a different admin entry claiming the same key sets `incomplete`.
+
+C4's sentence "the digest key already closes the bypass" is replaced by: "Existing installs are covered by D2, which keys each admin Skill by its directory, its digest folder and its plain `name:`. A Skill without a plain name line sets the walk incomplete, which blocks bare mentions."
+
+### D3. Stale `.system` folders (MEDIUM-3)
+
+- `gate init --host codex` moves each listed home's `.codex/skills/.system` to `.system.mago-ski-bak-<UTC>`. It is printed in the plan, and `--keep-system` skips the move.
+- Codex recreates the folder only when bundled Skills are on.
+- `gate doctor` FAILs when a listed home has `.system`, because the profile turns bundled Skills off.
+
+### D4. `plainNameLine`, a whitelist (MEDIUM-4)
+
+`plainNameLine(bytes: Buffer): string | null` returns the name only when all of the following hold, and `null` otherwise:
+- **The bytes.** They are valid UTF-8 with no BOM. Every byte inside the frontmatter is ASCII, and contains no tab and no `\r` other than one at a line end.
+- **The lines.** They come from splitting on `\n`, then removing one trailing `\r`.
+- **The frontmatter.** It is the lines strictly between a first line exactly `---` and the next line exactly `---`.
+- **Each frontmatter line** is either empty, or `key: value`:
+  - `key` matches `^[a-z][a-z0-9_-]*$` and sits at column 0;
+  - one space follows the colon;
+  - `value` matches `^[A-Za-z0-9 ._/,()-]*$`.
+
+  No other line forms are allowed: no indentation, quotes, flow, anchors, tags, `<<`, `...` or `%`.
+- **The `name` key.** Exactly one line has it. Its value passes `validateSkillName`, and is not one of `null`, `Null`, `NULL`, `~`, `true`, `false`, `yes`, `no`, `on`, `off`, or a number.
+- **The `description` key.** Exactly one line has it, and its value is not empty, because Codex rejects Skills without a description.
+
+**Oracle.** The test oracle is Codex's own parser: a small Rust harness against the `codex-skills` crate at the `rust-v0.166.0` `Cargo.lock`, which calls `parse_skill_frontmatter_metadata`. The harness is committed under `tests/fixtures/codex-names/oracle/`. A committed corpus records each document with the harness's output.
+
+The test asserts that every document `plainNameLine` accepts has Codex name equal to the returned name. Refusing is always allowed.
+
+The corpus includes:
+- the cases the reviewer listed (null spellings, BOM, a bare `\r`, CRLF, a `name:` line inside a block scalar, duplicate keys, quoted names);
+- the H3–H6 shapes from the earlier reviews.
+
+### D5. `project_root_markers = []` (MEDIUM-5)
+
+The effect is confirmed. The repo Skill scan covers the working directory only, and a repository's `.codex/config.toml` is not loaded when Codex starts in a subdirectory.
+
+The guide states this as a side effect of the profile, and a live test covers it.
+
+### D6. Removed names, and keeping installs current (MEDIUM-6, LOW-7)
+
+- **Where the block happens.** Codex reads a Skill's body when it injects the Skill (`ext/skills` host outcome). Removing the managed link is therefore the actual block. The removed-names file only gives a clear message and keeps the name blocked if a link reappears. A live test confirms it: revoke during an open session, then mention the Skill. Nothing is injected. If the test shows a body served from a cache, this becomes a HIGH finding and the design is revisited.
+- **File schema.** Canonical JSON `{ "type": "mago-ski.gate.removed-names.v1", "entries": [{ "name", "digest", "kind": "revoked" | "uninstalled", "at": "<ISO>" }] }`, at most 8192 entries, read limit 1 MiB.
+- **Pruning.** `prune-removed` (admin command `{ v: 1, cmd: 'prune-removed', older_than_days: number }`, default 90, minimum 7) drops entries older than that age. Because blocking rests on the link, pruning only loses the message.
+- **When the file is full,** the service evicts the oldest entry and reports `removedNames: { full: true, evicted: <n> }` in `status`. `gate doctor` WARNs on it.
+- **Periodic reconcile.** The service runs `reconcileOnce` every 60 s, whether or not an inbox is configured. Installed Skills whose verdict is no longer VERIFIED are uninstalled, including expired ones. The menu route therefore never offers a stale admin Skill.
+- **Writes.** Uninstall and reconcile write the entry before `hostLink(name, null)` (`service.ts:602` and `:527`). Install removes the name's entries after publish.
+- **No service ask.** A removed name that is not a current admin key is blocked by the adapter without asking the service. The decision log therefore has no record of that block, and the guide says so (LOW-7 accepted).
+
+### D7. Readiness details
+
+- **Adapter loader.** The removed-names path is `join(cfg.adminRoot, '.mago-ski-removed-names.json')`.
+  - Missing means empty. Unreadable or malformed sets `incomplete`.
+  - It is read with `readRegularFile(…, 1 MiB)` and `parseStrictJson` with limits `{ maxBytes: 1 MiB, maxDepth: 4, maxMembers: 8192 + 4 }`.
+  - The block message is NOT_ADMIN, as merged.
+- **Install check.** It runs on the **staged** tree, after `installSkill` and before publish, against `<generationsDir>/<name>/<hex>/SKILL.md`. Reconcile checks the same published path. `status` reports `nameMismatch: string[]`.
+- **Host field.** `GateServiceConfig.host?: 'claude-code' | 'codex'`. `gate init` always sets it. When it is absent, the service treats the instance as Codex if `managedDir` ends with `/codex/skills`. `doctor` FAILs when it is absent.
+- **The new generator.** `codexManagedConfigToml(): string` takes no input and returns the C1 text. Its output path is `/etc/codex/managed_config.toml`.
+- **Homes and `CODEX_HOME`.** `--user-home DIR` and `--codex-home DIR` can both be repeated. `--codex-home` covers a non-default `CODEX_HOME`. The guide says the profile covers only listed homes and default or listed `CODEX_HOME`s.
+- **Before C2.1 merges,** the coder confirms in `ext/skills/src/loader/host.rs` that the default name comes from the realpath's basename, and cites the line. A live test confirms `$<digest>` is the name Codex gives a Skill without a `name:` line.
+- **Tests.** C7 plus: a name different from the install name; null names; BOM; a bare `\r` and CRLF; a stale `.system`; `project_root_markers` from a subdirectory; the menu route (D1); a full removed-names file; prune; reinstall with the same and a new digest.
