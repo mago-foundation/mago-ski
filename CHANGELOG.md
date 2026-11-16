@@ -4,6 +4,13 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- **The company gate in the `mago-ski` command** (Linux; [design](docs/design/gate-cli.md)): `gate init`, `run`, `trust`, `install`, `uninstall`, `refresh`, `status` and `doctor`, for the Claude Code and Codex hosts. `gate init` writes the instance config, the hook config, the systemd unit and the host's managed settings (`--print` shows them and writes nothing), and refuses when the package, node or a host binary could be edited by a user. `gate doctor` prints PASS, FAIL, SKIP or WARN for each check. Guides: [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md).
+- **The mago-ski Codex profile** ([design](docs/design/codex-profile.md)): `gate init --host codex` also writes `/etc/codex/managed_config.toml`, which turns off bundled and cloud Skills and keeps Skill descriptions out of the prompt, and pins executor capability discovery off in `requirements.toml`. New options `--user-home`, `--codex-home`, `--no-deny-read` and `--lock-user-skill-folders`; a home's `.codex/skills/.system` folder moves to a backup. Codex enforce mode is allowed; what Codex leaves to the organisation is listed in the guide.
+- Gate: `gate install` refuses a Skill whose `SKILL.md` frontmatter does not have one plain `name:` line equal to the install name, and a Skill that contains a nested `SKILL.md` (every host). The service re-checks installed Skills every 60 seconds; in enforce mode it hides Skills that expired, no longer match, or whose trust documents are not valid, and restores them when they are servable again. Removed Skill names are recorded in `.mago-ski-removed-names.json`; `gate prune-removed` drops old entries.
+- Codex adapter: admin Skills are keyed by directory name, digest folder name and plain `name:`; a bare `$name` for an approved Skill is served when no non-admin Skill is present; a linked mention is served only when it resolves to the current installed copy.
+
 ## [0.3.0] - 2026-11-10
 
 ### Added
