@@ -562,7 +562,7 @@ test('askAdmin round trip against a started service; errors and the deadline', {
 test('doctor against a started test layout: PASS, then each kind of FAIL and the SKIPs', { skip: LINUX_ONLY }, async (t) => {
   const w = await installed(t);
   const org = await setupOrg(t, { now: new Date() });
-  await applyInit(await planInit(w.opts('claude-code', { rootFingerprint: org.rootKeyId })), { base: w.base, rootUid: UID }); // the instance names this org's root
+  await applyInit(await planInit(w.opts('claude-code', { rootFingerprint: org.rootKeyId, newRoot: true })), { base: w.base, rootUid: UID }); // the instance names this org's root (a changed root needs --new-root)
   const dopts = { base: w.base, rootUid: UID, installRoot: w.installRoot, nodePath: w.seams.nodePath!, envPath: w.seams.envPath!, checkExec: false, somaxconn: async () => 4096, procMounts: async () => 'proc /proc proc rw 0 0\n' };
   const byName = (cs: Awaited<ReturnType<typeof doctor>>) => Object.fromEntries(cs.map((c) => [c.check, c]));
 

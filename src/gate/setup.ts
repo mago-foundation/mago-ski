@@ -290,6 +290,8 @@ export interface InitOptions extends Seams {
   noDenyRead?: boolean;
   /** Codex: `--lock-user-skill-folders`, see planLock. */
   lockUserSkillFolders?: boolean;
+  /** `--new-root`: the installed instance pins a different root and the administrator means to replace it (design gate-new-root.md N2). */
+  newRoot?: boolean;
   /** Tests: sets the immutable attribute on a path (default `chattr +i`). A failure stops the command. */
   chattr?: (target: string) => Promise<void>;
   /** Tests: reads the immutable attribute (default `lsattr -d`). */
@@ -325,6 +327,8 @@ export interface InitPlan {
   problems: string[];
   /** True when a manifest of this host already exists (a re-run). */
   rerun: boolean;
+  /** Set when this run moves the instance from one root to another (`--new-root`). */
+  rootChange?: { from: string; to: string };
   next: string[];
 }
 
@@ -438,6 +442,15 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     if (!SAFE_PATH.test(q)) throw new Error(`${q} contains characters that are not allowed in a unit or hook command (only letters, digits and . _ / @ - are accepted)`);
 
   const cfg = instanceFromOptions({ host, mode, rootFingerprint: opts.rootFingerprint, hostExes, inbox: opts.inbox, base: opts.base });
+  // A changed root is never silent (design gate-new-root.md N2). An instance config that cannot be read gives no root to
+  // compare with, so the run is treated like a first one.
+  const installed = await readInstanceConfig(p.instance, uid).catch(() => undefined);
+  let rootChange: { from: string; to: string } | undefined;
+  if (installed && installed.root_fingerprint !== cfg.root_fingerprint) {
+    if (opts.newRoot) rootChange = { from: installed.root_fingerprint, to: cfg.root_fingerprint };
+    else problems.push(`this gate is set up for root ${installed.root_fingerprint}, not ${cfg.root_fingerprint}; check the fingerprint, or pass --new-root to move the gate to the new root (after a root rotation). Until the new root's documents are sent with gate trust, enforce mode blocks every Skill`);
+  } else if (opts.newRoot)
+    problems.push(installed ? `--new-root was given, but this gate already uses root ${cfg.root_fingerprint}` : `--new-root was given, but no ${host} gate is set up on this machine yet`);
   const homes: CodexHomes = { userHomes: [], codexHomes: [] };
   const actions: PlannedAction[] = [];
   if (host === 'codex') {
@@ -485,10 +498,10 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
   const rerun = own !== undefined;
   const next = [
     rerun ? `systemctl daemon-reload && systemctl restart mago-ski-gate@${host}` : `systemctl daemon-reload && systemctl enable --now mago-ski-gate@${host}`,
-    `mago-ski gate trust --host ${host} --trust-root FILE --revocations FILE`,
+    rootChange ? `mago-ski gate trust --host ${host} --trust-root FILE --revocations FILE   (the documents signed by the new root)` : `mago-ski gate trust --host ${host} --trust-root FILE --revocations FILE`,
     `mago-ski gate doctor --host ${host}`,
   ];
-  return { host, mode, homes, denyRoots, actions, hostExes, files, dirs, foreign, problems, rerun, next };
+  return { host, mode, homes, denyRoots, actions, hostExes, files, dirs, foreign, problems, rerun, next, ...(rootChange ? { rootChange } : {}) };
 }
 
 /* ----------------------------------------------------------------------------------------------------- applying */
@@ -729,7 +742,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     }
     if (!status) add('trust', 'SKIP', 'no status from the service');
     else if (status['trust'] === 'ready') add('trust', 'PASS', `trust accepted; revocation list valid until ${String(status['revocationsExpiresAt'])}`);
-    else add('trust', 'FAIL', `trust is not accepted: ${String(status['trust'])}; run mago-ski gate trust --host ${host}`);
+    else add('trust', 'FAIL', `trust is not accepted: ${String(status['trust'])}; run mago-ski gate trust --host ${host}${status['trust'] === 'no-state' ? ' (after gate init --new-root: with the documents signed by the new root)' : ''}`);
   }
 
   if (status) {

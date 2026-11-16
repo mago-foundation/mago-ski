@@ -202,6 +202,17 @@ function onlyKeys(c: Record<string, unknown>, keys: readonly string[]): void {
     throw new Error('command has missing or unknown fields');
 }
 
+/**
+ * The trust store of one root: `<stateDir>/trust/<64 hex of the root fingerprint>` (design gate-new-root.md N1). Each root has
+ * its own documents and its own rollback memory, so moving an instance to a new root never reads, changes or removes the
+ * old root's state, and moving back finds it as it was.
+ */
+export function trustStoreDir(stateDir: string, rootFingerprint: string): string {
+  const m = /^sha256:([0-9a-f]{64})$/u.exec(rootFingerprint);
+  if (!m) throw new Error('root fingerprint must be sha256:<64 lower-case hex>');
+  return path.join(stateDir, 'trust', m[1]!);
+}
+
 async function ownedDir(dir: string, uid: number, mode: number, strict: boolean): Promise<void> {
   await mkdir(dir, { mode }).catch((e) => { if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') throw e; });
   const info = await lstat(dir);
@@ -801,7 +812,8 @@ export function createGateService(config: GateServiceConfig): GateService {
         for (const d of [stagingDir, certsDir]) await ownedDir(d, config.rootUid, d === certsDir ? 0o755 : 0o700, d !== certsDir);
         await ownedDir(managedDir, config.rootUid, 0o755, false);
         await ownedDir(generationsDir, config.rootUid, 0o755, false);
-        trust = await openTrustStore(path.join(stateDir, 'trust'), { rootFingerprint: config.rootFingerprint, now: now(), ...(config.maxListAgeMs !== undefined ? { maxListAgeMs: config.maxListAgeMs } : {}) });
+        await ownedDir(path.join(stateDir, 'trust'), config.rootUid, 0o700, true);
+        trust = await openTrustStore(trustStoreDir(stateDir, config.rootFingerprint), { rootFingerprint: config.rootFingerprint, now: now(), ...(config.maxListAgeMs !== undefined ? { maxListAgeMs: config.maxListAgeMs } : {}) });
         admission = await openAdmissionStore(path.join(stateDir, 'admission'), { bootId: await bootId(), ...(config.admissionFault ? { fault: config.admissionFault } : {}) });
         ready = true;
         await getLog().catch(() => { logHealthy = false; });

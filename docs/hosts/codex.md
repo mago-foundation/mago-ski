@@ -145,10 +145,26 @@ In shadow mode nothing is blocked or hidden, except that a revocation still unin
 - **Removed names.** The gate records the Skills it removed in `/etc/codex/skills/.mago-ski-removed-names.json` (at most 4096 entries, oldest dropped first), so a removed name gets a clear block message. `sudo mago-ski gate prune-removed --host codex --older-than-days N` (default 90, at least 7) drops old entries. Blocking rests on the removed link, so pruning only loses the message. A removed name is blocked by the hook without asking the gate, so that block is not in the decision log.
 - **Checks.** `sudo mago-ski gate doctor --host codex` FAILs on, among other things: a managed file that differs from what `gate init` writes, a Skill folder or a `.system` folder in a listed home, an installed Skill with a name mismatch, and a service that is down. It WARNs on an untested Codex version, on unlocked user Skill folders and on shadow mode.
 
+## After a root rotation
+
+The gate does not follow root events by itself. When your organisation has replaced its root key and re-signed its documents (`mago-ski root adopt`), move each gate to the new root:
+
+```bash
+sudo mago-ski gate init --host codex --root-fingerprint sha256:<new> --new-root    # with the same options as your original init
+sudo systemctl daemon-reload && sudo systemctl restart mago-ski-gate@codex
+sudo mago-ski gate trust --host codex --trust-root trust-root.json --revocations revocations.json
+sudo mago-ski gate doctor --host codex
+```
+
+- `gate init` refuses a root fingerprint that differs from the installed one unless `--new-root` is given, so a mistyped fingerprint cannot switch roots by accident. `--print` shows the move without writing anything.
+- Between the restart and `gate trust`, the gate has no documents for the new root. In enforce mode every Skill is blocked during that time, so run the commands together.
+- Installed Skills do not need to be installed again. Their certificates were signed by approvers, and the approvers are kept.
+- The old root's stored documents are kept and no longer used.
+
 ## Limits
 
 - **Linux only.**
 - **Verified on Codex 0.166.x.** The earlier live test ([results](../spikes/codex-gate-live.md)) ran 0.163.0 and 0.166.0 in non-interactive sessions, before the profile existed. Results for the profile's own live scenarios are not published yet, and the menu route has not been tested.
 - **Instructions already read stay.** The gate cannot remove a Skill's text from a session that has already loaded it.
-- **Root recovery and freshness are not applied by the gate yet.** The gate keeps the root fingerprint it was given at `gate init`, and does not read root events or timestamps. A revoked root key is therefore not noticed by the gate. After a root rotation there is no supported command to move a gate to the new root: `gate init` with the new fingerprint is accepted, but the gate then reports its stored trust state as corrupt (`state-corrupt`) and refuses the new documents, and in enforce mode every Skill is blocked. Plan a root rotation with this in mind until the gate supports root events.
+- **The gate does not follow root events or timestamps by itself.** It keeps the root fingerprint it was given, so a rotated or revoked root key is not noticed until an administrator moves the gate (see [After a root rotation](#after-a-root-rotation)). On a fleet, that means running the four commands on every machine.
 - An approval records who approved which exact version. It does not say that a Skill is safe.
