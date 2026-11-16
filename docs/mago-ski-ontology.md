@@ -39,7 +39,9 @@ Neither this revision nor the plan changes repository code.
 | `[gui-poc]` | Planned GUI PoC concept, not implemented here | Discovery and change demonstration |
 | `[gui-v0.1]` | Planned initial GUI product requirement | Personal observation companion |
 | `[gui-v0.2]` | Planned later GUI capability, subject to host and restoration gates | Change holds and restoration |
-| `[gui-future]` | Long-term integration or advanced editing concept | CLEAR, Limiter, capability controls, canvas |
+| `[gui-future]` | Long-term advanced editing concept | Sidechain rules, canvas |
+| `[admission-proposed]` | Admission policy and evidence design; not implemented | §29, [admission policy design](design/admission-policy.md) |
+| `[withdrawn]` | Concept removed from mago-ski's scope; kept so older references resolve | Runtime integrations in §24.2 |
 
 Untagged engine statements in §§1–17 mean `[0.1-dev]` only within the stated host and threat
 model boundaries. Tags on a GUI concept identify its earliest planned stage, not a release
@@ -135,6 +137,7 @@ converts an acknowledgement into an Approval.
 26. [Release stages and ontology-to-GUI traceability](#section-26)
 27. [GUI invariants and worked examples](#section-27)
 28. [Verification register and source map](#section-28)
+29. [Admission policy and evidence `[admission-proposed]`](#section-29)
 
 <a id="section-01"></a>
 
@@ -1495,7 +1498,8 @@ Every node in this figure is proposed except ordinary successor trust-document f
 | Tampered documents | CanonicalJSON + Ed25519 over DSSE | `UNVERIFIABLE` (or an earlier check's verdict) |
 
 **NonGoal** — explicitly outside the current engine protection: malicious first versions and fooled reviewers; runtime
-prompt injection (a separate layer, Mago's CLEAR); shell commands that reach Skill files
+prompt injection and any runtime evaluation of tool calls, data or intent (outside mago-ski's
+scope: mago-ski decides admission only); shell commands that reach Skill files
 indirectly; other code in the agent process; a compromised host; a compromised root key
 (root recovery is proposed and would add bounded recovery, not universal compromise immunity); files excluded from the digest, used by other tools; Windows.
 
@@ -1513,7 +1517,7 @@ flowchart TD
     D --> V["UNAPPROVED_CHANGE"]
     V --> H["Supported enforce hook"]
     M["Malicious first version"] -. "outside exact-version approval guarantee" .-> O["Review or separate analysis"]
-    P["Runtime prompt injection"] -. "separate layer" .-> C["Future CLEAR integration"]
+    P["Runtime prompt injection"] -. "outside mago-ski" .-> C["Not an admission question"]
 ```
 
 The GUI must expose these boundaries. A change lamp reports change; it does not prove maliciousness or complete process isolation.
@@ -1820,6 +1824,11 @@ New GUI states are not new engine Verdicts and are not silently serialized into 
     Rotation alone does not guarantee that every old Certificate verifies.
 18. **`[proposed]` A revoked root blocks in every mode**, and only a signed rotate restores
     trust.
+19. **`[admission-proposed]` Admission verdicts are deterministic.** A verdict is a pure
+    function of Skill bytes, evidence documents, policy, trust documents and time. No model,
+    classifier or confidence threshold, and no network access, takes part in the decision.
+20. **`[admission-proposed]` Scanner evidence only tightens.** A `scanned-by` attestation can
+    flag, require review or block; it can never be the reason a Skill is admitted.
 
 <a id="figure-16"></a>
 
@@ -1850,9 +1859,10 @@ Both engine and GUI invariants preserve the distinction between remembered conte
 | TUF | Expiring signed metadata, version rollback protection, short revocation lifetimes; `[proposed]` root and timestamp roles |
 | KERI | `[proposed]` fingerprint-only pinning (public key revealed on first use); pre-rotation not adopted |
 | Sigstore / Cosign | `[experimental]` keyless adapter kept from a preview; not used by the verifier |
-| OWASP Agentic Skills Top 10 | Addresses the same risk class as AST07 (Update Drift) through exact-digest pinning; reads no Universal Skill Format fields; **no compliance claim** |
+| OWASP Agentic Skills Top 10 | Addresses the same risk class as AST07 (Update Drift) through exact-digest pinning; reads no Universal Skill Format fields; **no compliance claim**. `[admission-proposed]` A publisher manifest mappable to USF, bound into `published-by` (§29) |
+| in-toto attestation predicates | `[admission-proposed]` `published-by`, `reviewed-by`, `scanned-by` and `witnessed-by` as predicate types (§29) |
 | Capability scanners (SkilLock) | Complementary: explain what changed; mago-ski checks it was approved |
-| Mago CLEAR | Separate runtime evaluation/filtering layer; outside the current engine, proposed GUI integration in §24 |
+| Runtime enforcement products (including Mago CLEAR) | Out of scope. mago-ski decides admission only; no engine or GUI integration is planned (§24.2 concepts `[withdrawn]`) |
 
 <a id="figure-17"></a>
 
@@ -1863,7 +1873,7 @@ flowchart TD
     D["DSSE and in-toto"] --> E["Existing engine records"]
     T["TUF-inspired metadata controls"] --> E
     S["External capability scanner"] -. "optional explanation" .-> G["GUI change view"]
-    C["CLEAR runtime layer"] -. "future supported adapter" .-> G
+    P["Signed publisher and witness evidence"] -. "[admission-proposed]" .-> E
     E --> G
 ```
 
@@ -1911,8 +1921,10 @@ in this ontology. PoC findings may change framework, packaging, defaults and sco
   global preferences, host status, real-event metering and the automatic rack.
 - **GUI v0.2 candidates:** effective change holds, acknowledgement-bound release requests,
   supported restore operations and policy-application acknowledgements where newly added.
-- **Future:** CLEAR and Limiter integrations, actual capability enforcement adapters,
-  automated cross-module rules and optional typed canvas editing.
+- **Future:** automated cross-module rules, optional typed canvas editing and
+  `[admission-proposed]` an admission policy template (§29).
+- **Withdrawn:** CLEAR and Limiter integrations and runtime capability enforcement adapters.
+  Runtime evaluation is outside mago-ski.
 
 <a id="figure-18"></a>
 
@@ -2333,18 +2345,21 @@ and a compatible connection. The editor enforces supported type, scope and check
 it must not allow arbitrary execution ordering that breaks mandatory gates. Canvas editing
 is optional and not a first-use prerequisite.
 
-**RuntimeIntegration** `[gui-future]` — an adapter to CLEAR, an execution budget controller
+**RuntimeIntegration** `[withdrawn]` — an adapter to CLEAR, an execution budget controller
 or a real capability enforcement backend. A Skill's textual instructions are not an OS
 principal; multiple Skills can influence one host. Global/session controls can be offered
 where per-Skill action attribution is not reliable.
 
-**DecisionAssessment** `[gui-future]` — a runtime model's decision with confidence and
+**DecisionAssessment** `[withdrawn]` — a runtime model's decision with confidence and
 evidence/model/prompt versions. The decision and its confidence are distinct; high-confidence
 DENY is not ALLOW. It is not a new TreeDigest trust score.
 
-**ObservationFilter** `[gui-future]` — a supported return-data boundary applying a policy
+**ObservationFilter** `[withdrawn]` — a supported return-data boundary applying a policy
 projection, MASK or TRIM. Existing Pi find/ls ResultFiltering is narrower and should not be
 renamed as a general CLEAR filter. Filtering output cannot undo an earlier external action.
+
+The three `[withdrawn]` concepts above describe runtime evaluation, which is outside
+mago-ski's scope. They are kept only so older references resolve; no stage implements them.
 
 <a id="figure-24b"></a>
 
@@ -2463,7 +2478,8 @@ Design basis: plan §§14–20, 24. Stages below are requirements, not implement
 | Presets and notifications | Mode where actually configured | GuiPreferences, AttentionItem, Notification | v0.1 | GUI-013; D03/D06 |
 | Working change hold | Host hooks and exact digest | ChangeHold, HostApplyAcknowledgement | v0.2 candidate | Plan §17.1 |
 | Supported content restore | Current digest and verifier | RestoreCandidate/Request/Outcome | v0.2 candidate | Plan §17.2; §19.5 |
-| CLEAR and Limiter rack | Existing decisions plus new real backend | RuntimeIntegration, DecisionAssessment | future | Plan §17.3–17.5 |
+| CLEAR and Limiter rack | — | RuntimeIntegration, DecisionAssessment | withdrawn | Out of scope (§17) |
+| Admission policy template | Policy, TrustRoot, decision records | AdmissionPolicy, PolicyLayer, PolicyReplay | admission-proposed | §29 |
 | User patch editing | Validated host operations | TypedPort, PatchConnection, SidechainRule | future | Plan §10.4; D09 |
 
 Reference IDs refer to the product plan and preserve its distinction between required,
@@ -2695,3 +2711,74 @@ and test. The existence of a Figure or plan requirement does not make a feature 
 | [Figure 26](#figure-26) | Product growth adds capabilities without changing core meanings |
 | [Figure 27](#figure-27) | Observation, acknowledgement, approval and application stay separate |
 | [Figure 28](#figure-28) | Validation and design are separate sources of truth |
+| [Figure 29](#figure-29) | Evidence flows into one deterministic admission decision |
+
+---
+
+<a id="section-29"></a>
+
+## 29. Admission policy and evidence `[admission-proposed]`
+
+Design: [Skill admission policy](design/admission-policy.md). Nothing in this section is
+implemented; it fixes vocabulary so later specs and the GUI use the same terms.
+
+**AdmissionDecision** — the verdict for one Skill version on one host. A pure function of
+Skill bytes, EvidenceBundle, AdmissionPolicy, trust documents and time. It happens when a
+Skill is about to be loaded; mago-ski evaluates nothing after that.
+
+**Evidence** — a signed, narrow claim about an exact digest. Kinds:
+- **PublishedBy** — a PublisherIdentity published these bytes and this DeclaredManifest.
+- **ReviewedBy** — an organisation Approver approved this version; today's Certificate.
+- **ScannedBy** — a scanner reported a result for this digest. Tighten-only.
+- **WitnessedBy** — a witness observed this digest at a source commit at a time.
+
+No Evidence kind states that a Skill is safe.
+
+**EvidenceBundle** — the Evidence fetched before evaluation. Evaluation itself uses no
+network.
+
+**PublisherIdentity** — (OIDC issuer, numeric repository id, workflow path, commit). Tags
+are not part of it, and no rule can refer to tags.
+
+**DeclaredManifest** — what the publisher says the Skill needs (files, network origins,
+shell, binaries); mappable to the OWASP Universal Skill Format.
+
+**ObservedProfile** — what a versioned, deterministic extractor finds in the bytes.
+Recomputed by every verifier; never taken from the publisher.
+
+**CapabilityEscalation** — the union of DeclaredManifest and ObservedProfile grew compared
+with the previously admitted version.
+
+**AdmissionPolicy** — a signed, versioned trust document of PolicyRules. **PolicyRule** —
+conditions over who, what, evidence and history, with one action: ALLOW, LOG_ONLY, FLAG,
+REQUIRE_REVIEW or BLOCK. Deny wins over allow.
+
+**PolicyLayer** — baseline pack, organisation, team, host. A lower layer only tightens.
+
+**PolicyPack** — a published, signed, parameterised AdmissionPolicy meant to be extended.
+
+**AutomaticAdmissionChain** — the versions admitted without a person since the last
+ReviewedBy, bounded in hops, age and SKILL.md change size. Recorded with every decision.
+
+**PolicyReplay** — re-evaluating recorded decisions under a changed policy to list which
+would flip; shown before a policy is signed.
+
+Relations: AdmissionDecision —uses→ EvidenceBundle, AdmissionPolicy, TrustRoot;
+ScannedBy —canOnly→ tighten; AutomaticAdmissionChain —startsAt→ ReviewedBy;
+PolicyLayer —mayNot→ loosen its parent; DecisionRecord —names→ PolicyRule.
+
+<a id="figure-29"></a>
+
+### Figure 29 — Evidence flows into one deterministic admission decision
+
+```mermaid
+flowchart TD
+    P["PublishedBy"] --> B["EvidenceBundle"]
+    R["ReviewedBy (Certificate)"] --> B
+    W["WitnessedBy"] --> B
+    S["ScannedBy"] -. "tighten only" .-> B
+    O["ObservedProfile (recomputed from bytes)"] --> D["AdmissionDecision"]
+    B --> D
+    A["AdmissionPolicy (signed, layered)"] --> D
+    D --> H["Host: allow or block at load time"]
+```
