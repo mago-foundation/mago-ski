@@ -41,7 +41,7 @@ Screenshots are made with `node scripts/screenshots.ts` (see the header of that 
 - **It does not judge safety.** Origin detection is partial (HTTP(S) origins in text files). A change with no new origin is still a change, and "기록과 같음" (same as recorded) means unchanged, not safe.
 - **It does not write host files.** The policy, trust root, revocations and Pi's host state file are read only; Skill folders are read only too, except that APPROVE writes the certificate (`.mago-ski-cert.json`, which the digest excludes, or into the pin's first `certificate_dirs` entry), as `mago-ski approve` does. Trust is loaded with `recordVersions: false`, so the GUI never moves Pi's rollback memory.
 - **It stops when closed.** Closing the window stops observation; the next start re-checks everything and reports changes made in between.
-- The CAPABILITY EQ, DYNAMICS LIMITER and CLEAR FILTER modules in the rack are later stages. They are drawn dimmed and do nothing.
+- The CAPABILITY EQ, DYNAMICS LIMITER and CLEAR FILTER modules in the rack are drawn dimmed and do nothing. They describe runtime controls, which are outside mago-ski's scope, and will be removed from the rack.
 
 ## Run it
 
