@@ -68,7 +68,7 @@ test('planInit claude-code: golden file contents, order, modes and folders', asy
   const by = Object.fromEntries(plan.files.map((f) => [f.role, f]));
 
   assert.equal(by['instance']!.path, `${w.base}/etc/mago-ski/gate/claude-code.json`);
-  assert.equal(by['instance']!.content, `{"admin_socket_dir":"${w.base}/run/mago-ski/gate/claude-code/admin","build_id":"mago-ski 0.2.0","decision_socket_dir":"${w.base}/run/mago-ski/gate/claude-code","generations_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/generations","host":"claude-code","host_exes":["${w.exe}"],"inbox_dir":null,"managed_dir":"${w.base}/etc/claude-code/.claude/skills","mode":"shadow","root_fingerprint":"${FP}","state_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/state","v":1}\n`);
+  assert.equal(by['instance']!.content, `{"admin_socket_dir":"${w.base}/run/mago-ski/gate/claude-code/admin","build_id":"mago-ski 0.3.0","decision_socket_dir":"${w.base}/run/mago-ski/gate/claude-code","generations_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/generations","host":"claude-code","host_exes":["${w.exe}"],"inbox_dir":null,"managed_dir":"${w.base}/etc/claude-code/.claude/skills","mode":"shadow","root_fingerprint":"${FP}","state_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/state","v":1}\n`);
   assert.equal(by['hook']!.content, `{"client_deadline_ms":1500,"host_exes":["${w.exe}"],"mode":"shadow","self_deadline_ms":3000,"socket":"${w.base}/run/mago-ski/gate/claude-code/decision.sock","v":1}\n`);
   assert.equal(by['unit']!.path, `${w.base}/etc/systemd/system/mago-ski-gate@.service`);
   assert.equal(by['unit']!.content, `[Unit]
@@ -379,7 +379,7 @@ test('instance config validation: unknown keys, wrong types, permissions', async
   const cfg = await readInstanceConfig(p.instance, UID);
   assert.deepEqual(instanceToServiceConfig(cfg, UID), {
     stateDir: p.stateDir, generationsDir: p.generationsDir, managedDir: p.managedDir, decisionSocketDir: p.decisionSocketDir, adminSocketDir: p.adminSocketDir,
-    rootFingerprint: FP, mode: 'shadow', hostExes: [w.exe], rootUid: UID, buildId: 'mago-ski 0.2.0',
+    rootFingerprint: FP, mode: 'shadow', hostExes: [w.exe], rootUid: UID, buildId: 'mago-ski 0.3.0',
   });
   assert.equal(instanceToServiceConfig({ ...cfg, inbox_dir: '/in' }, UID).inboxDir, '/in');
   await assert.rejects(readInstanceConfig(p.instance, UID + 1), /owned by root/u);
