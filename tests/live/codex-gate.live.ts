@@ -18,6 +18,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { codexManagedConfigToml, codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { readInstanceConfig } from '../../src/gate/instance.ts';
+import { hookConfigText } from '../../src/gate/setup.ts';
 import type { Mode } from '../../src/policy.ts';
 import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
@@ -109,6 +111,9 @@ async function runCodex(w: World, name: string, run: Run) {
   const codexHome = path.join(home, '.codex');
   const proj = path.join(dir, 'proj');
   for (const d of [codexHome, proj]) await mkdir(d, { recursive: true });
+  // Each fresh host gets a different temporary home; list it just as gate init would for a real user.
+  const instance = await readInstanceConfig(w.paths.instance, 0);
+  await writeFile(w.hookConfig, hookConfigText('codex', instance, { userHomes: [home], codexHomes: [codexHome] }), { mode: 0o644 });
   if (run.projectSkill) await writeSkill(path.join(proj, '.agents', 'skills'), 'project-skill');
   if (run.userSkill) await writeSkill(path.join(codexHome, 'skills'), 'user-skill');
   await writeFile(path.join(codexHome, 'config.toml'),
@@ -164,7 +169,8 @@ interface Scenario {
 }
 
 const linked = (name: string) => `[$${name}](${ADMIN_SKILLS}/${name}/SKILL.md)`;
-const blocked = (o: Outcome) => o.modelCalls === 0 || o.events.some((e) => /error|blocked/iu.test(e)) || /block|mago-ski/iu.test(o.stderr);
+// No model request alone can also mean that Codex failed to start. Require an actual hook-block observation.
+const blocked = (o: Outcome) => [...o.events, o.stderr].some((e) => /hook[^\n]*blocked|blocked[^\n]*hook/iu.test(e));
 
 const SCENARIOS: Record<string, Scenario> = {
   'listing': {
@@ -209,9 +215,9 @@ const SCENARIOS: Record<string, Scenario> = {
   },
   'revoked-new-session': {
     mode: 'enforce', what: 'after a revoke the Skill is auto-uninstalled: not listed, and a linked mention is blocked',
-    before: async (w) => { await w.install('other-skill'); await w.revoke('other-skill'); },
+    before: async (w) => { await w.install('other-skill'); const result = await w.revoke('other-skill'); if (typeof result !== 'object' || result === null || !('ok' in result) || result.ok !== true) throw new Error('revocation was not accepted'); },
     run: () => ({ prompt: `use ${linked('other-skill')} now` }),
-    expect: (o) => ({ 'other-skill not listed': !(o.listing ?? []).includes('other-skill'), 'its body did not reach the model': o.reached['other-skill'] === false }),
+    expect: (o) => ({ 'managed link was removed': !existsSync(path.join(ADMIN_SKILLS, 'other-skill')), 'its body did not reach the model': o.reached['other-skill'] === false, 'the prompt was blocked': blocked(o) }),
   },
   'service-down': {
     mode: 'enforce', what: 'the gate service is stopped: a linked mention of the installed Skill is blocked (fail closed)',

@@ -207,11 +207,11 @@ const SCENARIOS: Record<string, Scenario> = {
   'revoke-mid-session': {
     mode: 'enforce', what: 'the approval is revoked after the session started: the next Skill call in that session is denied',
     before: async (w) => { await w.install('other-skill'); },
-    run: (w) => ({ steps: [async () => { await w.revoke('other-skill'); return [tool('Skill', { skill: 'other-skill' })]; }] }),
+    run: (w) => ({ steps: [async () => { const result = await w.revoke('other-skill'); if (typeof result !== 'object' || result === null || !('ok' in result) || result.ok !== true) throw new Error('revocation was not accepted'); return [tool('Skill', { skill: 'other-skill' })]; }] }),
     expect: (o) => ({
       'other-skill was listed at start': o.advertised?.includes('other-skill') === true,
       'its body did not reach the model after the revoke': o.reached['other-skill'] === false,
-      'the call returned an error': o.toolResults.some((r) => r.is_error),
+      'the gate refused the call': o.toolResults.some((r) => r.is_error && /not approved by your organisation/u.test(r.text)),
     }),
   },
   'revoked-new-session': {
@@ -238,7 +238,7 @@ const SCENARIOS: Record<string, Scenario> = {
     mode: 'enforce', what: 'the gate service is stopped: the installed Skill is still listed, but every use is denied (fail closed)',
     before: async (w) => { await rm(path.join(MANAGED_SKILLS, 'planted-skill'), { recursive: true, force: true }); await w.stop(); },
     run: () => ({ steps: [skillCall('approved-skill')] }),
-    expect: (o) => ({ 'approved body did not reach the model': o.reached['approved-skill'] === false, 'the call returned an error': o.toolResults.some((r) => r.is_error) }),
+    expect: (o) => ({ 'approved body did not reach the model': o.reached['approved-skill'] === false, 'the gate could not verify the Skill': o.toolResults.some((r) => r.is_error && /mago-ski could not verify/u.test(r.text)) }),
   },
   'slash-service-down': {
     mode: 'enforce', what: 'the gate service is stopped: /approved-skill is blocked (fail closed)',

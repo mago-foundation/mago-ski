@@ -39,6 +39,7 @@
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
     "test:live:claude-code": "node tests/live/claude-code-gate.live.ts",
     "test:live:codex": "node tests/live/codex-gate.live.ts",
+    "live:scenarios": "node scripts/live-scenarios.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {
