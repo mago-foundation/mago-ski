@@ -4,7 +4,7 @@
 // parameters (`base`, `rootUid`, `platform`, ...) so tests can run them against a temporary tree and the current user.
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmod, chown, link, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, chown, link, lstat, mkdir, open, opendir, readdir, readFile, readlink, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { constants as fsConstants, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -216,7 +216,14 @@ async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: s
   const stampNow = stamp((opts.now ?? (() => new Date()))());
   const isDir = async (d: string): Promise<boolean> => (await lstat(d).catch(() => undefined))?.isDirectory() === true;
   for (const [root, backupParent] of [...homes.userHomes.map((h) => [`${h}/.codex`, `${h}/.codex`] as const), ...homes.codexHomes.map((h) => [h, h] as const)])
-    if (await isDir(`${root}/skills/.system`)) out.push({ kind: 'move-system', from: `${root}/skills/.system`, to: `${backupParent}/mago-ski-backup/system-${stampNow}` });
+    if (await isDir(`${root}/skills/.system`)) {
+      // The home's owner controls these folders: a link in the path (`~/.codex/skills` -> another account's Skill folder) would
+      // make root move a folder that is not this home's. The path must be the real one; the move checks it again (moveSystemFolder).
+      const skills = `${root}/skills`;
+      const real = await realpath(skills).catch(() => undefined);
+      if (real !== skills) { problems.push(`${skills} is not a real path (it resolves to ${real ?? 'nothing'}); gate init does not move .system through a link. Remove the link, or list the real home`); continue; }
+      out.push({ kind: 'move-system', from: `${skills}/.system`, to: `${backupParent}/mago-ski-backup/system-${stampNow}` });
+    }
   if (opts.lockUserSkillFolders) {
     if (homes.userHomes.length === 0) problems.push('--lock-user-skill-folders needs at least one home (--user-home DIR)');
     for (const home of homes.userHomes) {
@@ -233,14 +240,40 @@ async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: s
   return out;
 }
 
+/**
+ * Moves `<root>/skills/.system` to `<root>/mago-ski-backup/<leaf>` as root without following a link the home's owner can make.
+ * Both parent folders are opened with O_NOFOLLOW and must be exactly the planned paths (the kernel's name for the open folder
+ * equals the path, so no part of it is a link); the rename then goes through the open handles (`/proc/self/fd/N/...`), so a
+ * folder swapped for a link after the check changes nothing. `.system` itself must be a real folder inside the open handle.
+ */
+async function moveSystemFolder(from: string, to: string): Promise<void> {
+  const flags = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+  const pinned = async (dir: string) => {
+    const handle = await open(dir, flags).catch((e: unknown) => { throw new Error(`${dir} cannot be opened as a real folder (${errnoCode(e) ?? message(e)}); .system was not moved`); });
+    const real = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
+    if (real !== dir) { await handle.close(); throw new Error(`${dir} is not a real path (it resolves to ${real ?? 'an unknown folder'}); .system was not moved`); }
+    return handle;
+  };
+  const skills = await pinned(path.dirname(from));
+  try {
+    const backupDir = path.dirname(to);
+    await mkdir(backupDir, { mode: 0o755 }).catch((e: unknown) => { if (errnoCode(e) !== 'EEXIST') throw e; });
+    const backup = await pinned(backupDir);
+    try {
+      const source = `/proc/self/fd/${skills.fd}/${path.basename(from)}`;
+      if (!(await lstat(source)).isDirectory()) throw new Error(`${from} is no longer a real folder; .system was not moved`);
+      await rename(source, `/proc/self/fd/${backup.fd}/${path.basename(to)}`); // rename never follows a link in the last part
+    } finally { await backup.close(); }
+  } finally { await skills.close(); }
+}
+
 /** Plan: moves first, then locks. Each move needs the target folder free. */
 async function runHomeActions(actions: readonly PlannedAction[], opts: ApplyOptions, rootUid: number): Promise<{ moved: { from: string; to: string }[]; locked: string[] }> {
   const moved: { from: string; to: string }[] = [];
   const locked: string[] = [];
   for (const a of actions) {
     if (a.kind !== 'move-system') continue;
-    await mkdir(path.dirname(a.to), { recursive: true, mode: 0o755 });
-    await rename(a.from, a.to);
+    await moveSystemFolder(a.from, a.to);
     moved.push({ from: a.from, to: a.to });
   }
   const chattr = opts.chattr ?? defaultChattr;
@@ -626,6 +659,8 @@ export interface DoctorOptions extends Seams {
   codexVersion?: (exe: string) => Promise<string>;
   /** Codex: the immutable attribute of a path (default `lsattr -d`). */
   isImmutable?: (target: string) => Promise<boolean>;
+  /** Tests: smaller bounds for the scan of the listed homes. */
+  skillScanLimits?: SkillScanLimits;
 }
 
 /** lstat: a regular file (not a symlink) owned by `uid` and not writable by group or others. */
@@ -749,6 +784,11 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     if (status['root_fingerprint'] === c.root_fingerprint) add('root fingerprint', 'PASS', `the service uses ${c.root_fingerprint}`);
     else add('root fingerprint', 'FAIL', `the service uses ${String(status['root_fingerprint'])} but the instance config says ${c.root_fingerprint}; restart the service`);
   }
+  if (status) { // only when something is wrong: what hosts can see must match the install records
+    const unrecorded = Array.isArray(status['unrecorded']) ? status['unrecorded'] : [];
+    if (unrecorded.length > 0) add('unrecorded Skills', 'FAIL', `the managed Skill folder holds entries with no install record that hosts can load: ${unrecorded.join(', ')}; remove them (in enforce the service removes links itself, never folders)`);
+    if (typeof status['reconcileError'] === 'string') add('reconcile', 'FAIL', `the last reconcile did not finish cleanly, so a Skill that should be hidden may still be visible: ${status['reconcileError']}`);
+  }
   if (host === 'codex' && status) {
     const mism = Array.isArray(status['nameMismatch']) ? status['nameMismatch'] : [];
     if (mism.length > 0) add('name mismatch', 'FAIL', `installed Skills whose SKILL.md does not start with one plain "name:" line equal to the install name (hidden in enforce): ${mism.join(', ')}`);
@@ -789,20 +829,37 @@ async function readHookHomes(file: string): Promise<CodexHomes | undefined> {
   } catch { return undefined; }
 }
 
-/** True when a SKILL.md (any case) exists under `root`, entering dot folders and following links; bounded. */
-async function hasSkillFile(root: string, skip: (rel: string) => boolean = () => false): Promise<boolean> {
+export interface SkillScanLimits { dirs: number; entries: number; depth: number }
+const SKILL_SCAN_LIMITS: SkillScanLimits = { dirs: 5000, entries: 200_000, depth: 8 };
+
+/**
+ * Looks for a SKILL.md (any case) under `root`, entering dot folders and following links. Bounded in folders, in entries (read
+ * one at a time: a folder is never loaded whole, and the queue never holds more than `dirs` folders) and in depth. `none` means
+ * every folder was read. When a bound is reached with folders left, or a folder cannot be read, the answer is `incomplete`:
+ * a SKILL.md may exist where the scan did not look, so the caller must not report a clean home.
+ */
+export async function scanForSkillFile(root: string, skip: (rel: string) => boolean = () => false, limits: SkillScanLimits = SKILL_SCAN_LIMITS): Promise<'found' | 'none' | 'incomplete'> {
   const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
-  let dirs = 0;
-  for (let i = 0; i < queue.length && dirs < 5000; i++) {
+  let entries = 0;
+  let complete = true;
+  for (let i = 0; i < queue.length; i++) {
     const { dir, depth } = queue[i]!;
-    dirs++;
-    for (const name of await readdir(dir).catch(() => [] as string[])) {
-      if (skip(path.relative(root, path.join(dir, name)))) continue;
-      if (/^skill\.md$/iu.test(name)) return true;
-      if (depth < 8 && (await stat(path.join(dir, name)).catch(() => undefined))?.isDirectory()) queue.push({ dir: path.join(dir, name), depth: depth + 1 });
+    try {
+      for await (const e of await opendir(dir)) { // closed by the loop, also on return
+        if (++entries > limits.entries) return 'incomplete';
+        const full = path.join(dir, e.name);
+        if (skip(path.relative(root, full))) continue;
+        if (/^skill\.md$/iu.test(e.name)) return 'found';
+        const isDir = e.isDirectory() || (e.isSymbolicLink() && (await stat(full).catch(() => undefined))?.isDirectory() === true);
+        if (!isDir) continue;
+        if (depth >= limits.depth || queue.length >= limits.dirs) { complete = false; continue; } // not entered: keep looking in what is queued
+        queue.push({ dir: full, depth: depth + 1 });
+      }
+    } catch (e) {
+      if (!['ENOENT', 'ENOTDIR'].includes(errnoCode(e) ?? '')) complete = false; // absent is empty; unreadable is unknown
     }
   }
-  return false;
+  return complete ? 'none' : 'incomplete';
 }
 
 const defaultCodexVersion = (exe: string): Promise<string> => new Promise((resolve, reject) => {
@@ -824,16 +881,26 @@ async function codexDoctor(c: InstanceConfig, p: InstancePaths, homes: CodexHome
   if (!listed) add('user homes', 'WARN', 'no home is listed (gate init --user-home DIR): the hook cannot recognise any HOME, so bare mentions are blocked');
   // Non-admin Skills in a listed home (the menu route, D1): FAIL.
   const withSkills: string[] = [];
+  const notScanned: string[] = [];
   const withSystem: string[] = [];
+  const notSystem = (rel: string): boolean => rel === '.system' || rel.startsWith('.system/');
+  const scan = async (d: string): Promise<void> => {
+    const r = await scanForSkillFile(d, notSystem, opts.skillScanLimits);
+    if (r === 'found') withSkills.push(d); else if (r === 'incomplete') notScanned.push(d);
+  };
   for (const h of homes.userHomes) {
-    for (const d of [`${h}/.agents/skills`, `${h}/.codex/skills`]) if (await hasSkillFile(d, (rel) => rel === '.system' || rel.startsWith('.system/'))) withSkills.push(d);
+    for (const d of [`${h}/.agents/skills`, `${h}/.codex/skills`]) await scan(d);
     if (await lstat(`${h}/.codex/skills/.system`).then(() => true, () => false)) withSystem.push(`${h}/.codex/skills/.system`);
   }
   for (const h of homes.codexHomes) {
-    if (await hasSkillFile(`${h}/skills`, (rel) => rel === '.system' || rel.startsWith('.system/'))) withSkills.push(`${h}/skills`);
+    await scan(`${h}/skills`);
     if (await lstat(`${h}/skills/.system`).then(() => true, () => false)) withSystem.push(`${h}/skills/.system`);
   }
-  if (withSkills.length > 0) add('user Skills', 'FAIL', `a listed home has Skills that Codex would list (a menu pick reaches the model with no hook): ${withSkills.join(', ')}`);
+  // An incomplete scan is a FAIL, never a PASS: a SKILL.md may exist where the scan did not look.
+  const findings: string[] = [];
+  if (withSkills.length > 0) findings.push(`a listed home has Skills that Codex would list (a menu pick reaches the model with no hook): ${withSkills.join(', ')}`);
+  if (notScanned.length > 0) findings.push(`the scan could not read all of ${notScanned.join(', ')} (too many folders or entries, deeper than the scan goes, or unreadable), so a SKILL.md there cannot be ruled out; empty or lock these folders`);
+  if (findings.length > 0) add('user Skills', 'FAIL', findings.join('; '));
   else add('user Skills', 'PASS', 'no SKILL.md under the listed homes');
   if (withSystem.length > 0) add('.system folder', 'FAIL', `${withSystem.join(', ')} exists; the profile turns bundled Skills off, so move it away (gate init does, into <home>/.codex/mago-ski-backup/)`);
   else add('.system folder', 'PASS', 'no .system folder under the listed homes');

@@ -382,9 +382,9 @@ Test: `gate init` on a home with `.system`, then `doctor`: the `.system` check p
 2. **The install check** reads `SKILL.md` from the generation path that will be linked: `<generationsDir>/<name>/<hex>/SKILL.md`. The generations tree is root-owned `0755` inside the service's own state. Only the root service writes there, so there is no writer race to test (missing test 11 rejected).
 3. **The C6 table row 1** becomes: *"A Skill folder created after a check is listed, and a menu pick of it reaches the model with no hook. Detected by `doctor` on a timer, the GitHub Action and the decision log; optionally narrowed by `--lock-user-skill-folders`. Not prevented."*
 4. **Shadow mode.**
-   - Revocation uninstalls in every mode, as merged today.
+   - Revocation uninstalls in every mode. (v1 of this line said "as merged today", which was not so: the merged service only recorded `would-uninstall` in shadow mode. The service now uninstalls a `REVOKED` Skill in shadow mode too and logs it with action `deny`.)
    - The new actions run only in enforce mode: hide-all, uninstall on expiry, and hiding a nested or mismatched Skill.
-   - In shadow mode they are logged as `would-hide` and `would-uninstall`.
+   - In shadow mode they are logged as `would-hide` and `would-uninstall` (`would-uninstall` is for a verdict other than `REVOKED`).
 5. **A non-whitelisted frontmatter line** in an installed Skill still sets `incomplete` (fail closed), and `nameMismatch` makes `doctor` FAIL (finding 6 rejected). New installs cannot reach this state, because install refuses non-plain names. A duplicate key of any kind makes `plainNameLine` return `null`.
 6. **Pruning.** It is by age only (D6). The CLI is `mago-ski gate prune-removed --host codex --older-than-days N`. The `parseStrictJson` limit is `maxMembers: 4096 + 4`.
 7. **The guide adds two residuals**, both covered by the menu-route row:

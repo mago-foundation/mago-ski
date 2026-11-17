@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runCli, type GateCliSeams } from '../src/cli.ts';
 import { codexManagedConfigToml, codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
 import { instancePaths } from '../src/gate/instance.ts';
-import { applyInit, doctor, planInit, type InitOptions } from '../src/gate/setup.ts';
+import { applyInit, doctor, planInit, scanForSkillFile, type InitOptions } from '../src/gate/setup.ts';
 import { LINUX_ONLY, tempDir } from './helpers.ts';
 
 const UID = process.getuid!();
@@ -170,6 +170,13 @@ test('doctor codex: nameMismatch FAILs, a full removed-names file WARNs (C4, E6,
   assert.equal(ok['service']!.result, 'PASS');
   assert.equal(ok['name mismatch']!.result, 'PASS');
   assert.equal(ok['removed names'], undefined);
+  assert.equal(ok['unrecorded Skills'], undefined);
+  assert.equal(ok['reconcile'], undefined);
+  const stray = by(await doctor('codex', dopts(w, { ask: status({ unrecorded: ['ghost'], reconcileError: '/x/alpha is not a link made by the gate; refusing to remove it' }), uid: UID })));
+  assert.equal(stray['unrecorded Skills']!.result, 'FAIL');
+  assert.match(stray['unrecorded Skills']!.detail, /ghost/u);
+  assert.equal(stray['reconcile']!.result, 'FAIL');
+  assert.match(stray['reconcile']!.detail, /not a link made by the gate/u);
   const bad = by(await doctor('codex', dopts(w, { ask: status({ nameMismatch: ['alpha'], removedNames: { count: 4096, full: true, evicted: 3, error: null } }), uid: UID })));
   assert.equal(bad['name mismatch']!.result, 'FAIL');
   assert.match(bad['name mismatch']!.detail, /alpha/u);
@@ -237,4 +244,56 @@ test('gate init / prune-removed through the CLI: flags, the enforce note, and th
   const refused = await cap(['gate', 'prune-removed', '--host', 'codex', '--older-than-days', '3'], { ask: async () => ({ v: 1 as const, ok: false as const, error: 'older_than_days must be at least 7' }) });
   assert.equal(refused.result, 1);
   assert.match((await cap(['gate', 'prune-removed', '--help'])).stdout, /Usage: mago-ski gate prune-removed/u);
+});
+
+test('gate init does not move .system through a link: refused in the plan, and again at the move when the folder is swapped later', { skip: LINUX_ONLY }, async (t) => {
+  const w = await world(t);
+  const a = await w.home('alice');
+  const b = await w.home('bob');
+  await mkdir(path.join(b, '.codex', 'skills', '.system', 'theirs'), { recursive: true });
+  await mkdir(path.join(a, '.codex'), { recursive: true });
+  await symlink(path.join(b, '.codex', 'skills'), path.join(a, '.codex', 'skills')); // alice points her Skill folder at bob's
+  const linked = await planInit(w.opts({ userHomes: [a] }));
+  assert.equal(linked.actions.some((x) => x.kind === 'move-system'), false);
+  assert.match(linked.problems.join('\n'), /alice\/\.codex\/skills is not a real path .*does not move \.system through a link/u);
+  await assert.rejects(applyInit(linked, { base: w.base, rootUid: UID }), /not a real path/u);
+  // planned on a real folder, swapped for a link before the move runs
+  await rename(path.join(a, '.codex', 'skills'), path.join(a, '.codex', 'link-aside'));
+  await mkdir(path.join(a, '.codex', 'skills', '.system'), { recursive: true });
+  const plan = await planInit(w.opts({ userHomes: [a] }));
+  assert.equal(plan.actions.filter((x) => x.kind === 'move-system').length, 1);
+  await rename(path.join(a, '.codex', 'skills'), path.join(a, '.codex', 'real-aside'));
+  await rename(path.join(a, '.codex', 'link-aside'), path.join(a, '.codex', 'skills'));
+  await assert.rejects(applyInit(plan, { base: w.base, rootUid: UID }), /\.system was not moved/u);
+  assert.equal(await exists(path.join(b, '.codex', 'skills', '.system', 'theirs')), true); // bob's folder is where it was
+  // a backup folder that is a link is refused too
+  await rename(path.join(a, '.codex', 'skills'), path.join(a, '.codex', 'link-aside'));
+  await rename(path.join(a, '.codex', 'real-aside'), path.join(a, '.codex', 'skills'));
+  await symlink(path.join(b, '.codex'), path.join(a, '.codex', 'mago-ski-backup'));
+  await assert.rejects(applyInit(await planInit(w.opts({ userHomes: [a] })), { base: w.base, rootUid: UID }), /mago-ski-backup .*\.system was not moved/u);
+  assert.equal(await exists(path.join(a, '.codex', 'skills', '.system')), true);
+});
+
+test('the home scan answers incomplete, never none, when a bound stops it; doctor then FAILs user Skills', { skip: LINUX_ONLY }, async (t) => {
+  const w = await world(t);
+  const a = await w.home('alice');
+  const root = path.join(a, '.agents', 'skills');
+  assert.equal(await scanForSkillFile(root), 'none'); // absent
+  for (const d of ['d1', 'd2', 'd3', 'd4']) await mkdir(path.join(root, d), { recursive: true });
+  await mkdir(path.join(root, 'd4', 'x', 'y'), { recursive: true });
+  assert.equal(await scanForSkillFile(root), 'none');
+  assert.equal(await scanForSkillFile(root, undefined, { dirs: 3, entries: 1000, depth: 8 }), 'incomplete'); // folders left in the queue
+  assert.equal(await scanForSkillFile(root, undefined, { dirs: 1000, entries: 3, depth: 8 }), 'incomplete'); // more entries than the bound
+  assert.equal(await scanForSkillFile(root, undefined, { dirs: 1000, entries: 1000, depth: 1 }), 'incomplete'); // deeper than the scan goes
+  await applyInit(await planInit(w.opts({ userHomes: [a] })), { base: w.base, rootUid: UID });
+  assert.equal(by(await doctor('codex', dopts(w)))['user Skills']!.result, 'PASS');
+  const c = by(await doctor('codex', dopts(w, { skillScanLimits: { dirs: 3, entries: 1000, depth: 8 } })));
+  assert.equal(c['user Skills']!.result, 'FAIL');
+  assert.match(c['user Skills']!.detail, /could not read all of .*alice\/\.agents\/skills/u);
+  await writeFile(path.join(root, 'd4', 'x', 'y', 'SKILL.md'), 'x');
+  assert.equal(await scanForSkillFile(root), 'found');
+  await chmod(path.join(root, 'd4', 'x'), 0o000); // unreadable is unknown, not empty
+  const unreadable = await scanForSkillFile(root);
+  await chmod(path.join(root, 'd4', 'x'), 0o755);
+  if (UID !== 0) assert.equal(unreadable, 'incomplete');
 });

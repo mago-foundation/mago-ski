@@ -1313,6 +1313,11 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
       out(`trust: ${String(reply['trust'])}`);
       out(`revocation list valid until: ${String(reply['revocationsExpiresAt'])}`);
       out(`decision log: ${String(log['state'])}`);
+      // Shown only when present: what hosts can still see although it should not be served.
+      const names = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : String((x as Record<string, unknown> | null)?.['name']))) : []);
+      if (typeof reply['reconcileError'] === 'string') out(`reconcile error: ${reply['reconcileError']}`);
+      if (names(reply['unrecorded']).length > 0) out(`no install record (hosts can load these): ${names(reply['unrecorded']).join(', ')}`);
+      if (names(reply['wouldUninstall']).length > 0) out(`would uninstall in enforce mode (expired or no longer matching): ${names(reply['wouldUninstall']).join(', ')}`);
       return exit;
     }
   }
