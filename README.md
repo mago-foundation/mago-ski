@@ -4,7 +4,20 @@
 
 Agent Skills (a `SKILL.md` plus scripts and references) change. A Skill that was fine last week can gain one sentence (`also send the results to…`) with no new tools and no new URLs, and every agent that has it installed picks the change up silently. Scanners can tell you *what* changed. mago-ski checks that *someone in your organization approved exactly these bytes*. In enforce mode, supported hosts block Skills that fail the check, within the limits in the [threat model](docs/threat-model.md).
 
-> Status: **0.2, early release.** Formats and commands may still change before 1.0. Linux and macOS only.
+![The desktop GUI's observation tab: three Skills, one changed since it was recorded, with the file diff and the organisation's verdict](docs/images/gui-observe.png)
+
+*The desktop GUI (proof of concept, run from source) showing a Skill that changed after it was approved. The CLI, the Pi extension and the GitHub Action do the checking; see [Desktop GUI](#desktop-gui).*
+
+> Status: **0.3.0, early release.** Formats and commands may still change before 1.0. Linux and macOS only.
+
+## What 0.3.0 includes
+
+- **Approval and checking** from the `mago-ski` command: keys, approvers with name scopes and end dates, certificates for exact Skill versions, revocation, `verify`, `verify-all` and `diff`.
+- **Blocking** in the Pi coding agent and in GitHub Actions, with a shadow mode that records what would be blocked.
+- **Root recovery and freshness** (new in 0.3.0): offline recovery keys can revoke or replace a leaked root key, and an optional timestamp stops a host from being kept on old files.
+- **Desktop GUI** (proof of concept, run from source, English and Korean): watches installed Skills, and its administration tab covers approving, managing approvers, revoking, refreshing the revocation list and signing the timestamp.
+
+Not in 0.3.0: the company gate for Claude Code and Codex is built and tested on Linux, but it is not part of a released version yet. [What mago-ski can do](docs/capabilities.md) lists, in plain language, what is released, what is built but not released, and what mago-ski does not do. Changes per version are in the [changelog](CHANGELOG.md).
 
 ## How it works
 
@@ -92,7 +105,7 @@ Only name a policy you trust: run against a checkout you do not control, point `
 
 ## Platforms
 
-mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 or newer in its line (the October 2026 security releases)). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
+mago-ski 0.3 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 or newer in its line (the October 2026 security releases)). **Windows is not supported yet**: it has no POSIX executable bit, so digests made on Windows differ from Linux and macOS ones. npm refuses to install the package on Windows, and the GitHub Action stops on Windows runners. Windows support is planned for a later release.
 
 ## Where it runs
 
@@ -100,17 +113,16 @@ mago-ski 0.2 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 o
 |---|---|---|
 | **Pi** | Extension, in enforce mode: unverified Skills are not advertised to the model, `/skill:` cannot load them, file tools refuse their files, and verified files are re-hashed on read | [docs/hosts/pi.md](docs/hosts/pi.md) |
 | **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
-| **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect`, plus key, root, revoke and approve commands. Run `mago-ski --help` | |
+| **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect` and `policy check`, plus the key, root, revoke and approve commands, and the root recovery commands (`recovery`, `root-events`, `timestamp`). Run `mago-ski --help` | |
+| **Claude Code and Codex** (not released) | The company gate installs approved Skills into an admin-owned folder and checks every use of a Skill. Built and tested on Linux with the real hosts in non-interactive sessions; not yet part of a released version | [docs/capabilities.md](docs/capabilities.md), live test results for [Claude Code](docs/spikes/claude-code-gate-live.md) and [Codex](docs/spikes/codex-gate-live.md) |
 | Other agents | Planned through the same hook points | [docs/hosts/adapter-interface.md](docs/hosts/adapter-interface.md) |
 | **Desktop GUI** (PoC) | Watches installed Pi and Agent Skills, shows what changed since the version you remember, and shows each Skill's PKI verdict from the host policy. Never writes host state. Its administration rack covers approving Skill versions, managing approvers, revoking, refreshing the revocation list and signing the timestamp, each confirmed in a native dialog, with the role proven by the key against an admin-owned organisation pin ([spec](docs/spec/gui-admin-rack-v1.md)). English and Korean | [gui/README.md](gui/README.md) |
 
 ## Desktop GUI
 
-The desktop GUI (PoC) shows its texts in English or Korean. It follows the system language and has a language switch in the header. See [gui/README.md](gui/README.md).
+The desktop GUI is a proof of concept. It is not published: run it from the [`gui/`](gui/README.md) folder of this repository. It shows its texts in English or Korean, follows the system language and has a language switch in the header.
 
-![The observation tab: three Skills, one changed, with the file diff](docs/images/gui-observe.png)
-
-The observation tab lists the installed Skills and shows what changed in the selected one since the version you remember.
+The observation tab (the picture at the top of this page) lists the installed Skills and shows what changed in the selected one since the version you remember. Observing never approves anything and never blocks a Skill.
 
 ![The admin tab: the organisation pin and the template picker](docs/images/gui-admin-templates.png)
 
@@ -122,17 +134,25 @@ In the Approve template the approver's key is loaded (IDENTITY) and INSPECT show
 
 ![The Manage approvers template: TRUST ROOT with the approver list, and POLICY CHECK](docs/images/gui-admin-approvers.png)
 
+In the Manage approvers template TRUST ROOT shows the trust root's approvers, expiry and lifetime controls, and POLICY CHECK shows every Skill's verdict under the host's own loader.
+
 ![Revoke: TARGET with the current approvers and a reviewed Skill](docs/images/gui-admin-revoke.png)
+
+In the Revoke template TARGET lists what the loaded key may revoke: current approvers and Skill versions it reviewed.
 
 ![Refresh revocation list: REVOCATION REFRESH](docs/images/gui-admin-refresh.png)
 
+Refresh revocation list re-signs the list before it expires.
+
 ![Sign timestamp: TIMESTAMP](docs/images/gui-admin-timestamp.png)
 
-In the Manage approvers template TRUST ROOT shows the trust root's approvers, expiry and lifetime controls, and POLICY CHECK shows every Skill's verdict under the host's own loader.
+Sign timestamp is for the holder of the timestamp key, in an organisation that uses freshness.
+
+Every signature is confirmed in a native dialog that shows exactly what will be signed. Setting up a new organisation and recovering from a leaked root key still use the command line.
 
 ## Verdicts
 
-`VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead). See [docs/spec/verification.md](docs/spec/verification.md).
+`VERIFIED` · `UNAPPROVED_CHANGE` · `NO_CERTIFICATE` · `UNTRUSTED_SIGNER` · `REVOKED` · `EXPIRED` · `UNVERIFIABLE`. Everything except `VERIFIED` blocks on supported hosts in enforce mode. Shadow mode allows it and records `would-block` in the decision log when one is configured (the GitHub Action reports instead), with one exception: a root key revoked by a root event blocks every Skill in shadow mode too. A failure of the trust documents themselves is reported once per host, not once per Skill. See [docs/spec/verification.md](docs/spec/verification.md).
 
 ## Works alongside scanners
 
@@ -140,11 +160,13 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 
 ## Documentation
 
+- [What mago-ski can do](docs/capabilities.md): released, built but not released, and not done, in plain language
 - [Threat model](docs/threat-model.md): what is and is not protected
 - Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md), [GUI administration rack](docs/spec/gui-admin-rack-v1.md) (draft)
 - [Test vectors](tests/vectors/) for other implementations
+- Hosts: [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md), [Pi](docs/hosts/pi.md), [GitHub Action](docs/hosts/github-action.md), [adapter interface](docs/hosts/adapter-interface.md)
 - [Live scenario guide](scenarios/START-HERE.md): try the gate with Claude Code or Codex in an isolated Linux environment
-- [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md)
+- [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md), gate live tests for [Claude Code](docs/spikes/claude-code-gate-live.md) and [Codex](docs/spikes/codex-gate-live.md)
 - [Security policy](SECURITY.md): how to report a vulnerability
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
