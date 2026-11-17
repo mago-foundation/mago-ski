@@ -278,7 +278,7 @@ Replies are `{ v: 1, ok: true, … }` or `{ v: 1, ok: false, error }`.
 **Smaller rules:**
 - `--mode` defaults to `shadow`.
 - A re-run of `gate init` prints `systemctl daemon-reload && systemctl restart mago-ski-gate@<host>`.
-- A changed `--root-fingerprint` is written as given. Trust documents for the old root are then refused by the trust store, and `doctor` reports trust as not accepted until `gate trust` runs with the new documents.
+- A changed `--root-fingerprint` is written as given. Trust documents for the old root are then refused by the trust store, and `doctor` reports trust as not accepted until `gate trust` runs with the new documents. **Superseded by [`gate-new-root.md`](gate-new-root.md):** this did not work (the store reported `state-corrupt`); a changed fingerprint now needs `--new-root`, and each root has its own trust store.
 - **Host binaries.**
   - The default is resolved with the invoking user's `SUDO_USER` login `PATH` when present, otherwise root's.
   - It must be root-owned, not writable by others, and an ELF executable, because a script would allowlist its interpreter.
