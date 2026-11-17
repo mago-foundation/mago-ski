@@ -154,6 +154,10 @@ It does not run systemctl; it prints the commands to run.
   --no-deny-read            Codex: leave deny_read out of requirements.toml
   --lock-user-skill-folders Codex: make ~/.agents, ~/.agents/skills and ~/.codex/skills empty, root-owned and immutable
                             (chattr +i) in every listed home. Stops if the attribute cannot be set.
+  --new-root                move an installed gate to a new root key (after a root rotation). Needed whenever
+                            --root-fingerprint differs from the installed one; without it init refuses. The old root's
+                            stored documents are kept, unused. Then restart the service and run gate trust with the
+                            documents signed by the new root.
   --force                   move aside (to <file>.mago-ski-bak-<time>) host files that mago-ski did not write, then replace them
   --print                   print every file that would be written and write nothing (no root needed)
   --json                    machine-readable output
@@ -517,9 +521,9 @@ interface Parsed {
 }
 
 /* The actual boolean flags that should take no value. */
-const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders']);
+const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
 /* Only `gate init` takes these; everywhere else they are refused, as before 0.4.0. */
-const GATE_INIT_ONLY = new Set(['--force', '--print', '--no-deny-read', '--lock-user-skill-folders']);
+const GATE_INIT_ONLY = new Set(['--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
 
 /* flags Map: A map of flags to their values. */
 function addFlag(flags: Map<string, string[]>, flag: string, value: string): void {
@@ -1111,8 +1115,8 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
 
   switch (sub) {
     case 'init': {
-      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--user-home', '--codex-home', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders'], 0, ['--host-exe', '--user-home', '--codex-home']);
-      onlyBooleans(parsed, ['--force', '--print', '--json', '--no-deny-read', '--lock-user-skill-folders']);
+      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--user-home', '--codex-home', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root'], 0, ['--host-exe', '--user-home', '--codex-home']);
+      onlyBooleans(parsed, ['--force', '--print', '--json', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
       const mode = optional(parsed, '--mode');
       if (mode !== undefined && mode !== 'shadow' && mode !== 'enforce')
         throw new UsageError('--mode must be shadow or enforce');
@@ -1127,6 +1131,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         ...(parsed.flags.get('--codex-home') ? { codexHomes: parsed.flags.get('--codex-home')! } : {}),
         ...(parsed.booleans.has('--no-deny-read') ? { noDenyRead: true } : {}),
         ...(parsed.booleans.has('--lock-user-skill-folders') ? { lockUserSkillFolders: true } : {}),
+        ...(parsed.booleans.has('--new-root') ? { newRoot: true } : {}),
         ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}),
         ...(seams.base !== undefined ? { base: seams.base } : {}), ...(seams.rootUid !== undefined ? { rootUid: seams.rootUid } : {}),
         ...(seams.platform ? { platform: seams.platform } : {}), ...(seams.installRoot ? { installRoot: seams.installRoot } : {}),
@@ -1144,6 +1149,8 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
           process.stderr.write(`warning: ${problem}\n`);
         for (const foreign of plan.foreign)
           process.stderr.write(`note: ${foreign} exists and was not written by mago-ski; init would refuse unless --force is given\n`);
+        if (plan.rootChange)
+          process.stderr.write(`note: init would move this gate from root ${plan.rootChange.from} to ${plan.rootChange.to}\n`);
         for (const a of plan.actions)
           process.stderr.write(a.kind === 'move-system' ? `note: init would move ${a.from} to ${a.to}\n` : `note: init would lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)\n`);
         return plan.problems.length > 0 ? 1 : 0; // init would refuse these: everything is printed first, then the exit code says so
@@ -1152,7 +1159,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         if (!json) out(a.kind === 'move-system' ? `will move ${a.from} -> ${a.to}` : `will lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)`);
       const result = await setup.applyInit(plan, { force: parsed.booleans.has('--force'), base, rootUid: uid, ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}) });
       if (json)
-        print({ host: plan.host, mode: plan.mode, host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, moved_system: result.movedSystem, locked: result.locked, next: plan.next });
+        print({ host: plan.host, mode: plan.mode, ...(plan.rootChange ? { root_change: plan.rootChange } : {}), host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, moved_system: result.movedSystem, locked: result.locked, next: plan.next });
       else {
         for (const b of result.backups) out(`moved ${b.from} -> ${b.to}`);
         for (const d of result.dirs) out(`created ${d}`);
@@ -1160,6 +1167,7 @@ async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSe
         for (const m of result.movedSystem) out(`moved ${m.from} -> ${m.to}`);
         for (const l of result.locked) out(`locked ${l}`);
         out(`host binaries: ${plan.hostExes.join(', ')}`);
+        if (plan.rootChange) out(`root: moved from ${plan.rootChange.from} to ${plan.rootChange.to}. The old root's stored documents are kept and no longer used. After the restart, nothing is accepted until gate trust sends the new root's documents${plan.mode === 'enforce' ? '; until then every Skill is blocked' : ''}.`);
         out(`mode: ${plan.mode}${plan.mode === 'shadow' ? ' (nothing is blocked; re-run with --mode enforce to enforce)' : ''}`);
         if (plan.host === 'codex' && plan.mode === 'enforce') out(setup.CODEX_ENFORCE_NOTE);
         out('next:');

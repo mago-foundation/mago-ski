@@ -81,6 +81,22 @@ Every decision is written to the gate's decision log, which only root can read.
 - **Remove a Skill:** `sudo mago-ski gate uninstall --host claude-code NAME`.
 - **State:** `sudo mago-ski gate status --host claude-code` shows the mode, readiness, trust and when the revocation list expires. `gate doctor` prints PASS, FAIL, SKIP or WARN for each check and exits 1 on a FAIL.
 
+## After a root rotation
+
+The gate does not follow root events by itself. When your organisation has replaced its root key and re-signed its documents (`mago-ski root adopt`), move each gate to the new root:
+
+```bash
+sudo mago-ski gate init --host claude-code --root-fingerprint sha256:<new> --new-root    # with the same options as your original init
+sudo systemctl daemon-reload && sudo systemctl restart mago-ski-gate@claude-code
+sudo mago-ski gate trust --host claude-code --trust-root trust-root.json --revocations revocations.json
+sudo mago-ski gate doctor --host claude-code
+```
+
+- `gate init` refuses a root fingerprint that differs from the installed one unless `--new-root` is given, so a mistyped fingerprint cannot switch roots by accident. `--print` shows the move without writing anything.
+- Between the restart and `gate trust`, the gate has no documents for the new root. In enforce mode every Skill is blocked during that time, so run the commands together.
+- Installed Skills do not need to be installed again. Their certificates were signed by approvers, and the approvers are kept.
+- The old root's stored documents are kept and no longer used.
+
 ## Limits
 
 - **Linux only.** macOS and Windows are not supported by the gate.
@@ -88,5 +104,5 @@ Every decision is written to the gate's decision log, which only root can read.
 - **Instructions already read stay.** The gate cannot remove a Skill's text from a session that has already loaded it. A revoked Skill is blocked at its next use, not unread.
 - **After a revoke, the reason shown is `NO_CERTIFICATE`,** not `REVOKED`, because the gate has already removed the Skill. The block is correct; the wording is not.
 - **A user who can run a different Claude Code binary,** or change the machine's managed settings, is outside what the gate controls. Use your organisation's execution control for that.
-- **Root recovery and freshness are not applied by the gate yet.** The gate keeps the root fingerprint it was given at `gate init`, and does not read root events or timestamps. A revoked root key is therefore not noticed by the gate. After a root rotation there is no supported command to move a gate to the new root: `gate init` with the new fingerprint is accepted, but the gate then reports its stored trust state as corrupt (`state-corrupt`) and refuses the new documents, and in enforce mode every Skill is blocked. Plan a root rotation with this in mind until the gate supports root events.
+- **The gate does not follow root events or timestamps by itself.** It keeps the root fingerprint it was given, so a rotated or revoked root key is not noticed until an administrator moves the gate (see [After a root rotation](#after-a-root-rotation)). On a fleet, that means running the four commands on every machine.
 - An approval records who approved which exact version. It does not say that a Skill is safe.
