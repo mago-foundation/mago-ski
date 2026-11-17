@@ -14,14 +14,16 @@
 // Not part of `npm test`; prints one JSON report on stdout and exits 1 if any expectation failed.
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { codexManagedConfigToml, codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
 import { readInstanceConfig } from '../../src/gate/instance.ts';
 import { hookConfigText } from '../../src/gate/setup.ts';
+// @ts-expect-error Test-only JavaScript shared with the observer tests.
+import { parseObservations, promptDenied } from './hook-observation.mjs';
 import type { Mode } from '../../src/policy.ts';
-import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, writeSkill, type GateWorld } from './gate-world.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
 
 const CODEX = process.env.CODEX_BIN ? realpathSync(process.env.CODEX_BIN) : '';
 const ADMIN_ROOT = '/etc/codex';
@@ -111,6 +113,11 @@ async function runCodex(w: World, name: string, run: Run) {
   const codexHome = path.join(home, '.codex');
   const proj = path.join(dir, 'proj');
   for (const d of [codexHome, proj]) await mkdir(d, { recursive: true });
+  const observer = path.join(path.dirname(w.hookEntry), 'live-hook-observer.mjs');
+  const observations = path.join(dir, 'hook-observations.jsonl');
+  await copyFile(path.join(REPO, 'tests', 'live', 'hook-observer.mjs'), observer);
+  await writeFile(`${observer}.json`, JSON.stringify({ hook: w.hookEntry, observations }), { mode: 0o644 });
+  await writeFile(observations, '', { mode: 0o600 });
   // Each fresh host gets a different temporary home; list it just as gate init would for a real user.
   const instance = await readInstanceConfig(w.paths.instance, 0);
   await writeFile(w.hookConfig, hookConfigText('codex', instance, { userHomes: [home], codexHomes: [codexHome] }), { mode: 0o644 });
@@ -120,7 +127,7 @@ async function runCodex(w: World, name: string, run: Run) {
     `model = "gpt-5.1-codex"\nmodel_provider = "faux"\n[model_providers.faux]\nname = "faux"\nbase_url = "${w.base}"\nwire_api = "responses"\nenv_key = "FAUX_KEY"\n`);
   // The requirements file, as the installer writes it for this user (deny_read needs the user's fixed Skill roots).
   await writeFile(path.join(ADMIN_ROOT, 'requirements.toml'), codexRequirementsToml({
-    mode: w.mode, nodePath: NODE, hookEntry: w.hookEntry, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
+    mode: w.mode, nodePath: NODE, hookEntry: observer, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
     userSkillRoots: [path.join(codexHome, 'skills'), path.join(codexHome, 'skills', '.system'), path.join(home, '.agents', 'skills')],
   }), { mode: 0o644 });
 
@@ -143,9 +150,11 @@ async function runCodex(w: World, name: string, run: Run) {
   const requests = current.requests;
   current = null;
   const all = JSON.stringify(requests);
+  const hookObservations = parseObservations(await readFile(observations, 'utf8').catch(() => '')) as Array<{ event: string | null; code: number | null; signal: string | null; reason: boolean }>;
   const events = stdout.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   return {
     exit: code,
+    hookObservations,
     modelCalls: requests.length,
     listing: requests[0] ? listing(requests[0]) : null,
     injected: requests[0] ? injected(requests[0]) : [],
@@ -169,8 +178,8 @@ interface Scenario {
 }
 
 const linked = (name: string) => `[$${name}](${ADMIN_SKILLS}/${name}/SKILL.md)`;
-// No model request alone can also mean that Codex failed to start. Require an actual hook-block observation.
-const blocked = (o: Outcome) => [...o.events, o.stderr].some((e) => /hook[^\n]*blocked|blocked[^\n]*hook/iu.test(e));
+// A missing model request is not a block: require a completed hook denial for this prompt.
+const blocked = (o: Outcome) => promptDenied(o.hookObservations) as boolean;
 
 const SCENARIOS: Record<string, Scenario> = {
   'listing': {
