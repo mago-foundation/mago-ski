@@ -21,6 +21,9 @@ import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
 import { verifyTrustRoot } from './trust-root.ts';
 import { resolveSkillName, unverifiable, type VerificationResult } from './verify.ts';
 import { createRequire } from 'node:module';
+import type { AskAdmin } from './gate/admin-client.ts';
+import type { Host } from './gate/instance.ts';
+import type { DoctorOptions, InitOptions } from './gate/setup.ts';
 
 const usage = `mago-ski — organization-approved Skill certificates,
            enforced on the agent host
@@ -57,6 +60,18 @@ CHECKING SKILLS
   inspect CERTIFICATE    Print a certificate's contents
   policy check           Check a policy the way a host does
 
+COMPANY GATE (Linux, run as root)
+  gate init              Write the gate's config, unit and host settings
+  gate run               Run the gate service in the foreground (systemd)
+  gate trust             Give the running gate the trust documents
+  gate install           Install an approved Skill through the gate
+  gate uninstall         Remove a Skill from the gate
+  gate refresh           Re-read the inbox's trust documents
+  gate prune-removed     Drop old entries from the Codex removed-names file
+  gate status            Show the running gate's state
+  gate doctor            Check an installation, read-only
+  Run "mago-ski gate" for the details.
+
 POLICY
   --policy FILE, else $MAGO_SKI_POLICY, else
   ~/.mago-ski/policy.json (never the current directory)
@@ -68,7 +83,8 @@ VERDICTS
 EXIT CODES
   0  success, or VERIFIED
   1  any other verdict, or re-certification required
-  2  usage or input error
+     (gate: a doctor FAIL, or the service refused the request)
+  2  usage or input error (gate: also a transport error)
 
 Run "mago-ski <command> --help" for a command's options,
 and "mago-ski --version" for the version.
@@ -92,6 +108,115 @@ Creates an Ed25519 key pair for a root key or an approver key.
 
 Keep private keys secret and outside every Skill directory; keygen refuses to write inside one.
 Prints the key id (sha256:...), which identifies the key in trust roots and revocations.`,
+
+/* ******************************************************************************************  */
+/** Per-command: gate (the company gate, Linux, root)                                          */
+/* ******************************************************************************************  */
+  gate: `Usage: mago-ski gate <command> [options]      (Linux only)
+
+The company gate is a root service that installs approved Skills and answers the Claude Code and Codex hooks.
+Each host (claude-code, codex) has its own instance, named by host.
+
+  init        Write the instance config, hook config, systemd unit and the host's managed settings
+  run         Run the service in the foreground (what the systemd unit starts)
+  trust       Send the trust root and revocation list to the running gate
+  install     Install an approved Skill (a folder and its certificate) through the gate
+  uninstall   Remove a Skill from the gate
+  refresh     Make the gate re-read its inbox of trust documents
+  prune-removed  Drop old entries from the Codex removed-names file
+  status      Show the running gate's state
+  doctor      Read-only checks of one installation
+
+Every command except status and doctor needs root ("sudo mago-ski gate ..."); status needs root too, because the
+admin socket is 0600. Run "mago-ski gate <command> --help" for a command's options.
+
+Exit codes: 0 success; 1 a doctor FAIL, or the gate answered that it refused; 2 usage, input or transport error.
+
+Codex enforcement depends on organisation controls; read docs/hosts/codex.md before enabling enforce.`,
+
+  'gate init': `Usage: mago-ski gate init --host claude-code|codex --root-fingerprint ID [options]
+
+Writes everything an instance needs and creates its folders. Run it again to change the mode or the host binary.
+It does not run systemctl; it prints the commands to run.
+
+  --host H                  claude-code or codex
+  --root-fingerprint ID     the organisation's root key id (sha256:<64 hex>), as printed by "root init"
+  --mode shadow|enforce     default shadow (decisions are logged, nothing is blocked). enforce also applies Claude Code's
+                            managed locks to every user of this machine. Codex enforce depends on organisation controls
+                            (docs/hosts/codex.md).
+  --host-exe PATH           the real host binary (repeatable). Default: claude or codex on the invoking user's login PATH
+                            (SUDO_USER) or root's PATH. It must be a root-owned ELF binary.
+  --inbox DIR               a folder the gate reads trust-root.json and revocations.json from
+  --user-home DIR           Codex: a user's home the profile covers (repeatable). Default: every home in /etc/passwd with
+                            uid 1000 or above and a login shell. Each home's Skill roots get deny_read, and its
+                            .codex/skills/.system moves to <home>/.codex/mago-ski-backup/system-<UTC>.
+  --codex-home DIR          Codex: a non-default CODEX_HOME the profile covers (repeatable)
+  --no-deny-read            Codex: leave deny_read out of requirements.toml
+  --lock-user-skill-folders Codex: make ~/.agents, ~/.agents/skills and ~/.codex/skills empty, root-owned and immutable
+                            (chattr +i) in every listed home. Stops if the attribute cannot be set.
+  --new-root                move an installed gate to a new root key (after a root rotation). Needed whenever
+                            --root-fingerprint differs from the installed one; without it init refuses. The old root's
+                            stored documents are kept, unused. Then restart the service and run gate trust with the
+                            documents signed by the new root.
+  --force                   move aside (to <file>.mago-ski-bak-<time>) host files that mago-ski did not write, then replace them
+  --print                   print every file that would be written and write nothing (no root needed)
+  --json                    machine-readable output
+
+Writes (root-owned): /etc/mago-ski/gate/<host>.json, <host>-hook.json, <host>.manifest.json, shared.manifest.json,
+/etc/systemd/system/mago-ski-gate@.service and mago-ski-gate@<host>.service.d/paths.conf, and the host's settings
+(Claude Code: /etc/claude-code/managed-settings.json; Codex: /etc/codex/requirements.toml and
+/etc/codex/managed_config.toml). Creates the state,
+generations and managed Skill folders.
+
+Refuses when the installed package, the node that runs the hooks or a host binary could be edited by a user: an
+editable hook would let a user bypass the gate. Node must be installed system-wide (a per-user nvm or volta node is refused).
+Exit 0 written; 2 refused or failed.`,
+
+  'gate run': `Usage: mago-ski gate run --host claude-code|codex
+
+Runs the gate service for one instance in the foreground, from /etc/mago-ski/gate/<host>.json. This is what the systemd
+unit starts. Stops on SIGTERM or SIGINT. If the stores cannot be opened the service stays up and not ready (status says
+why; the reason is printed once to stderr). Exits 1 when the service cannot start at all.`,
+
+  'gate trust': `Usage: mago-ski gate trust --host H --trust-root FILE --revocations FILE
+
+Sends the organisation's trust root and revocation list to the running gate (the admin socket). Run it after init, and
+whenever either document is renewed (or use an inbox: gate init --inbox DIR, then gate refresh).
+Exit 0 accepted or unchanged; 1 the gate refused them (the reason is printed); 2 usage or transport error.`,
+
+  'gate install': `Usage: mago-ski gate install --host H SKILL_DIR --certificate FILE [--name NAME]
+
+Installs an approved Skill version through the running gate: the gate verifies the folder against the certificate,
+publishes it and links it into the host's managed Skill folder. NAME defaults to the folder's name.
+Prints the digest and the managed path. Exit 0 installed; 1 the gate refused; 2 usage or transport error.`,
+
+  'gate uninstall': `Usage: mago-ski gate uninstall --host H NAME
+
+Hides the Skill from the host and removes it from the gate's records. Exit 0; 1 the gate refused; 2 usage or transport error.`,
+
+  'gate refresh': `Usage: mago-ski gate refresh --host H
+
+Makes the gate re-read its inbox (trust-root.json and revocations.json) now. Needs an instance made with --inbox;
+otherwise it prints "no inbox configured" and exits 2. Exit 0; 1 the gate refused; 2 usage or transport error.`,
+
+  'gate prune-removed': `Usage: mago-ski gate prune-removed --host codex [--older-than-days N]
+
+The gate records the Skills it removed in <managed folder>/.mago-ski-removed-names.json (at most 4096 entries; the oldest
+go first). This drops entries older than N days (default 90, at least 7), so the file stays below its cap. Blocking rests
+on the removed link, so pruning only loses the clear message for an old name.
+Exit 0; 1 the gate refused; 2 usage or transport error.`,
+
+  'gate status': `Usage: mago-ski gate status --host H [--json]
+
+Asks the running gate for its state: mode, readiness, trust, revocation-list expiry and decision-log health.
+Needs root (the admin socket is 0600). Exit 0; 1 the gate answered that it is not ready; 2 usage or transport error.`,
+
+  'gate doctor': `Usage: mago-ski gate doctor --host H [--json]
+
+Read-only checks of one installation: platform, instance config, host binaries, hook entry and node, folders, the host's
+settings (the exact content gate init would write), the service, trust, mode, and two kernel settings. Prints one line per
+check: PASS, FAIL, SKIP or WARN. SKIP and WARN never fail the run. Without root the service and trust checks are skipped.
+Exit 0 when nothing FAILs; 1 when a check FAILs; 2 usage error.`,
 
 /* ******************************************************************************************  */
 /** Per-command: root                                                                          */
@@ -396,7 +521,9 @@ interface Parsed {
 }
 
 /* The actual boolean flags that should take no value. */
-const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help']);
+const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
+/* Only `gate init` takes these; everywhere else they are refused, as before 0.4.0. */
+const GATE_INIT_ONLY = new Set(['--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
 
 /* flags Map: A map of flags to their values. */
 function addFlag(flags: Map<string, string[]>, flag: string, value: string): void {
@@ -457,7 +584,7 @@ function allow(
 
   /* Check boolean flags for validity. */
   for (const flag of parsed.booleans)
-    if (!BOOLEAN_FLAGS.has(flag) && !allowed.includes(flag))
+    if (!allowed.includes(flag) && (GATE_INIT_ONLY.has(flag) || !BOOLEAN_FLAGS.has(flag)))
       throw new UsageError(`Unsupported option ${flag}`);
 
   /* Check positional arguments count. */
@@ -922,9 +1049,284 @@ async function runVerifyAll(
   return failures === 0 ? 0 : 1;
 }
 
+/* ******************************************************************************************  */
+/* `mago-ski gate ...` (design docs/design/gate-cli.md). The gate modules load only when used.  */
+/* ******************************************************************************************  */
+
+/* Test seams: production passes none (base "/", root uid 0, the real platform, the real admin client). */
+export interface GateCliSeams extends Pick<InitOptions, 'base' | 'rootUid' | 'platform' | 'installRoot' | 'nodePath' | 'envPath' | 'checkExec' | 'resolveHostExe' | 'chattr' | 'isImmutable'> {
+  /** The calling uid (default process.getuid()). */
+  uid?: number;
+  ask?: AskAdmin;
+  /** `gate run` stops when this settles (default: SIGTERM or SIGINT). */
+  stop?: Promise<void>;
+  doctor?: Pick<DoctorOptions, 'somaxconn' | 'procMounts' | 'codexVersion' | 'isImmutable'>;
+}
+
+const GATE_SUBS = ['init', 'run', 'trust', 'install', 'uninstall', 'refresh', 'prune-removed', 'status', 'doctor'];
+
+/* Only the listed boolean flags are accepted (--help is handled before). */
+function onlyBooleans(parsed: Parsed, accepted: string[]): void {
+  for (const flag of parsed.booleans)
+    if (!accepted.includes(flag))
+      throw new UsageError(`Unsupported option ${flag}`);
+}
+
+function gateHost(parsed: Parsed): Host {
+  const host = one(parsed, '--host');
+  if (host !== 'claude-code' && host !== 'codex')
+    throw new UsageError('--host must be claude-code or codex');
+  return host;
+}
+
+async function runGate(sub: string | undefined, parsed: Parsed, seams: GateCliSeams): Promise<number> {
+  if (!sub || !GATE_SUBS.includes(sub))
+    throw new UsageError(`Unknown gate command: ${sub ?? '(none)'}. Run "mago-ski gate --help".`);
+  const { assertGatePlatform } = await import('./gate/proc.ts');
+  assertGatePlatform(seams.platform);
+
+  const isRoot = (seams.uid ?? process.getuid?.() ?? -1) === (seams.rootUid ?? 0);
+  const needRoot = (): void => {
+    if (!isRoot)
+      throw new Error('the gate is administered as root; run this with sudo');
+  };
+  const json = parsed.booleans.has('--json');
+  const out = (line: string): void => { process.stdout.write(`${line}\n`); };
+  const setup = await import('./gate/setup.ts');
+  const inst = await import('./gate/instance.ts');
+  const { askAdmin, checkAdminSocket } = await import('./gate/admin-client.ts');
+  /* The real client first checks that the admin socket folder and the socket are root's (item 5). */
+  const ask: AskAdmin = seams.ask ?? (async (socketPath, command, deadlineMs) => {
+    await checkAdminSocket(path.dirname(socketPath), seams.rootUid ?? 0);
+    return await askAdmin(socketPath, command, deadlineMs);
+  });
+  const base = seams.base ?? '/';
+  const uid = seams.rootUid ?? 0;
+  /* The instance config; a missing one is a usage error (exit 2) with the command that makes it. */
+  const loadInstance = async (host: Host) => {
+    try {
+      return await inst.readInstanceConfig(inst.instancePaths(host, base).instance, uid);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT')
+        throw new Error(inst.missingInstanceMessage(host));
+      throw error;
+    }
+  };
+
+  switch (sub) {
+    case 'init': {
+      allow(parsed, ['--host', '--root-fingerprint', '--mode', '--host-exe', '--inbox', '--user-home', '--codex-home', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root'], 0, ['--host-exe', '--user-home', '--codex-home']);
+      onlyBooleans(parsed, ['--force', '--print', '--json', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
+      const mode = optional(parsed, '--mode');
+      if (mode !== undefined && mode !== 'shadow' && mode !== 'enforce')
+        throw new UsageError('--mode must be shadow or enforce');
+      const printOnly = parsed.booleans.has('--print');
+      if (!printOnly) needRoot();
+      const inbox = optional(parsed, '--inbox');
+      const plan = await setup.planInit({
+        host: gateHost(parsed), rootFingerprint: one(parsed, '--root-fingerprint'),
+        ...(mode ? { mode } : {}), ...(parsed.flags.get('--host-exe') ? { hostExes: parsed.flags.get('--host-exe')! } : {}),
+        ...(inbox ? { inbox } : {}),
+        ...(parsed.flags.get('--user-home') ? { userHomes: parsed.flags.get('--user-home')! } : {}),
+        ...(parsed.flags.get('--codex-home') ? { codexHomes: parsed.flags.get('--codex-home')! } : {}),
+        ...(parsed.booleans.has('--no-deny-read') ? { noDenyRead: true } : {}),
+        ...(parsed.booleans.has('--lock-user-skill-folders') ? { lockUserSkillFolders: true } : {}),
+        ...(parsed.booleans.has('--new-root') ? { newRoot: true } : {}),
+        ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}),
+        ...(seams.base !== undefined ? { base: seams.base } : {}), ...(seams.rootUid !== undefined ? { rootUid: seams.rootUid } : {}),
+        ...(seams.platform ? { platform: seams.platform } : {}), ...(seams.installRoot ? { installRoot: seams.installRoot } : {}),
+        ...(seams.nodePath ? { nodePath: seams.nodePath } : {}), ...(seams.envPath ? { envPath: seams.envPath } : {}),
+        ...(seams.checkExec !== undefined ? { checkExec: seams.checkExec } : {}),
+        ...(seams.resolveHostExe ? { resolveHostExe: seams.resolveHostExe } : {}),
+      });
+      if (printOnly) {
+        if (json)
+          print(plan.files.map((f) => ({ path: f.path, mode: f.mode.toString(8).padStart(4, '0'), content: f.content })));
+        else
+          for (const f of plan.files)
+            out(`# ${f.path} (mode ${f.mode.toString(8).padStart(4, '0')})\n${f.content}`);
+        for (const problem of plan.problems)
+          process.stderr.write(`warning: ${problem}\n`);
+        for (const foreign of plan.foreign)
+          process.stderr.write(`note: ${foreign} exists and was not written by mago-ski; init would refuse unless --force is given\n`);
+        if (plan.rootChange)
+          process.stderr.write(`note: init would move this gate from root ${plan.rootChange.from} to ${plan.rootChange.to}\n`);
+        for (const a of plan.actions)
+          process.stderr.write(a.kind === 'move-system' ? `note: init would move ${a.from} to ${a.to}\n` : `note: init would lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)\n`);
+        return plan.problems.length > 0 ? 1 : 0; // init would refuse these: everything is printed first, then the exit code says so
+      }
+      for (const a of plan.actions)
+        if (!json) out(a.kind === 'move-system' ? `will move ${a.from} -> ${a.to}` : `will lock the user Skill folders of ${a.home} (empty, root-owned, chattr +i)`);
+      const result = await setup.applyInit(plan, { force: parsed.booleans.has('--force'), base, rootUid: uid, ...(seams.chattr ? { chattr: seams.chattr } : {}), ...(seams.isImmutable ? { isImmutable: seams.isImmutable } : {}) });
+      if (json)
+        print({ host: plan.host, mode: plan.mode, ...(plan.rootChange ? { root_change: plan.rootChange } : {}), host_exes: plan.hostExes, written: result.written, created: result.dirs, moved_aside: result.backups, moved_system: result.movedSystem, locked: result.locked, next: plan.next });
+      else {
+        for (const b of result.backups) out(`moved ${b.from} -> ${b.to}`);
+        for (const d of result.dirs) out(`created ${d}`);
+        for (const w of result.written) out(`wrote ${w}`);
+        for (const m of result.movedSystem) out(`moved ${m.from} -> ${m.to}`);
+        for (const l of result.locked) out(`locked ${l}`);
+        out(`host binaries: ${plan.hostExes.join(', ')}`);
+        if (plan.rootChange) out(`root: moved from ${plan.rootChange.from} to ${plan.rootChange.to}. The old root's stored documents are kept and no longer used. After the restart, nothing is accepted until gate trust sends the new root's documents${plan.mode === 'enforce' ? '; until then every Skill is blocked' : ''}.`);
+        out(`mode: ${plan.mode}${plan.mode === 'shadow' ? ' (nothing is blocked; re-run with --mode enforce to enforce)' : ''}`);
+        if (plan.host === 'codex' && plan.mode === 'enforce') out(setup.CODEX_ENFORCE_NOTE);
+        out('next:');
+        for (const n of plan.next) out(`  ${n}`);
+      }
+      return 0;
+    }
+
+    case 'run': {
+      allow(parsed, ['--host'], 0);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const host = gateHost(parsed);
+      const p = inst.instancePaths(host, base);
+      const cfg = await loadInstance(host);
+      if (cfg.host !== host)
+        throw new Error(`${p.instance} is for host ${cfg.host}`);
+      const { createGateService } = await import('./gate/service.ts');
+      const service = createGateService(inst.instanceToServiceConfig(cfg, uid));
+      try {
+        await service.start();
+      } catch (error) {
+        process.stderr.write(`mago-ski gate: cannot start: ${(error as Error)?.message ?? 'failed'}\n`);
+        await service.stop().catch(() => {}); // a listener that did start must not keep the process alive
+        return 1;
+      }
+      if (service.startError)
+        process.stderr.write(`mago-ski gate: running but not ready: ${service.startError}\n`);
+      process.stderr.write(`mago-ski gate: ${host} (${cfg.mode}) listening on ${service.sockets.decision}\n`);
+      await (seams.stop ?? new Promise<void>((resolve) => { process.once('SIGTERM', () => resolve()); process.once('SIGINT', () => resolve()); }));
+      await service.stop();
+      return 0;
+    }
+
+    case 'doctor': {
+      allow(parsed, ['--host'], 0);
+      onlyBooleans(parsed, ['--json']);
+      const checks = await setup.doctor(gateHost(parsed), {
+        base, rootUid: uid, ...(seams.ask ? { ask: seams.ask } : {}),
+        ...(seams.uid !== undefined ? { uid: seams.uid } : {}),
+        ...(seams.platform ? { platform: seams.platform } : {}), ...(seams.installRoot ? { installRoot: seams.installRoot } : {}),
+        ...(seams.nodePath ? { nodePath: seams.nodePath } : {}), ...(seams.envPath ? { envPath: seams.envPath } : {}),
+        ...(seams.checkExec !== undefined ? { checkExec: seams.checkExec } : {}),
+        ...(seams.doctor ?? {}),
+      });
+      if (json)
+        print(checks);
+      else
+        for (const c of checks) out(`${c.result} ${c.check}: ${c.detail}`);
+      return checks.some((c) => c.result === 'FAIL') ? 1 : 0;
+    }
+  }
+
+  // The remaining commands talk to the running service's admin socket.
+  const talk = async (host: Host, command: Record<string, unknown>) => {
+    const cfg = await loadInstance(host);
+    if (cfg.host !== host)
+      throw new Error(`the instance config is for host ${cfg.host}`);
+    return { cfg, reply: await ask(`${cfg.admin_socket_dir}/admin.sock`, command) };
+  };
+  const refused = (error: string): number => {
+    process.stderr.write(`mago-ski gate: the gate refused: ${error}\n`);
+    return 1;
+  };
+  const b64 = async (file: string, label: string): Promise<string> => (await readRegularFile(file, label, 4 * 1024 * 1024)).toString('base64');
+
+  switch (sub) {
+    case 'trust': {
+      allow(parsed, ['--host', '--trust-root', '--revocations'], 0);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const { reply } = await talk(gateHost(parsed), {
+        cmd: 'accept-trust', trust_root_b64: await b64(one(parsed, '--trust-root'), 'Trust root'), revocations_b64: await b64(one(parsed, '--revocations'), 'Revocation list'),
+      });
+      if (!reply.ok) return refused(reply.error);
+      out(reply['changed'] === false ? 'trust: unchanged' : 'trust: accepted');
+      return 0;
+    }
+    case 'install': {
+      allow(parsed, ['--host', '--certificate', '--name'], 1);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const dir = path.resolve(parsed.positional[0]!);
+      const name = optional(parsed, '--name') ?? path.basename(dir);
+      const { cfg, reply } = await talk(gateHost(parsed), {
+        cmd: 'install', skill_name: name, source_dir: dir, certificate_b64: await b64(one(parsed, '--certificate'), 'Certificate'),
+      });
+      if (!reply.ok) return refused(reply.error);
+      out(`installed ${name} digest=${String(reply['digest'])} path=${path.join(cfg.managed_dir, name)}`);
+      return 0;
+    }
+    case 'uninstall': {
+      allow(parsed, ['--host'], 1);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const { reply } = await talk(gateHost(parsed), { cmd: 'uninstall', skill_name: parsed.positional[0]! });
+      if (!reply.ok) return refused(reply.error);
+      out(`uninstalled ${parsed.positional[0]}`);
+      return 0;
+    }
+    case 'prune-removed': {
+      allow(parsed, ['--host', '--older-than-days'], 0);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const raw = optional(parsed, '--older-than-days');
+      if (raw !== undefined && !/^[0-9]{1,5}$/u.test(raw))
+        throw new UsageError('--older-than-days must be a whole number of days');
+      const { reply } = await talk(gateHost(parsed), { cmd: 'prune-removed', ...(raw !== undefined ? { older_than_days: Number(raw) } : {}) });
+      if (!reply.ok) return refused(reply.error);
+      out(`pruned ${String(reply['pruned'])} removed name(s); ${String(reply['remaining'])} remain`);
+      return 0;
+    }
+    case 'refresh': {
+      allow(parsed, ['--host'], 0);
+      onlyBooleans(parsed, []);
+      needRoot();
+      const { reply } = await talk(gateHost(parsed), { cmd: 'refresh' });
+      if (!reply.ok) {
+        if (reply.error === 'no inbox configured') {
+          process.stderr.write('mago-ski gate: no inbox configured (re-run gate init with --inbox DIR)\n');
+          return 2;
+        }
+        return refused(reply.error);
+      }
+      out(`refresh: ${String(reply['result'])}`);
+      return 0;
+    }
+    default: { // status
+      allow(parsed, ['--host'], 0);
+      onlyBooleans(parsed, ['--json']);
+      if (!isRoot)
+        throw new Error('gate status needs root: the admin socket is readable only by root; run this with sudo');
+      const { reply } = await talk(gateHost(parsed), { cmd: 'status' });
+      if (!reply.ok) return refused(reply.error);
+      const exit = reply['ready'] === true ? 0 : 1;
+      if (json) {
+        print(reply);
+        return exit;
+      }
+      const log = (reply['log'] ?? {}) as Record<string, unknown>;
+      out(`mode: ${String(reply['mode'])}`);
+      out(`ready: ${String(reply['ready'])}`);
+      out(`trust: ${String(reply['trust'])}`);
+      out(`revocation list valid until: ${String(reply['revocationsExpiresAt'])}`);
+      out(`decision log: ${String(log['state'])}`);
+      // Shown only when present: what hosts can still see although it should not be served.
+      const names = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : String((x as Record<string, unknown> | null)?.['name']))) : []);
+      if (typeof reply['reconcileError'] === 'string') out(`reconcile error: ${reply['reconcileError']}`);
+      if (names(reply['unrecorded']).length > 0) out(`no install record (hosts can load these): ${names(reply['unrecorded']).join(', ')}`);
+      if (names(reply['wouldUninstall']).length > 0) out(`would uninstall in enforce mode (expired or no longer matching): ${names(reply['wouldUninstall']).join(', ')}`);
+      return exit;
+    }
+  }
+}
+
 export async function runCli(
   argv: string[] = process.argv.slice(2), 
-  now: Date = new Date()
+  now: Date = new Date(),
+  gateSeams: GateCliSeams = {}
 ): Promise<number> {
 
   if (argv[0] === '--version' || argv[0] === '-V' || argv[0] === 'version') {
@@ -942,6 +1344,10 @@ export async function runCli(
   }
   
   const [command, maybeSub] = argv;
+  if (command === 'gate' && argv.length === 1) {
+    process.stdout.write(`${COMMAND_HELP['gate']}\n`);
+    return 0;
+  }
   if (argv.slice(1).some((arg) => arg === '--help' || arg === '-h')) {
     const sub = maybeSub && !maybeSub.startsWith('-') ? `${command} ${maybeSub}` : undefined;
     const text = (sub && COMMAND_HELP[sub]) ?? COMMAND_HELP[command!];
@@ -953,7 +1359,7 @@ export async function runCli(
     return 0;
   }
 
-  const hasSub = ['root', 'revoke', 'recovery', 'root-events', 'timestamp', 'policy'].includes(command!);
+  const hasSub = ['root', 'revoke', 'recovery', 'root-events', 'timestamp', 'policy', 'gate'].includes(command!);
   const parsed = parseArgs(argv.slice(hasSub ? 2 : 1));
   switch (command) {
     case 'keygen': {
@@ -978,6 +1384,8 @@ export async function runCli(
       return await runTimestamp(maybeSub, parsed, now);
     case 'policy':
       return await runPolicyCheck(maybeSub, parsed, now);
+    case 'gate':
+      return await runGate(maybeSub, parsed, gateSeams);
     case 'approve': {
       allow(parsed, ['--key', '--expires', '--reason', '--name', '--previous', '--out', '--expect-digest'], 1);
       const result = await approveSkill({

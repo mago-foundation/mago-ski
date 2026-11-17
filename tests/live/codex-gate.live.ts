@@ -14,15 +14,18 @@
 // Not part of `npm test`; prints one JSON report on stdout and exits 1 if any expectation failed.
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { codexManagedConfigToml, codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { readInstanceConfig } from '../../src/gate/instance.ts';
+import { hookConfigText } from '../../src/gate/setup.ts';
+// @ts-expect-error Test-only JavaScript shared with the observer tests.
+import { parseObservations, promptDenied } from './hook-observation.mjs';
 import type { Mode } from '../../src/policy.ts';
-import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
 
 const CODEX = process.env.CODEX_BIN ? realpathSync(process.env.CODEX_BIN) : '';
-const HOOK_ENTRY = path.join(REPO, 'src/gate/adapters/codex-hook.ts');
 const ADMIN_ROOT = '/etc/codex';
 const ADMIN_SKILLS = path.join(ADMIN_ROOT, 'skills');
 const SKILLS = ['approved-skill', 'other-skill', 'project-skill', 'user-skill'];
@@ -87,19 +90,10 @@ type World = GateWorld & { base: string; unmount: () => Promise<void>; hookConfi
 
 async function world(base: string): Promise<World> {
   const root = await liveRoot('mago-live-cx-');
-  const unmount = await overlay(ADMIN_ROOT, path.join(root, 'etc-codex'));
-  let self: World | undefined; // configure() runs on start(), after world() has returned
-  const w = await gateWorld(root, {
-    hostExe: CODEX, managedDir: ADMIN_SKILLS,
-    async configure(service, mode, state) {
-      self!.hookConfig = path.join(state, 'codex-hook.json');
-      await writeFile(self!.hookConfig, JSON.stringify({
-        v: 1, socket: service.sockets.decision, mode, host_exes: [CODEX], admin_root: ADMIN_SKILLS, client_deadline_ms: 1500, self_deadline_ms: 3000,
-      }), { mode: 0o644 });
-    },
-  });
-  self = Object.assign(w, { base, unmount, hookConfig: '' });
-  return self;
+  // gate init writes the hook config and requirements.toml into <base>/etc/codex; the host reads them through this bind mount.
+  const unmount = await overlay(ADMIN_ROOT, path.join(liveBase(root), 'etc', 'codex'));
+  const w = await gateWorld(root, { host: 'codex', hostExe: CODEX });
+  return Object.assign(w, { base, unmount, hookConfig: w.paths.hook });
 }
 
 // ---------- one codex exec run ----------
@@ -109,6 +103,8 @@ interface Run {
   /** Unapproved Skills to create: in the project (.agents/skills) and in the user's own folder (~/.codex/skills). */
   projectSkill?: boolean;
   userSkill?: boolean;
+  /** A Skill planted in ~/.codex/skills/.system before Codex starts (the profile turns bundled Skills off). */
+  plantedSystem?: boolean;
 }
 
 async function runCodex(w: World, name: string, run: Run) {
@@ -117,15 +113,27 @@ async function runCodex(w: World, name: string, run: Run) {
   const codexHome = path.join(home, '.codex');
   const proj = path.join(dir, 'proj');
   for (const d of [codexHome, proj]) await mkdir(d, { recursive: true });
+  const observer = path.join(path.dirname(w.hookEntry), 'live-hook-observer.mjs');
+  const observations = path.join(dir, 'hook-observations.jsonl');
+  await copyFile(path.join(REPO, 'tests', 'live', 'hook-observer.mjs'), observer);
+  await writeFile(`${observer}.json`, JSON.stringify({ hook: w.hookEntry, observations }), { mode: 0o644 });
+  await writeFile(observations, '', { mode: 0o600 });
+  // Each fresh host gets a different temporary home; list it just as gate init would for a real user.
+  const instance = await readInstanceConfig(w.paths.instance, 0);
+  await writeFile(w.hookConfig, hookConfigText('codex', instance, { userHomes: [home], codexHomes: [codexHome] }), { mode: 0o644 });
   if (run.projectSkill) await writeSkill(path.join(proj, '.agents', 'skills'), 'project-skill');
   if (run.userSkill) await writeSkill(path.join(codexHome, 'skills'), 'user-skill');
   await writeFile(path.join(codexHome, 'config.toml'),
     `model = "gpt-5.1-codex"\nmodel_provider = "faux"\n[model_providers.faux]\nname = "faux"\nbase_url = "${w.base}"\nwire_api = "responses"\nenv_key = "FAUX_KEY"\n`);
   // The requirements file, as the installer writes it for this user (deny_read needs the user's fixed Skill roots).
   await writeFile(path.join(ADMIN_ROOT, 'requirements.toml'), codexRequirementsToml({
-    mode: w.mode, nodePath: NODE, hookEntry: HOOK_ENTRY, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
+    mode: w.mode, nodePath: NODE, hookEntry: observer, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
     userSkillRoots: [path.join(codexHome, 'skills'), path.join(codexHome, 'skills', '.system'), path.join(home, '.agents', 'skills')],
   }), { mode: 0o644 });
+
+  // The second managed file of the Codex profile (codex-profile.md C1): bundled and cloud Skills off, descriptions not injected.
+  await writeFile(path.join(ADMIN_ROOT, 'managed_config.toml'), codexManagedConfigToml(), { mode: 0o644 });
+  if (run.plantedSystem) await writeSkill(path.join(codexHome, 'skills', '.system'), 'planted-system-skill');
 
   handOver(dir);
   current = { steps: run.steps ?? [], requests: [] };
@@ -142,9 +150,11 @@ async function runCodex(w: World, name: string, run: Run) {
   const requests = current.requests;
   current = null;
   const all = JSON.stringify(requests);
+  const hookObservations = parseObservations(await readFile(observations, 'utf8').catch(() => '')) as Array<{ event: string | null; code: number | null; signal: string | null; reason: boolean }>;
   const events = stdout.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   return {
     exit: code,
+    hookObservations,
     modelCalls: requests.length,
     listing: requests[0] ? listing(requests[0]) : null,
     injected: requests[0] ? injected(requests[0]) : [],
@@ -168,7 +178,8 @@ interface Scenario {
 }
 
 const linked = (name: string) => `[$${name}](${ADMIN_SKILLS}/${name}/SKILL.md)`;
-const blocked = (o: Outcome) => o.modelCalls === 0 || o.events.some((e) => /error|blocked/iu.test(e)) || /block|mago-ski/iu.test(o.stderr);
+// A missing model request is not a block: require a completed hook denial for this prompt.
+const blocked = (o: Outcome) => promptDenied(o.hookObservations) as boolean;
 
 const SCENARIOS: Record<string, Scenario> = {
   'listing': {
@@ -190,6 +201,12 @@ const SCENARIOS: Record<string, Scenario> = {
     expect: (o) => ({ 'approved body did not reach the model (bare mention blocked)': o.reached['approved-skill'] === false }),
     known: (o) => ({ 'a bare mention of an admin Skill is usable': o.reached['approved-skill'] === true }),
   },
+  'profile-planted-system': {
+    mode: 'enforce', what: 'profile: a Skill planted in .system is reported, never failing (the managed config removes bundled Skills; whether a planted one is loaded is recorded)',
+    run: () => ({ prompt: 'hello', plantedSystem: true }),
+    expect: (o) => ({ 'the run completed': o.exit === 0 || o.modelCalls > 0 }),
+    known: (o) => ({ 'planted .system Skill is not listed': o.listing?.includes('planted-system-skill') === false }),
+  },
   'mention-project': {
     mode: 'enforce', what: 'a mention of a repo Skill is blocked; its body never reaches the model',
     run: () => ({ prompt: 'use $project-skill now', projectSkill: true }),
@@ -207,9 +224,9 @@ const SCENARIOS: Record<string, Scenario> = {
   },
   'revoked-new-session': {
     mode: 'enforce', what: 'after a revoke the Skill is auto-uninstalled: not listed, and a linked mention is blocked',
-    before: async (w) => { await w.install('other-skill'); await w.revoke('other-skill'); },
+    before: async (w) => { await w.install('other-skill'); const result = await w.revoke('other-skill'); if (typeof result !== 'object' || result === null || !('ok' in result) || result.ok !== true) throw new Error('revocation was not accepted'); },
     run: () => ({ prompt: `use ${linked('other-skill')} now` }),
-    expect: (o) => ({ 'other-skill not listed': !(o.listing ?? []).includes('other-skill'), 'its body did not reach the model': o.reached['other-skill'] === false }),
+    expect: (o) => ({ 'managed link was removed': !existsSync(path.join(ADMIN_SKILLS, 'other-skill')), 'its body did not reach the model': o.reached['other-skill'] === false, 'the prompt was blocked': blocked(o) }),
   },
   'service-down': {
     mode: 'enforce', what: 'the gate service is stopped: a linked mention of the installed Skill is blocked (fail closed)',

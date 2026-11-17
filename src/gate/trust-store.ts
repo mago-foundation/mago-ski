@@ -108,6 +108,63 @@ async function loadState(dir: string, rootFingerprint: string): Promise<State | 
   return { manifest, manifestBytes, trustRootBytes, revocationsBytes };
 }
 
+/**
+ * Carries a trust store from before the per-root layout (documents directly in `flatDir`, builds before gate-new-root.md) into
+ * the folder of its root, `perRootDir`, keeping its rollback memory: the document versions and the highest trusted time.
+ * Without this, the per-root store would start empty and accept an older, still valid trust root or revocation list (one
+ * from before a revocation). Per-root stores are folders; anything else in `flatDir` is the old store.
+ *
+ * - The old state verifies under this root and the per-root store is empty: it is copied (documents, then the manifest, the
+ *   commit point), read back, and the old files are removed (manifest first, so a stop in between is finished next time).
+ * - Both hold state: the newer one in both versions is kept, with the later trusted time. The per-root store is never left
+ *   older than what the gate had accepted before the upgrade.
+ * - Anything else throws, and the service does not open a store (fail closed): the old state does not verify under this
+ *   root (another root, or damaged), documents without a manifest, or the two states are each newer in one document.
+ */
+export async function migrateFlatTrustStore(flatDir: string, perRootDir: string, rootFingerprint: string): Promise<'none' | 'migrated' | 'kept-newer' | 'cleaned'> {
+  const entries = await readdir(flatDir, { withFileTypes: true }).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return []; throw e; });
+  const old = entries.filter((e) => !e.isDirectory()).map((e) => e.name);
+  if (old.length === 0) return 'none';
+  const refuse = (why: string): never => {
+    throw new Error(`trust state from an earlier build is in ${flatDir} and ${why}. Nothing is accepted until it is carried over, so that documents older than the ones already accepted stay refused. `
+      + `If the gate was set up for another root, start it once with that root. To give this state up (the gate then accepts any valid documents of this root), remove the files in ${flatDir}, not its folders`);
+  };
+  const removeOld = async (): Promise<void> => {
+    for (const name of [...old].sort((a, b) => Number(b === MANIFEST) - Number(a === MANIFEST))) await unlink(path.join(flatDir, name)).catch((e: NodeJS.ErrnoException) => { if (e.code !== 'ENOENT') throw e; });
+    await fsyncDir(flatDir);
+  };
+  const present = await lstat(perRootDir).then(() => true, (e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return false; throw e; });
+  let dest: State | null = null;
+  if (present) dest = await loadState(perRootDir, rootFingerprint).catch(() => refuse(`the store of this root, ${perRootDir}, cannot be read`));
+  if (!old.includes(MANIFEST)) { // what an interrupted clean-up leaves, but only when the per-root store is committed
+    if (!dest && old.some((name) => !/^\..*\.tmp$/u.test(name))) refuse('has documents but no manifest, so what was accepted before is not known');
+    await removeOld();
+    return dest ? 'cleaned' : 'none';
+  }
+  const from = (await loadState(flatDir, rootFingerprint).catch((e: unknown) => refuse(`does not verify under root ${rootFingerprint} (${e instanceof Error ? e.message : 'unreadable'})`)))!;
+  const v = (st: State) => [st.manifest.trustRoot.version, st.manifest.revocations.version] as const;
+  const highTime = dest && dest.manifest.highTime > from.manifest.highTime ? dest.manifest.highTime : from.manifest.highTime;
+  const commit = async (manifest: Manifest): Promise<void> => {
+    await writeFileAtomic(path.join(perRootDir, MANIFEST), manifestJson(manifest), 0o600);
+    await fsyncDir(perRootDir);
+  };
+  if (dest && v(dest)[0] >= v(from)[0] && v(dest)[1] >= v(from)[1]) { // the per-root store is at least as new: keep it
+    if (highTime > dest.manifest.highTime) await commit({ ...dest.manifest, highTime });
+    await removeOld();
+    return 'kept-newer';
+  }
+  if (dest && (v(dest)[0] > v(from)[0] || v(dest)[1] > v(from)[1]))
+    refuse(`is newer in one document and older in the other than the store of this root (trust root ${v(from)[0]} and revocations ${v(from)[1]}, against ${v(dest)[0]} and ${v(dest)[1]})`);
+  await mkdir(perRootDir, { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => { if (e.code !== 'EEXIST') throw e; });
+  await writeFileAtomic(path.join(perRootDir, from.manifest.trustRoot.file), from.trustRootBytes, 0o600);
+  await writeFileAtomic(path.join(perRootDir, from.manifest.revocations.file), from.revocationsBytes, 0o600);
+  await commit({ ...from.manifest, highTime });
+  const back = await loadState(perRootDir, rootFingerprint); // read back before anything old is removed
+  if (!back || v(back)[0] !== v(from)[0] || v(back)[1] !== v(from)[1]) throw new Error(`carrying the trust state to ${perRootDir} did not verify; the old files are kept`);
+  await removeOld();
+  return 'migrated';
+}
+
 export async function openTrustStore(dir: string, options: TrustStoreOptions): Promise<TrustStore> {
   requireValidDate(options.now, 'Open time');
   dir = path.resolve(dir);

@@ -17,12 +17,10 @@ import { realpathSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { claudeCodeManagedSettings } from '../../src/gate/adapters/claude-code-settings.ts';
 import type { Mode } from '../../src/policy.ts';
-import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveRoot, MARK, NODE, overlay, REPO, writeSkill, type GateWorld } from './gate-world.ts';
+import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
 const CLAUDE = realpathSync(process.env.CLAUDE_BIN ?? execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim());
-const HOOK_ENTRY = path.join(REPO, 'src/gate/adapters/claude-code-hook.ts');
 const MANAGED_ROOT = '/etc/claude-code';
 const MANAGED_SKILLS = path.join(MANAGED_ROOT, '.claude', 'skills');
 
@@ -105,18 +103,9 @@ type World = GateWorld & { base: string; unmount: () => Promise<void> };
 
 async function world(base: string): Promise<World> {
   const root = await liveRoot('mago-live-cc-');
-  const unmount = await overlay(MANAGED_ROOT, path.join(root, 'etc-claude-code'));
-  await mkdir(path.join(MANAGED_ROOT, '.claude'), { mode: 0o755 });
-  const w = await gateWorld(root, {
-    hostExe: CLAUDE, managedDir: MANAGED_SKILLS,
-    async configure(service, mode, state) {
-      // The hook's config and the managed settings, as an administrator would install them.
-      const config = path.join(state, 'claude-code-hook.json');
-      await writeFile(config, JSON.stringify({ v: 1, socket: service.sockets.decision, mode, host_exes: [CLAUDE], client_deadline_ms: 1500, self_deadline_ms: 3000 }), { mode: 0o644 });
-      const settings = claudeCodeManagedSettings({ mode, nodePath: NODE, hookEntry: HOOK_ENTRY, configPath: config, hookTimeoutSec: 5, selfDeadlineMs: 3000 });
-      await writeFile(path.join(MANAGED_ROOT, 'managed-settings.json'), JSON.stringify(settings, null, 2), { mode: 0o644 });
-    },
-  });
+  // gate init writes the hook config and the managed settings into <base>/etc/claude-code; the host reads them through this bind mount.
+  const unmount = await overlay(MANAGED_ROOT, path.join(liveBase(root), 'etc', 'claude-code'));
+  const w = await gateWorld(root, { host: 'claude-code', hostExe: CLAUDE });
   return Object.assign(w, { base, unmount });
 }
 
@@ -218,11 +207,11 @@ const SCENARIOS: Record<string, Scenario> = {
   'revoke-mid-session': {
     mode: 'enforce', what: 'the approval is revoked after the session started: the next Skill call in that session is denied',
     before: async (w) => { await w.install('other-skill'); },
-    run: (w) => ({ steps: [async () => { await w.revoke('other-skill'); return [tool('Skill', { skill: 'other-skill' })]; }] }),
+    run: (w) => ({ steps: [async () => { const result = await w.revoke('other-skill'); if (typeof result !== 'object' || result === null || !('ok' in result) || result.ok !== true) throw new Error('revocation was not accepted'); return [tool('Skill', { skill: 'other-skill' })]; }] }),
     expect: (o) => ({
       'other-skill was listed at start': o.advertised?.includes('other-skill') === true,
       'its body did not reach the model after the revoke': o.reached['other-skill'] === false,
-      'the call returned an error': o.toolResults.some((r) => r.is_error),
+      'the gate refused the call': o.toolResults.some((r) => r.is_error && /not approved by your organisation/u.test(r.text)),
     }),
   },
   'revoked-new-session': {
@@ -249,7 +238,7 @@ const SCENARIOS: Record<string, Scenario> = {
     mode: 'enforce', what: 'the gate service is stopped: the installed Skill is still listed, but every use is denied (fail closed)',
     before: async (w) => { await rm(path.join(MANAGED_SKILLS, 'planted-skill'), { recursive: true, force: true }); await w.stop(); },
     run: () => ({ steps: [skillCall('approved-skill')] }),
-    expect: (o) => ({ 'approved body did not reach the model': o.reached['approved-skill'] === false, 'the call returned an error': o.toolResults.some((r) => r.is_error) }),
+    expect: (o) => ({ 'approved body did not reach the model': o.reached['approved-skill'] === false, 'the gate could not verify the Skill': o.toolResults.some((r) => r.is_error && /mago-ski could not verify/u.test(r.text)) }),
   },
   'slash-service-down': {
     mode: 'enforce', what: 'the gate service is stopped: /approved-skill is blocked (fail closed)',

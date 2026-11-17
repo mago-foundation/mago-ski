@@ -1,12 +1,12 @@
 # What mago-ski can do
 
-As of 2026-11-10.
+As of 2026-11-17.
 
-mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. It can approve Skills. It can also install approved Skills for users, but that part, the company gate for Claude Code and Codex, is built and not yet released.
+mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. It can approve Skills. It can also install approved Skills for users and check every use of them: that part is the company gate for Claude Code and Codex, new in 0.4.0 and Linux only.
 
-This page has three parts: what works today in the released version (0.3.0), what is built but not released yet, and what mago-ski does not do.
+This page has three parts: what works today in the released version (0.4.0), the company gate that is new in it, and what mago-ski does not do.
 
-## What works today (version 0.3.0, released)
+## What works today (version 0.4.0, released)
 
 Anyone can install this version for free. It runs on Linux and macOS.
 
@@ -58,9 +58,15 @@ Anyone can install this version for free. It runs on Linux and macOS.
 - The app checks that the key really belongs to someone in that role, using the organisation's settings file that only the administrator can change.
 - Setting up a new organisation and recovering from a stolen main key still use the command line.
 
-## Built, not released yet (the company gate)
+## The company gate (new in 0.4.0, Linux only)
 
-This part is finished and tested on Linux only. It is not yet packaged and not yet part of the mago-ski command, so it cannot be switched on from a released version. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions only.
+This part is built and tested on Linux only. It is part of the mago-ski command (`mago-ski gate …`) from version 0.4.0. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions only. The guides are [Claude Code](hosts/claude-code.md) and [Codex](hosts/codex.md).
+
+**Setting it up**
+
+- One command writes everything a computer needs: the gate's settings, the service, and the administrator settings files for Claude Code or Codex. It can show all of it first without writing anything.
+- It refuses to set up when a user could edit the program files the gate depends on.
+- One command checks the whole setup and says what is wrong.
 
 **Installing Skills**
 
@@ -78,8 +84,9 @@ This part is finished and tested on Linux only. It is not yet packaged and not y
 - A Skill whose approval is taken back is blocked at its next use, even in a session that is already open. The session itself keeps running.
 - It writes the administrator settings files that switch this on for Claude Code and Codex.
 - In Claude Code, Skills the administrator did not install are hidden from the AI as well as blocked.
-- In Codex, they stay visible in its list of Skills and are only blocked when used.
-- In Codex, users have to call an installed Skill by its full link (`[$name](/etc/codex/skills/name/SKILL.md)`), not just `$name`.
+- In Codex, mago-ski switches off the Skills that come with Codex, Skills from plugins and Skills from the cloud.
+- In Codex, a user can call an installed Skill by `$name` when no other Skill folder is on the computer. When one is, the plain name is blocked and the user has to use the full link (`[$name](/etc/codex/skills/name/SKILL.md)`).
+- In Codex, Skill folders that a user or a project adds stay visible in its list of Skills. Typing their name is blocked. Picking one from Codex's menu is not: mago-ski notices such folders and reports them, and can lock the user's Skill folders so nothing can be added there.
 - In Codex, mentions from plugins and links that do not lead to an installed Skill are blocked.
 
 **Control and records**
@@ -90,8 +97,10 @@ This part is finished and tested on Linux only. It is not yet packaged and not y
 ## What mago-ski does not do
 
 - It does not decide whether a Skill is safe. An approval only records who approved which version.
+- It does not watch or control what an agent does after a Skill is loaded (tool calls, data, intent). It decides only whether a Skill may be loaded.
+- No AI model takes part in its decisions. Every verdict is computed from the Skill's bytes and signed files, and gives the same result on any machine.
 - It does not run a central Skill store or download service. The administrator hands mago-ski the Skills and approvals.
 - It cannot remove instructions that a session has already read. Those stay until the session is restarted.
-- In Codex, it cannot fully stop Skills that did not come from the administrator, such as Skills inside a project folder. It notices them and blocks most uses, but a determined user can get around it.
+- In Codex, it cannot fully stop Skills that did not come from the administrator, such as Skills inside a project folder. It notices them and blocks typed uses, but a Skill picked from Codex's menu is not checked, and a user who runs their own copy of Codex is not covered. The [Codex guide](hosts/codex.md) says what an organisation has to control itself.
 - It does not work on Windows yet. The company gate works on Linux only so far.
 - It does not work with Cursor or other coding tools yet.
