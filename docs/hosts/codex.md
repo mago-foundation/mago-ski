@@ -119,7 +119,7 @@ With the profile in enforce mode, for listed homes and listed `CODEX_HOME`s:
 
 The hook looks for repository Skill folders in the working folder and every parent folder, while Codex (with the profile) scans only the working folder. A Skill folder in a parent folder therefore blocks plain mentions without Codex loading it.
 
-In shadow mode nothing is blocked or hidden, except that a revocation still uninstalls. The decision log records what would have been blocked, hidden (`would-hide`) or uninstalled (`would-uninstall`).
+In shadow mode nothing is blocked or hidden, except that a revocation still uninstalls. A Skill that expired or no longer matches stays installed and usable in shadow mode: the decision log records what would have been blocked, hidden (`would-hide`) or uninstalled (`would-uninstall`), and `gate status` lists the Skills it would uninstall.
 
 ### How quickly a change takes effect
 
@@ -134,16 +134,27 @@ In shadow mode nothing is blocked or hidden, except that a revocation still unin
 | A Skill folder created after a check is listed, and a menu pick of it reaches the model with no hook | Not prevented. Detected by `gate doctor` on a timer, by the GitHub Action on repositories, and by missing records in the decision log. Narrowed by `--lock-user-skill-folders` |
 | A hook process crashes, times out or is killed, and Codex continues without it | Execution control (MDM or EDR). The decision log shows the missing decisions |
 | A user runs their own Codex binary, or `codex app-server`, which ignores the managed files | Allow only the managed Codex binary and approved clients, and block `codex app-server` |
-| A repository's `.agents/skills` or `.codex/skills` folder is listed and can be picked from the menu | Require the mago-ski GitHub Action check, and start the agent only in checked working copies |
+| A repository's `.agents/skills` or `.codex/skills` folder is listed and can be picked from the menu | The gate does not check a menu pick of a repository Skill. The mago-ski GitHub Action narrows this, within the limits below. Start the agent only in working copies at a checked commit |
 | An untracked Skill folder in a working copy. The GitHub Action sees only committed files | The hook still blocks typed plain mentions there. The menu pick is the first row |
 | Start-up tricks, such as a `.env` file that changes `HOME`, or a symlinked `CODEX_HOME` | An admin-owned `CODEX_HOME`, or execution control |
+
+### What the GitHub Action check does and does not cover
+
+Requiring the [GitHub Action](github-action.md) check on a repository is not enough by itself to keep repository Skills away from the Codex menu:
+
+- **It checks only the folders in the policy's `skill_dirs`.** A Skill folder that Codex lists but the policy does not name is not looked at. List every `.agents/skills` and `.codex/skills` folder of the repository in `skill_dirs`, including those in subfolders where the agent is started, or forbid these folders outside `skill_dirs` with a repository rule (a push rule or a required path check).
+- **It accepts a certified Skill; it does not remove it.** A repository Skill with a valid certificate passes the check, stays in the repository and can be picked from the Codex menu. That pick reaches the model with no hook, so the gate does not check it and does not record it.
+- **It checks when it runs, not when the Skill is picked.** A certificate that is revoked or expires after the check stays in effect for menu picks until the check runs again and the Skill is removed. Run the check on a schedule as well as on pull requests, and remove a repository Skill when its approval is revoked.
+- **It sees committed files of the checked revision only.** A working copy at another commit, or with local changes, is not covered.
+
+The repository controls this needs: the check is a required status check on protected branches; the policy and trust files are changed only with review (the Action reads them from the base revision); and, if no repository Skill is meant to be used with Codex, a rule that keeps `.agents/skills` and `.codex/skills` out of the repository, which is the only setting in which the menu route is closed for repositories.
 
 ## Keeping it current
 
 - **New trust root or revocation list:** `sudo mago-ski gate trust --host codex --trust-root FILE --revocations FILE`, or an inbox (`gate init --inbox DIR`, then `gate refresh`).
 - **Remove a Skill:** `sudo mago-ski gate uninstall --host codex NAME`.
 - **Removed names.** The gate records the Skills it removed in `/etc/codex/skills/.mago-ski-removed-names.json` (at most 4096 entries, oldest dropped first), so a removed name gets a clear block message. `sudo mago-ski gate prune-removed --host codex --older-than-days N` (default 90, at least 7) drops old entries. Blocking rests on the removed link, so pruning only loses the message. A removed name is blocked by the hook without asking the gate, so that block is not in the decision log.
-- **Checks.** `sudo mago-ski gate doctor --host codex` FAILs on, among other things: a managed file that differs from what `gate init` writes, a Skill folder or a `.system` folder in a listed home, an installed Skill with a name mismatch, and a service that is down. It WARNs on an untested Codex version, on unlocked user Skill folders and on shadow mode.
+- **Checks.** `sudo mago-ski gate doctor --host codex` FAILs on, among other things: a managed file that differs from what `gate init` writes, a Skill folder or a `.system` folder in a listed home, a listed home whose Skill folders could not be scanned completely (too large, too deep or unreadable), an entry in `/etc/codex/skills` with no install record, a reconcile that did not finish cleanly, an installed Skill with a name mismatch, and a service that is down. It WARNs on an untested Codex version, on unlocked user Skill folders and on shadow mode.
 
 ## Limits
 
