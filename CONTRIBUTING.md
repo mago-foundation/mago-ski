@@ -45,8 +45,10 @@ One test needs the official, checksum-pinned Cosign v3.1.3 binary and is skipped
 npm run build && npm pack --pack-destination /tmp
 cd "$(mktemp -d)" && npm init -y && npm install --ignore-scripts /tmp/mago-foundation-mago-ski-*.tgz
 npx --no-install mago-ski --help
-MAGO_SKI="npx --no-install mago-ski" bash /path/to/mago-ski/examples/demo.sh
+MAGO_SKI="$PWD/node_modules/.bin/mago-ski" bash /path/to/mago-ski/examples/demo.sh
 ```
+
+The demo changes to its own temporary folder, where `npx --no-install` would not find the package, so it is given the installed command's full path.
 
 ## Project layout
 

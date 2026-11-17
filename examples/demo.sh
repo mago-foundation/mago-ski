@@ -4,7 +4,8 @@
 #   node --test tests/pi-host.test.ts
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Runs the repo sources by default. To test an installed package instead: MAGO_SKI="npx --no-install mago-ski" bash demo.sh
+# Runs the repo sources by default. To test an installed package instead, give the installed command's full path (the demo
+# changes folder, so `npx --no-install` would not find it): MAGO_SKI="/path/to/node_modules/.bin/mago-ski" bash demo.sh
 if [[ -n "${MAGO_SKI:-}" ]]; then
   mago() { $MAGO_SKI "$@"; }
 else
