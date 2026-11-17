@@ -17,7 +17,7 @@ import {
 } from './recovery-admin.ts';
 import { isMainModule } from './main-module.ts';
 import { formatTimestamp } from './time.ts';
-import { collectSkillTree, TREE_PROFILE } from './tree-digest.ts';
+import { collectSkillTree, pathsNotCovered, TREE_PROFILE } from './tree-digest.ts';
 import { verifyTrustRoot } from './trust-root.ts';
 import { resolveSkillName, unverifiable, type VerificationResult } from './verify.ts';
 import { createRequire } from 'node:module';
@@ -634,7 +634,20 @@ function printResult(result: VerificationResult, json: boolean): void {
     return;
   }
   const mark = result.verdict === 'VERIFIED' ? 'ok' : 'FAIL';
-  process.stdout.write(`${mark.padEnd(4)} ${result.verdict.padEnd(17)} ${result.skillName}  ${result.reason}\n`);
+  // A VERIFIED line must not read as "everything in this folder is approved" when the Skill excludes files from its digest.
+  const notCovered = result.verdict === 'VERIFIED' ? pathsNotCovered(result.excluded) : [];
+  const note = notCovered.length > 0 ? `  (${notCovered.length} path${notCovered.length === 1 ? '' : 's'} not covered by the certificate: ${shownPaths(notCovered)})` : '';
+  process.stdout.write(`${mark.padEnd(4)} ${result.verdict.padEnd(17)} ${result.skillName}  ${result.reason}${note}\n`);
+}
+
+/** Up to three paths, with control and bidirectional characters escaped (the names come from the Skill). */
+function shownPaths(paths: readonly string[]): string {
+  const safe = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, '0')}`);
+  return `${paths.slice(0, 3).map(safe).join(', ')}${paths.length > 3 ? ', ...' : ''}`;
+}
+
+function notCoveredNote(paths: readonly string[]): string {
+  return `${paths.length} path${paths.length === 1 ? ' is' : 's are'} excluded from the digest by .skilldigestignore (${shownPaths(paths)}).`;
 }
 /* ******************************************************************************************  */
 
@@ -1406,8 +1419,11 @@ export async function runCli(
         digest: result.digest, 
         certificate_id: result.certificateId,
         expires_at: formatTimestamp(result.expiresAt), 
-        certificate: result.path
+        certificate: result.path,
+        ...(result.notCovered.length > 0 ? { not_covered: result.notCovered } : {}),
       });
+      if (result.notCovered.length > 0)
+        process.stderr.write(`warning: ${notCoveredNote(result.notCovered)} This approval does not cover them: they can change without invalidating it.\n`);
 
       return 0;
     }
@@ -1434,6 +1450,9 @@ export async function runCli(
       
       const result = await diffSkillTrees(one(parsed, '--base'), one(parsed, '--candidate'));
       print(result);
+      const skipped = [...new Set([...result.not_compared.base, ...result.not_compared.candidate])];
+      if (skipped.length > 0)
+        process.stderr.write(`warning: ${notCoveredNote(skipped)} They were not compared.\n`);
       
       return result.recertification_required ? 1 : 0;
     }
