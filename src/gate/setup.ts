@@ -191,6 +191,7 @@ async function chooseHomes(opts: InitOptions, problems: string[]): Promise<strin
   if (opts.userHomes && opts.userHomes.length > 0)
     return [...new Set(opts.userHomes.map((h) => cleanDir(h, '--user-home', problems)).filter((h): h is string => h !== undefined))];
   const out: string[] = [];
+  // nosemgrep: mago-no-raw-read-of-signed-input -- the system user list, read as root to choose the homes
   const text = await readFile(path.join(opts.base ?? '/', 'etc', 'passwd'), 'utf8').catch(() => '');
   for (const line of text.split('\n')) {
     const f = line.split(':');
@@ -551,6 +552,7 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
     if (!info) continue;
     let ours = false;
     if (info.isFile()) {
+      // nosemgrep: mago-no-raw-read-of-signed-input -- a system host file gate init would replace, hashed to see whether mago-ski wrote it
       const h = sha256(await readFile(f.path));
       ours = own?.get(f.path) === h || sharedOwn?.get(f.path) === h;
     }
@@ -754,6 +756,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   // Host config and hook config: exact content of what `gate init` would write now.
   // Codex: the listed homes live in the hook config (the instance config does not know them); deny_read is present or not as written.
   const homes: CodexHomes = (host === 'codex' ? await readHookHomes(p.hook) : undefined) ?? { userHomes: [], codexHomes: [] };
+  // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: the root-owned host config, only searched for one line
   const denyRoots = host === 'codex' && /^deny_read = /mu.test(await readFile(p.hostConfig, 'utf8').catch(() => '')) ? codexDenyRoots(homes) : [];
   const hookExpected = hookConfigText(host, c, homes);
   let hostFileMode: Mode | undefined;
@@ -761,6 +764,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
     const expected = hostConfigText(host, c.mode, tc, p.hook, denyRoots);
     const info = await lstat(p.hostConfig);
     if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${p.hostConfig} must be a regular file owned by root and not writable by others`);
+    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above as a root-owned regular file not writable by others
     const have = sha256(await readFile(p.hostConfig));
     if (have === sha256(expected)) { hostFileMode = c.mode; add('host config', 'PASS', `${p.hostConfig} matches what gate init writes`); }
     else {
@@ -775,12 +779,14 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   for (const [label, file, expected] of [['unit', p.unit, unitText(tc)], ['drop-in', p.dropin, dropinText(c, p.stateRoot)]] as const) {
     try {
       await trustedRegularFile(file, uid);
+      // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above by trustedRegularFile
       if (sha256(await readFile(file)) !== sha256(expected)) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
       add(label, 'PASS', `${file} matches what gate init writes`);
     } catch (e) { add(label, 'FAIL', message(e)); }
   }
   try {
     await trustedRegularFile(p.hook, uid);
+    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above by trustedRegularFile
     if (sha256(await readFile(p.hook)) !== sha256(hookExpected)) throw new Error(`${p.hook} differs from what gate init would write now; run gate init again`);
     add('hook config', 'PASS', `${p.hook} matches what gate init writes`);
   } catch (e) { add('hook config', 'FAIL', message(e)); }
@@ -858,6 +864,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
 
 async function readHookHomes(file: string): Promise<CodexHomes | undefined> {
   try {
+    // nosemgrep: mago-no-raw-read-of-signed-input -- the root-owned hook config; doctor checks its ownership and content separately
     const raw = parseStrictJson(await readFile(file));
     if (!isRecord(raw)) return undefined;
     const list = (v: unknown): string[] | undefined => (Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]) : undefined);
@@ -911,6 +918,7 @@ async function codexDoctor(c: InstanceConfig, p: InstancePaths, homes: CodexHome
     const file = p.managedConfig!;
     const info = await lstat(file);
     if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${file} must be a regular file owned by root and not writable by others`);
+    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above as a root-owned regular file not writable by others
     if (sha256(await readFile(file)) !== sha256(codexManagedConfigToml())) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
     add('managed config', 'PASS', `${file} matches what gate init writes`);
   } catch (e) { add('managed config', 'FAIL', errnoCode(e) === 'ENOENT' ? `${p.managedConfig} does not exist; run gate init again` : message(e)); }

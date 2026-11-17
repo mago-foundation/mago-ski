@@ -1,0 +1,92 @@
+# mago-ski's own invariants, checked by Semgrep (`npm run sast`, and the sast workflow on pull requests).
+# These are rules that a general scanner does not know: which helper a change must go through, and why.
+# A finding fails the check. Where a call is safe for a reason the rule cannot see, add
+#   // nosemgrep: <rule-id> -- <the reason>
+# on the line before it, so the reason is reviewed with the code.
+rules:
+  - id: mago-no-path-chown-chmod
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Path-based chown() and chmod() follow a link in the last part of the path, and any part of the path can be swapped
+      between a check and the call. Where the path is inside a folder a user controls, open it with
+      O_DIRECTORY | O_NOFOLLOW and call handle.chown() / handle.chmod() (see pinFolder and lockHome in src/gate/setup.ts).
+    pattern-either:
+      - pattern: chown($PATH, ...)
+      - pattern: chmod($PATH, ...)
+      - pattern: lchown($PATH, ...)
+      - pattern: $FS.chownSync($PATH, ...)
+      - pattern: $FS.chmodSync($PATH, ...)
+    paths:
+      include:
+        - src/
+        - hosts/
+      exclude:
+        - src/fs-safe.ts
+
+  - id: mago-no-raw-read-of-signed-input
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Read files that carry trust (policies, trust documents, certificates, Skill files, state) with readRegularFile()
+      from src/fs-safe.ts: it refuses links and special files, caps the size, and checks the file did not change while
+      it was read. A raw readFile() has none of that.
+    patterns:
+      - pattern-either:
+          - pattern: readFile($PATH, ...)
+          - pattern: readFileSync($PATH, ...)
+      # The kernel's own files under /proc are not documents anyone signs or swaps.
+      - pattern-not-regex: readFile(Sync)?\(\s*[`'"]/proc/
+    paths:
+      include:
+        - src/
+        - hosts/
+        - gui/src/service/
+      exclude:
+        - src/fs-safe.ts
+
+  - id: mago-no-dom-html-sink
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      The renderer shows text that comes from Skills and from disk. Build elements with h() from
+      gui/src/renderer/dom.ts and pass text through lineSafe() or dialogSafe(); never assign HTML.
+    pattern-either:
+      - pattern: $EL.innerHTML = ...
+      - pattern: $EL.outerHTML = ...
+      - pattern: $EL.insertAdjacentHTML(...)
+      - pattern: document.write(...)
+    paths:
+      include:
+        - gui/src/
+
+  - id: mago-no-shell-child-process
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Start child processes with an argument array and no shell (execFile or spawn without `shell: true`). exec() and
+      execSync() run their text through a shell.
+    pattern-either:
+      - pattern: 'spawn(..., {..., shell: true, ...})'
+      - pattern: 'spawnSync(..., {..., shell: true, ...})'
+      - pattern: 'execFile(..., {..., shell: true, ...})'
+      - pattern: 'execFileSync(..., {..., shell: true, ...})'
+      - pattern: exec(...)
+      - pattern: execSync(...)
+    paths:
+      include:
+        - src/
+        - hosts/
+        - gui/src/
+        - scripts/
+
+  - id: mago-workflow-command-property
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A GitHub workflow command property (file=, title=) must be escaped with escapeAnnotationProperty(): `,` and `:`
+      separate properties and end the list. escapeAnnotation() is only for the message after `::`.
+    pattern-regex: (file|title|line|col)=\$\{escapeAnnotation\(
+    paths:
+      include:
+        - hosts/github/

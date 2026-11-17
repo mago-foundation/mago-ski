@@ -527,6 +527,7 @@ export class ObservationService extends EventEmitter {
         if (!isSafeRelativePath(file.path) || !isInside(dir, target) || target === dir) throw new Error(`unsafe recorded path ${JSON.stringify(file.path)}`);
         await mkdir(path.dirname(target), { recursive: true });
         await writeNewFile(target, bytes, 0o600);
+        // nosemgrep: mago-no-path-chown-chmod -- a file this process just created with O_EXCL in its own fresh mkdtemp folder
         await chmod(target, file.exec ? 0o700 : 0o600);
       }
       return { dir, bytes: written };

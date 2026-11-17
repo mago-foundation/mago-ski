@@ -269,6 +269,7 @@ async function dotenvMayMoveHome(codexHome: string): Promise<boolean> {
   try {
     const st = await lstat(file);
     if (!st.isFile() || st.size > MAX_ENVIRON_BYTES) return true; // symlink, FIFO, directory, huge: not inspected
+    // nosemgrep: mago-no-raw-read-of-signed-input -- /proc/<pid>/environ of the host process, size checked above; only searched for HOME
     return (await readFile(file)).includes('HOME');
   } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
