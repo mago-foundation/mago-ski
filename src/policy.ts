@@ -205,6 +205,14 @@ async function canonicalOrLexical(target: string): Promise<string> {
   }
 }
 
+/**
+ * Two canonical paths that name the same file. On macOS the default file system ignores case, and a path whose last part
+ * does not exist yet keeps the case it was written in, so `state.json` and `STATE.JSON` must count as the same file there.
+ */
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'darwin' || platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 /** decision_log and state_file are overwritten or appended to, so they must not be a file the policy reads. */
 async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void> {
   const inputs: Array<[string, string]>         = [
@@ -222,7 +230,7 @@ async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void
     
     const canonical = await canonicalOrLexical(target);
     for (const [name, input] of inputs) {
-      if (canonical === await canonicalOrLexical(input)) 
+      if (samePath(canonical, await canonicalOrLexical(input))) 
         throw new Error(`Policy ${label} must not be ${name}`);
     }
     
@@ -230,7 +238,7 @@ async function rejectWriteTargetsThatOverlapInputs(policy: Policy): Promise<void
       throw new Error(`Policy ${label} must not be inside a certificate_dirs directory`);
     
     for (const [other, otherPath] of seen) 
-      if (canonical === otherPath) 
+      if (samePath(canonical, otherPath)) 
         throw new Error(`Policy ${label} must not be the same file as ${other}`);
     
     seen.push([label, canonical]);
@@ -747,6 +755,13 @@ async function loadTrustBody(policy: Policy, now: Date, o: { record: boolean; ov
   }
   const problem = await saveState();
   if (problem) return problem;
+  // Another load on this host may have accepted newer documents meanwhile (the merge kept the higher versions): then the
+  // documents this load read are older than what the host has already accepted, which is a rollback like any other.
+  const accepted = state.roots[activeRootKeyId];
+  if (accepted && (accepted.trust_root_version > next.trust_root_version || accepted.revocations_version > next.revocations_version))
+    return failure(`this host has already accepted trust root ${accepted.trust_root_version} and revocation list ${accepted.revocations_version}; the documents read are older (rollback)`, { rollback: true });
+  if (timestamp && walk?.timestampKeyId && (state.timestamps[walk.timestampKeyId]?.version ?? 0) > timestamp.version)
+    return failure(`this host has already accepted timestamp ${state.timestamps[walk.timestampKeyId]!.version}; the timestamp read is older (rollback)`, { rollback: true });
 
   if (walk) {
     result.context.root = {

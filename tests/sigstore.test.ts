@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  assertPinnedCosignBinary, buildCosignSignArgs, buildCosignVerifyArgs, COSIGN_BINARY_SHA256,
+  assertPinnedCosignBinary, buildCosignSignArgs, buildCosignVerifyArgs, COSIGN_BINARY_SHA256, verificationEnv,
   COSIGN_PINNED_VERSION, CosignVerificationError, verifySigstoreBlob,
 } from '../src/experimental/sigstore.ts';
 import { tempDir } from './helpers.ts';
@@ -60,4 +60,9 @@ test('authentic public keyless release fixture verifies with the pinned adapter'
   await verifySigstoreBlob(options);
   await assert.rejects(verifySigstoreBlob({ ...options, certificateIdentity: 'attacker@example.invalid' }),
     (error) => error instanceof CosignVerificationError && error.exitCode === 1);
+});
+
+test('verification runs cosign without the variables that configure its trust', () => {
+  const env = verificationEnv({ PATH: '/usr/bin', HOME: '/home/u', COSIGN_EXPERIMENTAL: '1', SIGSTORE_REKOR_PUBLIC_KEY: '/tmp/k', TUF_ROOT: '/tmp/t', sigstore_x: 'y' });
+  assert.deepEqual(env, { PATH: '/usr/bin', HOME: '/home/u' });
 });

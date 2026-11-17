@@ -66,10 +66,19 @@ async function hashFile(filePath: string): Promise<string> {
   }
 }
 
-async function runProcess(binaryPath: string, args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
+/**
+ * The environment for a verification: without the variables cosign and its libraries read as configuration
+ * (COSIGN_*, SIGSTORE_*, TUF_*), which can replace the trust material or relax checks. Signing keeps them: it needs the
+ * caller's identity token.
+ */
+export function verificationEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !/^(COSIGN|SIGSTORE|TUF)_/iu.test(name)));
+}
+
+async function runProcess(binaryPath: string, args: string[], timeout: number, env: NodeJS.ProcessEnv = process.env): Promise<{ stdout: string; stderr: string }> {
   try {
     const { stdout, stderr } = await execFileAsync(binaryPath, args, {
-      timeout, maxBuffer: 1024 * 1024, windowsHide: true, encoding: 'utf8', shell: false, env: process.env,
+      timeout, maxBuffer: 1024 * 1024, windowsHide: true, encoding: 'utf8', shell: false, env,
     });
     return { stdout, stderr };
   } catch (error) {
@@ -112,9 +121,9 @@ export function buildCosignVerifyArgs(bundlePath: string, trustedRootPath: strin
   ];
 }
 
-async function runCosign(binaryPath: string, args: string[], timeout: number): Promise<void> {
+async function runCosign(binaryPath: string, args: string[], timeout: number, env?: NodeJS.ProcessEnv): Promise<void> {
   const canonical = await assertPinnedCosignBinary(binaryPath);
-  await runProcess(canonical, args, timeout);
+  await runProcess(canonical, args, timeout, env);
   if (await hashFile(canonical) !== COSIGN_BINARY_SHA256[platformKey()]) {
     throw new CosignVerificationError('Pinned Cosign binary changed during the operation');
   }
@@ -152,6 +161,6 @@ export async function verifySigstoreBlob(options: {
   const trustedRoot = await requireRegularFile(options.trustedRootPath, 'Sigstore trusted root');
   if (!options.certificateIdentity) throw new Error('A configured Sigstore certificate identity is required');
   if (!options.certificateOidcIssuer) throw new Error('A configured Sigstore OIDC issuer is required');
-  await runCosign(options.binaryPath, buildCosignVerifyArgs(bundle, trustedRoot, options.certificateIdentity, options.certificateOidcIssuer, payload), 60_000);
+  await runCosign(options.binaryPath, buildCosignVerifyArgs(bundle, trustedRoot, options.certificateIdentity, options.certificateOidcIssuer, payload), 60_000, verificationEnv(process.env));
   return { valid: true };
 }
