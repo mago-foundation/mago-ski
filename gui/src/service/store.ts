@@ -1,10 +1,10 @@
 // Local history store: state.json plus content-addressed file copies, all in the GUI's own data directory.
 // Nothing here is written into a Skill directory, so retained copies never change a digest.
 import { createHash } from 'node:crypto';
-import { mkdir, opendir, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
+import { mkdir, opendir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { writeFileAtomic, writeNewFile } from '../../../src/fs-safe.ts';
-import { digestFileList, MAX_RELATIVE_PATH_BYTES } from '../../../src/tree-digest.ts';
+import { readRegularFile, writeFileAtomic, writeNewFile } from '../../../src/fs-safe.ts';
+import { digestFileList, MAX_FILE_BYTES, MAX_RELATIVE_PATH_BYTES } from '../../../src/tree-digest.ts';
 import type { Baseline, CheckEvent, HistoryEvent, HistoryReset, Observation, Prefs } from './types.ts';
 
 export const STATE_SCHEMA = 'mago.gui-state/poc-1';
@@ -49,6 +49,17 @@ export interface PersistedState {
 }
 
 export const DEFAULT_PREFS: Prefs = { notify: 'grouped', retainContent: true, retentionDays: 30 };
+
+/** Saved preferences, each value checked like a change from the window; anything else falls back to the default. */
+export function sanitizePrefs(saved: unknown): Prefs {
+  const p = (saved !== null && typeof saved === 'object' ? saved : {}) as Partial<Record<keyof Prefs, unknown>>;
+  return {
+    notify: p.notify === 'off' || p.notify === 'grouped' || p.notify === 'immediate' ? p.notify : DEFAULT_PREFS.notify,
+    retainContent: typeof p.retainContent === 'boolean' ? p.retainContent : DEFAULT_PREFS.retainContent,
+    retentionDays: typeof p.retentionDays === 'number' && Number.isInteger(p.retentionDays) && p.retentionDays >= 1 && p.retentionDays <= 365
+      ? p.retentionDays : DEFAULT_PREFS.retentionDays,
+  };
+}
 
 export function emptyState(): PersistedState {
   return { schema: STATE_SCHEMA, onboardedAt: null, roots: [], instances: [], history: [], checks: [], prefs: { ...DEFAULT_PREFS }, historyReset: null };
@@ -106,19 +117,25 @@ export class Store {
    * next to retained copies means history was lost: both come back as `lost`, so the caller can say so.
    */
   async load(): Promise<{ state: PersistedState; lost: { reason: string; backup: string | null } | null }> {
-    let text: string;
+    let text: string | null = null;
+    let readError: Error | null = null;
     try {
-      text = await readFile(this.statePath, 'utf8');
+      // Bounded, and never through a link or into a special file: the size is checked before the file is read whole.
+      text = (await readRegularFile(this.statePath, 'GUI history file', MAX_STATE_BYTES)).toString('utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      const shards = await readdir(this.blobDir).catch(() => [] as string[]);
-      return { state: emptyState(), lost: shards.length > 0 ? { reason: 'the history file is missing', backup: null } : null };
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        const shards = await readdir(this.blobDir).catch(() => [] as string[]);
+        return { state: emptyState(), lost: shards.length > 0 ? { reason: 'the history file is missing', backup: null } : null };
+      }
+      if (code === 'EACCES' || code === 'EPERM' || code === 'EIO' || code === 'EMFILE' || code === 'ENFILE') throw error;
+      readError = error as Error; // too large, a link, not a regular file: kept aside below, like a damaged file
     }
     try {
-      if (text.length > MAX_STATE_BYTES) throw new Error('state file too large');
+      if (readError || text === null) throw readError ?? new Error('unreadable');
       const value = JSON.parse(text) as PersistedState;
       if (value?.schema !== STATE_SCHEMA || !Array.isArray(value.instances) || !Array.isArray(value.roots)) throw new Error('unsupported state format');
-      value.prefs = { ...DEFAULT_PREFS, ...value.prefs };
+      value.prefs = sanitizePrefs(value.prefs);
       value.history ??= [];
       value.checks ??= [];
       value.historyReset ??= null;
@@ -170,7 +187,7 @@ export class Store {
   async getBlob(sha256: string): Promise<Buffer | null> {
     let bytes: Buffer;
     try {
-      bytes = await readFile(this.blobPath(sha256));
+      bytes = await readRegularFile(this.blobPath(sha256), 'Retained copy', MAX_FILE_BYTES);
     } catch {
       return null;
     }
