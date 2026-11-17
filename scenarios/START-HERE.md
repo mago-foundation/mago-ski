@@ -6,6 +6,24 @@ This guide is for you and for Claude Code or Codex. After cloning the repository
 
 Your open agent helps you follow the guide. The runner starts a **separate, fresh host process** for each experiment. It creates a temporary organization, test keys and sample Skills, then runs the real host and mago-ski gate against a **local scripted model endpoint**. It checks what reaches that endpoint; it does not call a real model or test the interactive Skill menu.
 
+## Run with Docker
+
+On a disposable machine with Docker installed, the container builds the checkout, installs Node and the pinned native Codex 0.166.0 and Claude Code 2.1.318 binaries, and includes the live harness and its test-only hook observer. You do not need to install Node or the hosts on the machine. From the checkout root:
+
+```bash
+docker build --platform linux/amd64 -f tests/live/Dockerfile -t mago-ski-live .
+docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined mago-ski-live --host codex --run
+docker run --rm --network none --cap-add SYS_ADMIN --security-opt seccomp=unconfined mago-ski-live --host claude-code --run
+```
+
+Building downloads the pinned hosts and dependencies. Running uses no external network, mounts no host folders, and uses synthetic data. The image is Linux x86-64; other architectures need working x86-64 emulation. Each command creates a new container. Omit `--run` to print the plan; add `--json` to suppress progress messages. A non-pass exits nonzero.
+
+The harness needs `SYS_ADMIN` and an unconfined seccomp profile to create its private mount namespace. Containers share the host kernel, and these privileges weaken container isolation: use a disposable VM or machine, not a production host. Docker or host security policies may still prevent the namespace or host sandbox from starting; an incomplete run is not a pass.
+
+The Codex observer wraps the real hook only inside the live test. It records the hook event, exit code, signal and whether stderr contains a reason; it does not retain prompts, hook input or the reason. A denial requires a `UserPromptSubmit` hook that exits 2 with a reason, together with the scenario's model-boundary checks. A missing observation or missing model request alone does not prove a block. The wrapper adds a process to the test path; this is evidence for the observed run, not an assertion about hook crashes, timeouts or the menu route.
+
+The steps below describe the alternative direct Linux setup if you want to use your own installed host binaries.
+
 ## Gather what you need
 
 1. Use a disposable **Linux machine or VM**. The harness requires root, a private mount namespace, `unshare`, `mount` and `umount`. Some containers do not allow these operations. On Windows, run it on a suitable Linux machine or VM.
