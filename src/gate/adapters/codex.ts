@@ -402,7 +402,9 @@ function inspectCommand(raw: string, cfg: CodexConfig): { rogue: boolean; admin:
   // Any mention of a user/repo Skill location in any spelling (~, $HOME, relative), or of a SKILL.md file other than an
   // admin Skill's own `<admin_root>/<name>/SKILL.md`.
   const start = '(?<=^|[\\s\'"`=;|&()<>])'; // the admin path must start a word: `<other>/<admin>/x/SKILL.md` is not admin
-  const outsideAdmin = command.replace(new RegExp(`${start}${esc}/[A-Za-z0-9][A-Za-z0-9._-]*/SKILL\\.md`, 'giu'), '');
+  // Case-sensitive, like the admin-name match below: a spelling such as `<admin_root>` in another case is a different path.
+  // It must not be removed here (it would then be neither rogue nor checked by the gate).
+  const outsideAdmin = command.replace(new RegExp(`${start}${esc}/[A-Za-z0-9][A-Za-z0-9._-]*/SKILL\\.md`, 'gu'), '');
   const rogue = /\.(agents|codex)(?![A-Za-z0-9_-])/u.test(command) || /skill\.md/iu.test(outsideAdmin)
     || cfg.skillRoots.some((r) => command.includes(collapse(r)));
   const admin = new Set<string>();

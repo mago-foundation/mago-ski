@@ -9,7 +9,7 @@ import test, { type TestContext } from 'node:test';
 import { readlinkSync } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import { updateRevocations } from '../src/admin.ts';
-import { assertGatePlatform, bootId, bootMs, NotLiveError, parseStatus, processFacts as realFacts, processInfo } from '../src/gate/proc.ts';
+import { assertGatePlatform, bootId, bootMs, NotLiveError, parseStatus, parseUptimeMs, processFacts as realFacts, processInfo } from '../src/gate/proc.ts';
 import { createGateService, type GateServiceConfig } from '../src/gate/service.ts';
 import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill, type Org } from './helpers.ts';
 
@@ -546,4 +546,12 @@ test('a slow sweep does not block a concurrent skill decision', { skip: LINUX_ON
   assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'VERIFIED');
   assert.ok(Date.now() - t0 < 500, 'the decision waited for the sweep');
   await sweeping;
+});
+
+test('uptime is read with integer arithmetic: no value is one millisecond early', () => {
+  assert.equal(parseUptimeMs('2.01 1.00\n'), 2010); // Number("2.01") * 1000 floors to 2009
+  assert.equal(parseUptimeMs('4.06 0.00\n'), 4060);
+  assert.equal(parseUptimeMs('12345.6 0.00\n'), 12345600);
+  for (let i = 0; i < 100000; i += 7) assert.equal(parseUptimeMs(`${(i / 100).toFixed(2)} 0.00`), i * 10);
+  for (const bad of ['', 'x', '1', '1.', '.5', '-1.00']) assert.throws(() => parseUptimeMs(bad), /uptime/u);
 });
