@@ -7,6 +7,15 @@ import { canonicalBytes } from './canonical-json.ts';
 export const TREE_PROFILE             = 'mago.skill-tree/v2';
 export const CERTIFICATE_FILENAME     = '.mago-ski-cert.json';
 export const IGNORE_FILENAME          = '.skilldigestignore';
+
+/**
+ * The paths a `.skilldigestignore` keeps out of the digest (the built-in exclusions, `.git/` and the certificate file, are
+ * left out). A certificate says nothing about these: they can change, or be added, without invalidating it. Every command
+ * that tells a person "approved" or "unchanged" must show them.
+ */
+export function pathsNotCovered(excluded: readonly string[]): string[] {
+  return excluded.filter((item) => item !== '.git/' && item !== CERTIFICATE_FILENAME);
+}
 /** Always covered: it holds the instructions and the description hosts show the model. */
 export const SKILL_FILENAME           = 'SKILL.md';
 export const MAX_TREE_FILES           = 20_000;

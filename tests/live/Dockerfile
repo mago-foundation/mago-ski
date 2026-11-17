@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends util-linux ca-c
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /mago-ski
 COPY package.json package-lock.json tsconfig.json tsconfig.build.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY tests/live/container/package.json tests/live/container/package-lock.json tests/live/container/
 RUN npm ci --prefix tests/live/container --ignore-scripts --no-audit --no-fund
 COPY . .

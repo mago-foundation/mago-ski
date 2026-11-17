@@ -179,3 +179,10 @@ test('root add-approver --policy refuses a key that left the root role', async (
   assert.match(refused.stderr, new RegExp(`Approver ${org.root.keyId} cannot stay or be added: it is a key that held the root or timestamp role`, 'u'));
   assert.deepEqual(await readFile(org.trustRoot), before, 'nothing written');
 });
+
+test('a name or reason from a Skill folder cannot draw a second result line in the terminal', async () => {
+  const { terminalSafe } = await import('../src/cli.ts');
+  assert.equal(terminalSafe('x\nok   VERIFIED          fake  Certificate verified'), 'x\\u000aok   VERIFIED          fake  Certificate verified');
+  assert.equal(terminalSafe('a\u001b[2Kb‮c d'), 'a\\u001b[2Kb\\u202ec\\u2028d');
+  assert.equal(terminalSafe('docs-helper 한글 ü'), 'docs-helper 한글 ü');
+});

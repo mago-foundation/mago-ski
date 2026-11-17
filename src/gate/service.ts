@@ -231,6 +231,7 @@ async function listen(server: net.Server, file: string, mode: number): Promise<v
   const old = await lstat(file).catch(() => undefined);
   if (old) { if (!old.isSocket()) throw new Error(`${file} exists and is not a socket`); await unlink(file); }
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(file, 4096, () => { server.off('error', reject); resolve(); }); });
+  // nosemgrep: mago-no-path-chown-chmod -- the service's own socket, just made by listen() in a root-owned socket folder
   await chmod(file, mode);
 }
 
@@ -621,7 +622,9 @@ export function createGateService(config: GateServiceConfig): GateService {
   /** Removes a generation this install just created (sealed read-only folders need their mode back first). */
   async function removeGeneration(name: string, digest: string): Promise<void> {
     const gen = path.join(generationsDir, name, hex(digest));
+    // nosemgrep: mago-no-path-chown-chmod -- a generation inside the root-owned generation store, being removed
     for (const e of await readdir(gen, { recursive: true, withFileTypes: true }).catch(() => [])) if (e.isDirectory()) await chmod(path.join(e.parentPath, e.name), 0o755).catch(() => {});
+    // nosemgrep: mago-no-path-chown-chmod -- a generation inside the root-owned generation store, being removed
     await chmod(gen, 0o755).catch(() => {});
     await rm(gen, { recursive: true, force: true });
     await rm(`${gen}.manifest.json`, { force: true });

@@ -31,8 +31,17 @@ runs:
       with:
         node-version: 22.23.4
 
+    # The base checkout goes to a path inside the workspace, which holds the pull request. Whatever the pull request put
+    # at that path (a folder, or a link that would send the checkout somewhere else) is removed first.
+    - name: Clear the base checkout path
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf -- "${GITHUB_WORKSPACE:?}/.mago-ski-base"
+
     - name: Check out the protected base revision
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         repository: ${{ github.repository }}
@@ -47,11 +56,21 @@ runs:
         MAGO_POLICY: ${{ inputs.policy }}
         MAGO_EVENT: ${{ github.event_name }}
         MAGO_ACTION_PATH: ${{ github.action_path }}
+        MAGO_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
         policy_root="$GITHUB_WORKSPACE"
-        if [[ "$MAGO_EVENT" == pull_request ]]; then
+        if [[ "$MAGO_EVENT" == pull_request || "$MAGO_EVENT" == pull_request_target ]]; then
           policy_root="$GITHUB_WORKSPACE/.mago-ski-base"
+          # Trust must come from the base revision itself: a real folder at that path, checked out at the base commit.
+          if [[ -L "$policy_root" || ! -d "$policy_root" || -L "$policy_root/.git" ]]; then
+            echo "::error title=mago-ski::the base checkout at .mago-ski-base is not a real folder"
+            exit 2
+          fi
+          if [[ "$(git -C "$policy_root" rev-parse HEAD)" != "$MAGO_BASE_SHA" ]]; then
+            echo "::error title=mago-ski::the base checkout at .mago-ski-base is not at the base revision"
+            exit 2
+          fi
         fi
         # The verifier runs from this action's own checkout (pinned by the caller's `uses:` ref),
         # never from code in the repository under review.

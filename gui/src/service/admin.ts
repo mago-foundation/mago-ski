@@ -107,6 +107,7 @@ async function namespaceProblem(env: PinEnv): Promise<string | null> {
   for (const name of ['uid_map', 'gid_map']) {
     let text: string;
     try {
+      // nosemgrep: mago-no-raw-read-of-signed-input -- /proc/self/uid_map and gid_map (procDir is /proc outside tests)
       text = await readFile(path.join(env.procDir, 'self', name), 'utf8');
     } catch {
       return t(env.lang ?? 'ko', 'admin.err.nsUnknown');
