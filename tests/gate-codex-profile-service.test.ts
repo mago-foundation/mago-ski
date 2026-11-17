@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -270,4 +270,97 @@ test('install racing reconcile: both run in the queue, so the Skill ends up link
   assert.equal(a.reply.ok, true);
   assert.deepEqual(await f.links(), ['alpha']);
   assert.equal((await f.svc.handleAdmin({ v: 1, cmd: 'install', skill_name: 'alpha', source_dir: dir, certificate_b64: (await readFile(issued.path)).toString('base64') })).ok, true);
+});
+
+test('reconcile removes a link with no install record (an install that stopped between link and record), also with stale trust; a folder is reported', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t);
+  const digest = await f.install('alpha');
+  const gen = path.join(f.gens, 'alpha', digest.replace(/^sha256:/u, ''));
+  assert.equal(await readlink(path.join(f.managed, 'alpha')), gen);
+  await symlink(gen, path.join(f.managed, 'ghost')); // linked, never recorded
+  await symlink(gen, path.join(f.managed, '.ghost.0011223344556677.tmp')); // a temp link left behind
+  assert.equal((await refresh(f)).ok, true);
+  assert.deepEqual((await readdir(f.managed)).filter((e) => e !== '.mago-ski-removed-names.json'), ['alpha']);
+  let s = await f.status();
+  assert.deepEqual(s['unrecorded'], []);
+  assert.equal(s['reconcileError'], null);
+  assert.deepEqual((await f.reconcileLog()).filter((r) => r.result === 'remove-unrecorded').map((r) => r.skill).sort(), ['.ghost.0011223344556677.tmp', 'ghost']);
+  // stale trust: an unrecorded link goes as well
+  await symlink(gen, path.join(f.managed, 'ghost'));
+  f.setClock(new Date(f.clockNow().getTime() + 31 * DAY));
+  await refresh(f);
+  assert.deepEqual(await f.links(), []);
+  // a real folder is never removed by the gate: it is reported
+  await mkdir(path.join(f.managed, 'stray'));
+  await writeFile(path.join(f.managed, 'stray', 'SKILL.md'), 'x');
+  await refresh(f);
+  s = await f.status();
+  assert.deepEqual(s['unrecorded'], ['stray']);
+  assert.match(s['reconcileError'], /stray is a folder with no install record/u);
+  assert.deepEqual(await f.links(), ['stray']);
+});
+
+test('shadow: an unrecorded link stays, is listed in status and logged once', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t, { mode: 'shadow' });
+  const digest = await f.install('alpha');
+  await symlink(path.join(f.gens, 'alpha', digest.replace(/^sha256:/u, '')), path.join(f.managed, 'ghost'));
+  await refresh(f);
+  await refresh(f);
+  assert.deepEqual(await f.links(), ['alpha', 'ghost']);
+  assert.deepEqual((await f.status())['unrecorded'], ['ghost']);
+  assert.deepEqual((await f.reconcileLog()).map((r) => [r.skill, r.result]), [['ghost', 'would-remove-unrecorded']]);
+});
+
+test('a hide that fails keeps reconcileError and does not stop the other Skills (stale trust, and ready trust)', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t);
+  const alpha = await f.install('alpha');
+  await f.install('beta');
+  // alpha's link is replaced by a real folder: the gate refuses to remove it, so alpha stays visible
+  await unlink(path.join(f.managed, 'alpha'));
+  await mkdir(path.join(f.managed, 'alpha'));
+  const t0 = f.clockNow().getTime();
+  f.setClock(new Date(t0 + 31 * DAY));
+  await refresh(f);
+  let s = await f.status();
+  assert.equal(s['trust'], 'list-expired');
+  assert.match(s['reconcileError'], /alpha is not a link made by the gate/u); // not cleared when the pass returns
+  assert.deepEqual(await f.links(), ['alpha']); // beta was still hidden
+  assert.deepEqual(s['hidden'], ['beta']);
+  // trust recovers and alpha is revoked: alpha fails again, beta is still restored
+  await f.drop(await f.list(alpha));
+  assert.equal(((await refresh(f)) as Record<string, unknown>)['result'], 'accepted');
+  s = await f.status();
+  assert.match(s['reconcileError'], /alpha is not a link made by the gate/u);
+  assert.deepEqual(await f.links(), ['alpha', 'beta']);
+  assert.equal((await lstat(path.join(f.managed, 'beta'))).isSymbolicLink(), true);
+  // the folder is removed by hand: the next pass is clean and the error goes
+  await rm(path.join(f.managed, 'alpha'), { recursive: true });
+  await refresh(f);
+  s = await f.status();
+  assert.equal(s['reconcileError'], null);
+  assert.deepEqual(await f.links(), ['beta']);
+});
+
+test('shadow: a revoked Skill is uninstalled and logged as done; an expired one stays and is only recorded (F6.4)', { skip: LINUX_ONLY }, async (t) => {
+  const f = await fixture(t, { mode: 'shadow' });
+  const alpha = await f.install('alpha');
+  const beta = await f.install('beta');
+  const revoking = await f.list(alpha);
+  await f.drop(revoking);
+  assert.equal((await refresh(f)).ok, true);
+  assert.deepEqual(await f.links(), ['beta']); // the revoked one is gone, in shadow mode too
+  assert.deepEqual((await f.removed()).entries.map((e) => [e.name, e.kind]), [['alpha', 'revoked']]);
+  assert.deepEqual((await f.reconcileLog()).map((r) => [r.skill, r.result, r.action, r.mode]), [['alpha', 'uninstall:REVOKED', 'deny', 'shadow']]);
+  let s = await f.status();
+  assert.deepEqual(s['wouldUninstall'], []);
+  assert.equal(s['autoUninstalled'].length, 1);
+  // beta's certificate (90 d) expires while the list is fresh: shadow only records it
+  f.setClock(new Date(f.clockNow().getTime() + 91 * DAY));
+  await copyFile(revoking, f.org.revocations); // the next list follows the one already accepted
+  await f.drop(await f.list());
+  const r = await refresh(f);
+  s = await f.status();
+  assert.equal(s['trust'], 'ready', JSON.stringify([r, s['lastRefresh']]));
+  assert.deepEqual(await f.links(), ['beta']);
+  assert.deepEqual(s['wouldUninstall'], [{ name: 'beta', digest: beta, verdict: 'EXPIRED' }]);
 });
