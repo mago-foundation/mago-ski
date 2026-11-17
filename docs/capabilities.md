@@ -1,12 +1,12 @@
 # What mago-ski can do
 
-As of 2026-11-16.
+As of 2026-11-17.
 
-mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. It can approve Skills. It can also install approved Skills for users, but that part, the company gate for Claude Code and Codex, is built and not yet released.
+mago-ski lets an organisation approve exact versions of AI Skills, and makes sure only those approved versions are used. It can approve Skills. It can also install approved Skills for users and check every use of them: that part is the company gate for Claude Code and Codex, new in 0.4.0 and Linux only.
 
-This page has three parts: what works today in the released version (0.3.0), what is built but not released yet, and what mago-ski does not do.
+This page has three parts: what works today in the released version (0.4.0), the company gate that is new in it, and what mago-ski does not do.
 
-## What works today (version 0.3.0, released)
+## What works today (version 0.4.0, released)
 
 Anyone can install this version for free. It runs on Linux and macOS.
 
@@ -58,9 +58,9 @@ Anyone can install this version for free. It runs on Linux and macOS.
 - The app checks that the key really belongs to someone in that role, using the organisation's settings file that only the administrator can change.
 - Setting up a new organisation and recovering from a stolen main key still use the command line.
 
-## Built, not released yet (the company gate)
+## The company gate (new in 0.4.0, Linux only)
 
-This part is built and tested on Linux only. It is now part of the mago-ski command (`mago-ski gate …`), but not in a released version yet: 0.3.0 does not have it. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions only. The guides are [Claude Code](hosts/claude-code.md) and [Codex](hosts/codex.md).
+This part is built and tested on Linux only. It is part of the mago-ski command (`mago-ski gate …`) from version 0.4.0. It has been tried with the real Claude Code (version 2.1.318) and the real Codex (versions 0.163.0 and 0.166.0), in non-interactive sessions only. The guides are [Claude Code](hosts/claude-code.md) and [Codex](hosts/codex.md).
 
 **Setting it up**
 

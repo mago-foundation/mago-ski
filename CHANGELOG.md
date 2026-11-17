@@ -4,6 +4,8 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
 ### Added
 
 - **The company gate in the `mago-ski` command** (Linux; [design](docs/design/gate-cli.md)): `gate init`, `run`, `trust`, `install`, `uninstall`, `refresh`, `status` and `doctor`, for the Claude Code and Codex hosts. `gate init` writes the instance config, the hook config, the systemd unit and the host's managed settings (`--print` shows them and writes nothing), and refuses when the package, node or a host binary could be edited by a user. `gate doctor` prints PASS, FAIL, SKIP or WARN for each check. Guides: [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md).
@@ -120,7 +122,8 @@ First release, published to npm as `@mago-foundation/mago-ski`.
 - Specifications, threat model, test vectors for other implementations, and demos.
 - Linux and macOS support. Windows is not supported in 0.1.
 
-[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mago-foundation/mago-ski/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mago-foundation/mago-ski/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mago-foundation/mago-ski/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mago-foundation/mago-ski/releases/tag/v0.1.0
