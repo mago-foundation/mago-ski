@@ -584,8 +584,8 @@ export async function approveSkill(options: {
 
   const targetPath = options.out
     ?? (options.outDir === undefined ? path.join(tree.root, CERTIFICATE_FILENAME) : path.join(options.outDir, `${skillName}.cert.json`));
+  const parsed     = parseCertificate(bytes); // before the write: a certificate that cannot be read back is never left on disk
   const written    = await writeFileAtomic(targetPath, bytes);
-  const parsed     = parseCertificate(bytes);
 
   return {
     path: written,

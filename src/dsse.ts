@@ -1,7 +1,7 @@
 // DSSE (Dead Simple Signing Envelope) v1 with exactly one Ed25519 signature.
 // https://github.com/secure-systems-lab/dsse/blob/master/protocol.md
 import { sign, verify, type KeyObject } from 'node:crypto';
-import { canonicalBytes, exactKeys, parseCanonicalJsonBytes, requireArray, requireString } from './canonical-json.ts';
+import { exactKeys, parseCanonicalJsonBytes, readableCanonicalBytes, requireArray, requireString } from './canonical-json.ts';
 import { validateKeyId } from './keys.ts';
 
 export interface Envelope {
@@ -46,7 +46,7 @@ export function signEnvelope(
 }
 
 export function envelopeBytes(envelope: Envelope): Buffer {
-  return canonicalBytes(envelope);
+  return readableCanonicalBytes(envelope, 'The signed document');
 }
 
 function decodeBase64(value: unknown, label: string, maxLength: number): Buffer {

@@ -2,7 +2,7 @@
 // policy, signs numbered root events that revoke or replace the root key. Hosts walk the log from the policy's
 // starting point at every trust check; one event that breaks a rule makes the whole log UNVERIFIABLE.
 import { sign, verify, type KeyObject } from 'node:crypto';
-import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requirePositiveInteger, requireString } from './canonical-json.ts';
+import { canonicalBytes, exactKeys, isRecord, readableCanonicalBytes, parseCanonicalJsonBytes, requireArray, requirePositiveInteger, requireString } from './canonical-json.ts';
 import { preAuthEncoding } from './dsse.ts';
 import { parseSpki, validateKeyId, type PublicKeyInfo } from './keys.ts';
 import { CLOCK_SKEW_MS, formatTimestamp, parseTimestamp, requireValidDate } from './time.ts';
@@ -247,7 +247,7 @@ export function emptyRootEventLog(): Buffer {
 }
 
 export function rootEventLogBytes(envelopes: MultiEnvelope[]): Buffer {
-  return canonicalBytes({ events: envelopes, type: ROOT_EVENTS_TYPE });
+  return readableCanonicalBytes({ events: envelopes, type: ROOT_EVENTS_TYPE }, 'The root event log');
 }
 
 /** `sha256:` + the SHA-256 of the envelope as canonical JSON with its trailing LF (the host state's event_digest). */
