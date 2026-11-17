@@ -44,12 +44,20 @@ export function classify(host, id, harnessName, child) {
   const checks = item.checks;
   const expected = requiredChecks[host]?.[id];
   if (!expected || expected.some((name) => !Object.hasOwn(checks, name))) return { id, status: 'INCONCLUSIVE', reason: 'A required scenario observation is missing.' };
+  const hookObservations = host === 'codex' && Array.isArray(item.hookObservations)
+    ? item.hookObservations.filter((o) => o && ['SessionStart', 'UserPromptSubmit', 'PreToolUse', null].includes(o.event)
+      && (Number.isInteger(o.code) || o.code === null) && (o.signal === null || (typeof o.signal === 'string' && /^SIG[A-Z0-9]{1,16}$/u.test(o.signal)))
+      && typeof o.reason === 'boolean').map((o) => ({ event: o.event, code: o.code, signal: o.signal, reason: o.reason }))
+    : [];
+  const evidence = host === 'codex' ? { hookObservations } : {};
   const pass = Object.values(checks).every(Boolean);
   // A Codex prompt can be blocked before the first request. Only explicit hook-block evidence establishes that case.
-  const hookBlock = host === 'codex' && checks['the prompt was blocked'] === true;
-  if (item.modelCalls === 0 && !hookBlock) return { id, status: 'INCONCLUSIVE', reason: 'No model-boundary request or confirmed hook block was observed.', checks };
-  if (pass && child.status !== 0) return { id, status: 'INCONCLUSIVE', reason: 'The harness reported checks but did not exit successfully.', checks };
-  return { id, status: pass ? 'PASS' : 'FAIL', checks };
+  const hookBlock = checks['the prompt was blocked'] === true && hookObservations.some((o) => o.event === 'UserPromptSubmit' && o.code === 2 && o.signal === null && o.reason);
+  if (checks['the prompt was blocked'] === true && host === 'codex' && !hookBlock)
+    return { id, status: 'INCONCLUSIVE', reason: 'The reported block lacks a completed hook denial.', checks, ...evidence };
+  if (item.modelCalls === 0 && !hookBlock) return { id, status: 'INCONCLUSIVE', reason: 'No model-boundary request or confirmed hook block was observed.', checks, ...evidence };
+  if (pass && child.status !== 0) return { id, status: 'INCONCLUSIVE', reason: 'The harness reported checks but did not exit successfully.', checks, ...evidence };
+  return { id, status: pass ? 'PASS' : 'FAIL', checks, ...evidence };
 }
 
 function usage() {
