@@ -4,7 +4,7 @@
 // parameters (`base`, `rootUid`, `platform`, ...) so tests can run them against a temporary tree and the current user.
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmod, chown, link, lstat, mkdir, open, opendir, readdir, readFile, readlink, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, opendir, readdir, readFile, readlink, realpath, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { constants as fsConstants, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -203,12 +203,35 @@ async function chooseHomes(opts: InitOptions, problems: string[]): Promise<strin
   return out;
 }
 
-const defaultChattr = (target: string): Promise<void> => new Promise((resolve, reject) => {
-  execFile('chattr', ['+i', target], { timeout: 10_000 }, (e, _o, stderr) => (e ? reject(new Error(`chattr +i ${target} failed: ${String(stderr).trim() || e.message}`)) : resolve()));
+// `via` is the same folder named through an open handle of this process (`/proc/<pid>/fd/N`): the tool then works on the
+// folder that was opened and checked, whatever the path points to by now. `target` is the path, for messages.
+const defaultChattr = (target: string, via: string = target): Promise<void> => new Promise((resolve, reject) => {
+  execFile('chattr', ['+i', via], { timeout: 10_000 }, (e, _o, stderr) => (e ? reject(new Error(`chattr +i ${target} failed: ${String(stderr).trim() || e.message}`)) : resolve()));
 });
-const defaultIsImmutable = (target: string): Promise<boolean> => new Promise((resolve) => {
-  execFile('lsattr', ['-d', target], { timeout: 10_000 }, (e, out) => resolve(!e && /^\S*i\S*\s/u.test(String(out))));
+const defaultIsImmutable = (target: string, via: string = target): Promise<boolean> => new Promise((resolve) => {
+  execFile('lsattr', ['-d', via], { timeout: 10_000 }, (e, out) => resolve(!e && /^\S*i\S*\s/u.test(String(out))));
 });
+
+const REAL_DIR = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+/** A folder named through an open handle, also for a child process (`/proc/self` would be the child's own). */
+const viaHandle = (handle: { fd: number }, name?: string): string => `/proc/${process.pid}/fd/${handle.fd}${name === undefined ? '' : `/${name}`}`;
+/**
+ * Opens `dir` without following a link in its last part and requires the kernel's name for the open folder to be exactly
+ * `dir`, so no part of the path is a link. What is done through the handle afterwards cannot be redirected by its owner.
+ */
+async function pinFolder(dir: string, refusal: string): Promise<FileHandle> {
+  const handle = await open(dir, REAL_DIR).catch((e: unknown) => { throw new Error(`${dir} cannot be opened as a real folder (${errnoCode(e) ?? message(e)}); ${refusal}`); });
+  const real = await readlink(viaHandle(handle)).catch(() => undefined);
+  if (real !== dir) { await handle.close(); throw new Error(`${dir} is not a real path (it resolves to ${real ?? 'an unknown folder'}); ${refusal}`); }
+  return handle;
+}
+/** Opens the folder `name` inside an open folder, creating it when missing; a link or a file there is refused. */
+async function pinChild(parent: FileHandle, name: string, mode: number, label: string): Promise<{ handle: FileHandle; created: boolean }> {
+  let created = true;
+  await mkdir(viaHandle(parent, name), { mode }).catch((e: unknown) => { if (errnoCode(e) !== 'EEXIST') throw e; created = false; });
+  const handle = await open(viaHandle(parent, name), REAL_DIR).catch((e: unknown) => { throw new Error(`${label} must be a real folder to be locked (${errnoCode(e) ?? message(e)})`); });
+  return { handle, created };
+}
 
 /** `.system` moves (F5, F7.6) and, with `--lock-user-skill-folders`, the lock of each listed home (E1). Refusals go to `problems`. */
 async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: string[]): Promise<PlannedAction[]> {
@@ -229,6 +252,9 @@ async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: s
     for (const home of homes.userHomes) {
       const info = await lstat(home).catch(() => undefined);
       if (!info?.isDirectory()) { problems.push(`${home} is not a folder; cannot lock its Skill folders`); continue; }
+      // Root works inside a folder its owner controls: the path must be the real one (the lock checks it again, on open handles).
+      const real = await realpath(home).catch(() => undefined);
+      if (real !== home) { problems.push(`${home} is not a real path (it resolves to ${real ?? 'nothing'}); list the real home to lock its Skill folders`); continue; }
       for (const dir of [`${home}/.agents/skills`, `${home}/.codex/skills`]) {
         const entries = await readdir(dir).catch(() => [] as string[]);
         const left = entries.filter((e) => !(dir.endsWith('/.codex/skills') && e === '.system'));
@@ -247,24 +273,57 @@ async function planHomeActions(homes: CodexHomes, opts: InitOptions, problems: s
  * folder swapped for a link after the check changes nothing. `.system` itself must be a real folder inside the open handle.
  */
 async function moveSystemFolder(from: string, to: string): Promise<void> {
-  const flags = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
-  const pinned = async (dir: string) => {
-    const handle = await open(dir, flags).catch((e: unknown) => { throw new Error(`${dir} cannot be opened as a real folder (${errnoCode(e) ?? message(e)}); .system was not moved`); });
-    const real = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
-    if (real !== dir) { await handle.close(); throw new Error(`${dir} is not a real path (it resolves to ${real ?? 'an unknown folder'}); .system was not moved`); }
-    return handle;
-  };
-  const skills = await pinned(path.dirname(from));
+  const skills = await pinFolder(path.dirname(from), '.system was not moved');
   try {
     const backupDir = path.dirname(to);
     await mkdir(backupDir, { mode: 0o755 }).catch((e: unknown) => { if (errnoCode(e) !== 'EEXIST') throw e; });
-    const backup = await pinned(backupDir);
+    const backup = await pinFolder(backupDir, '.system was not moved');
     try {
-      const source = `/proc/self/fd/${skills.fd}/${path.basename(from)}`;
+      const source = viaHandle(skills, path.basename(from));
       if (!(await lstat(source)).isDirectory()) throw new Error(`${from} is no longer a real folder; .system was not moved`);
-      await rename(source, `/proc/self/fd/${backup.fd}/${path.basename(to)}`); // rename never follows a link in the last part
+      await rename(source, viaHandle(backup, path.basename(to))); // rename never follows a link in the last part
     } finally { await backup.close(); }
   } finally { await skills.close(); }
+}
+
+/**
+ * Locks one home's Skill folders (E1): `~/.agents`, `~/.agents/skills` and `~/.codex/skills` become root-owned, 0755 and
+ * immutable. Root works here inside a folder its owner controls, so nothing is done by path: the home and each folder are
+ * opened without following links, and ownership, mode and the immutable attribute are set on the open handles. A folder
+ * swapped for a link at any moment is either refused or changes nothing. `~/.codex` stays the user's own folder (Codex
+ * writes there), which is also the limit of the lock: its owner can still rename `~/.codex` and make a new one, and
+ * `gate doctor` then reports the Skill folder as not locked.
+ */
+async function lockHome(a: Extract<PlannedAction, { kind: 'lock' }>, rootUid: number, gid: number,
+  chattr: (target: string, via?: string) => Promise<void>, isImmutable: (target: string, via?: string) => Promise<boolean>): Promise<string[]> {
+  const handles: FileHandle[] = [];
+  const child = async (parent: FileHandle, name: string, mode: number, label: string) => { const c = await pinChild(parent, name, mode, label); handles.push(c.handle); return c; };
+  try {
+    const home = await pinFolder(a.home, 'its Skill folders were not locked');
+    handles.push(home);
+    const codex = await child(home, '.codex', 0o700, `${a.home}/.codex`);
+    if (codex.created && a.owner) await codex.handle.chown(a.owner.uid, a.owner.gid).catch(() => {}); // Codex writes here: the user's own folder
+    const agents = await child(home, '.agents', 0o755, `${a.home}/.agents`);
+    const agentsSkills = await child(agents.handle, 'skills', 0o755, `${a.home}/.agents/skills`);
+    const codexSkills = await child(codex.handle, 'skills', 0o755, `${a.home}/.codex/skills`);
+    const dirs = [
+      { dir: `${a.home}/.agents/skills`, handle: agentsSkills.handle, empty: true },
+      { dir: `${a.home}/.codex/skills`, handle: codexSkills.handle, empty: true },
+      { dir: `${a.home}/.agents`, handle: agents.handle, empty: false }, // children first: the order of the plan
+    ];
+    const locked: string[] = [];
+    for (const d of dirs) {
+      if (await isImmutable(d.dir, viaHandle(d.handle))) { locked.push(d.dir); continue; } // a re-run
+      // The plan saw these folders empty; a Skill added since then must not be locked in.
+      const left = d.empty ? await readdir(viaHandle(d.handle)) : [];
+      if (left.length > 0) throw new Error(`${d.dir} now holds ${left.slice(0, 3).join(', ')}; it was empty when the lock was planned. Remove it and run gate init again`);
+      await d.handle.chown(rootUid, gid);
+      await d.handle.chmod(0o755);
+      await chattr(d.dir, viaHandle(d.handle)); // a failure (an unsupported file system) stops the command
+      locked.push(d.dir);
+    }
+    return locked;
+  } finally { for (const h of handles.reverse()) await h.close().catch(() => {}); }
 }
 
 /** Plan: moves first, then locks. Each move needs the target folder free. */
@@ -279,28 +338,7 @@ async function runHomeActions(actions: readonly PlannedAction[], opts: ApplyOpti
   const chattr = opts.chattr ?? defaultChattr;
   const isImmutable = opts.isImmutable ?? defaultIsImmutable;
   const gid = rootUid === 0 ? 0 : (process.getgid?.() ?? 0);
-  for (const a of actions) {
-    if (a.kind !== 'lock') continue;
-    const codex = `${a.home}/.codex`;
-    if (!(await lstat(codex).catch(() => undefined))) { // Codex writes here, so it stays the user's own folder
-      await mkdir(codex, { mode: 0o700 });
-      if (a.owner) await chown(codex, a.owner.uid, a.owner.gid).catch(() => {});
-    }
-    const agents = `${a.home}/.agents`;
-    for (const dir of [agents, `${agents}/skills`, `${codex}/skills`]) {
-      if (await isImmutable(dir)) continue; // a re-run
-      await mkdir(dir, { mode: 0o755 }).catch((e: unknown) => { if (errnoCode(e) !== 'EEXIST') throw e; });
-      const info = await lstat(dir);
-      if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${dir} must be a real folder to be locked`);
-      await chown(dir, rootUid, gid);
-      await chmod(dir, 0o755);
-    }
-    for (const dir of [`${agents}/skills`, `${codex}/skills`, agents]) { // children first: an immutable parent would still allow it, but the order is the plan's
-      if (await isImmutable(dir)) { locked.push(dir); continue; }
-      await chattr(dir); // a failure (an unsupported file system) stops the command
-      locked.push(dir);
-    }
-  }
+  for (const a of actions) if (a.kind === 'lock') locked.push(...await lockHome(a, rootUid, gid, chattr, isImmutable));
   return { moved, locked };
 }
 
@@ -326,9 +364,9 @@ export interface InitOptions extends Seams {
   /** `--new-root`: the installed instance pins a different root and the administrator means to replace it (design gate-new-root.md N2). */
   newRoot?: boolean;
   /** Tests: sets the immutable attribute on a path (default `chattr +i`). A failure stops the command. */
-  chattr?: (target: string) => Promise<void>;
+  chattr?: (target: string, via?: string) => Promise<void>;
   /** Tests: reads the immutable attribute (default `lsattr -d`). */
-  isImmutable?: (target: string) => Promise<boolean>;
+  isImmutable?: (target: string, via?: string) => Promise<boolean>;
   now?: () => Date;
 }
 
@@ -539,7 +577,7 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
 
 /* ----------------------------------------------------------------------------------------------------- applying */
 
-export interface ApplyOptions { force?: boolean; base?: string; rootUid?: number; now?: () => Date; chattr?: (target: string) => Promise<void>; isImmutable?: (target: string) => Promise<boolean> }
+export interface ApplyOptions { force?: boolean; base?: string; rootUid?: number; now?: () => Date; chattr?: (target: string, via?: string) => Promise<void>; isImmutable?: (target: string, via?: string) => Promise<boolean> }
 export interface ApplyResult { written: string[]; backups: { from: string; to: string }[]; dirs: string[]; movedSystem: { from: string; to: string }[]; locked: string[] }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/gu, '').replace(/\.\d+Z$/u, 'Z');
@@ -658,7 +696,7 @@ export interface DoctorOptions extends Seams {
   /** Codex: the output of `codex --version` for a host binary (default: runs it). */
   codexVersion?: (exe: string) => Promise<string>;
   /** Codex: the immutable attribute of a path (default `lsattr -d`). */
-  isImmutable?: (target: string) => Promise<boolean>;
+  isImmutable?: (target: string, via?: string) => Promise<boolean>;
   /** Tests: smaller bounds for the scan of the listed homes. */
   skillScanLimits?: SkillScanLimits;
 }

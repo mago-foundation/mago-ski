@@ -850,6 +850,8 @@ export interface DiscoveryLimits {
   maxSkills?: number;
   /** Maximum directory entries visited across all roots. */
   maxEntries?: number;
+  /** Directories (absolute) that are not entered and not reported: another checkout that sits inside a root. */
+  exclude?: readonly string[];
 }
 
 /** Discovery stopped because the tree is larger than the budget. It never returns a partial list: callers must fail closed. */
@@ -872,6 +874,7 @@ export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DE
   const maxEntries    = limits.maxEntries ?? MAX_DISCOVERY_ENTRIES;
   const found         = new Set<string>();
   const tooDeep       = new Set<string>();
+  const excluded      = new Set((limits.exclude ?? []).map((dir) => path.resolve(dir)));
   let entries = 0;
   const checkSkills   = () => {
     if (found.size + tooDeep.size > maxSkills) 
@@ -882,6 +885,8 @@ export async function findSkillDirs(roots: string[], maxDepth = MAX_DISCOVERY_DE
     directory: string, 
     depth: number
   ): Promise<void> {
+    if (excluded.has(directory))
+      return;
     try {
       await lstat(path.join(directory, 'SKILL.md'));
       found.add(directory);
