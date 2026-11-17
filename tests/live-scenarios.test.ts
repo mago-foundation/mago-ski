@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { classify, parseArgs, scenarios } from '../scripts/live-scenarios.mjs';
 
 function report(overrides: Record<string, unknown> = {}) {
-  return { status: 0, signal: null, stdout: JSON.stringify({ scenarios: [{ scenario: 'mention-project', modelCalls: 0, checks: { 'project body did not reach the model': true, 'the prompt was blocked': true }, ...overrides }] }) };
+  return { status: 0, signal: null, stdout: JSON.stringify({ scenarios: [{ scenario: 'mention-project', modelCalls: 0, checks: { 'project body did not reach the model': true, 'the prompt was blocked': true }, hookObservations: [{ event: 'UserPromptSubmit', code: 2, signal: null, reason: true }], ...overrides }] }) };
 }
 
 test('the plan accepts only known hosts and explicit options', () => {
@@ -19,6 +19,9 @@ test('a block before model invocation needs explicit hook evidence', () => {
   assert.equal(classify('codex', 'unapproved', 'mention-project', report()).status, 'PASS');
   assert.equal(classify('codex', 'unapproved', 'mention-project', report({ checks: { 'project body did not reach the model': true, 'the prompt was blocked': false } })).status, 'INCONCLUSIVE');
   assert.equal(classify('codex', 'unapproved', 'mention-project', report({ checks: { 'the prompt was blocked': true } })).status, 'INCONCLUSIVE');
+  assert.equal(classify('codex', 'unapproved', 'mention-project', report({ hookObservations: [] })).status, 'INCONCLUSIVE');
+  assert.equal(classify('codex', 'unapproved', 'mention-project', report({ hookObservations: [{ event: 'UserPromptSubmit', code: 2, signal: 'SIGKILL', reason: true }] })).status, 'INCONCLUSIVE');
+  assert.equal(classify('codex', 'unapproved', 'mention-project', report({ modelCalls: 1, hookObservations: [] })).status, 'INCONCLUSIVE');
   assert.equal(classify('claude-code', 'unapproved', 'mention-project', report({ checks: { 'project body did not reach the model': true, 'the call returned an error': true } })).status, 'INCONCLUSIVE');
 });
 
