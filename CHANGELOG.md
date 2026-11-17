@@ -4,6 +4,10 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Removed
+
+- Desktop GUI: the CAPABILITY EQ, DYNAMICS LIMITER and CLEAR FILTER concept modules and their texts are removed from the rack. They described runtime controls, which are outside mago-ski's scope (it decides only whether a Skill may be loaded). The rack now shows the two working modules, CHANGE MONITOR and APPROVAL GATE. The screenshots in `docs/images/` still show the old rack until they are regenerated.
+
 ## [0.3.0] - 2026-11-10
 
 ### Added

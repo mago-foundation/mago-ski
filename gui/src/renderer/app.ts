@@ -68,7 +68,7 @@ function pkiBadge(pki: PkiResultView | null, view: ServiceView, current = true):
 
 // ------------------------------------------------------------------ state
 
-type Device = 'monitor' | 'gate' | 'eq' | 'limiter' | 'clear';
+type Device = 'monitor' | 'gate';
 let view: ServiceView | null = null;
 let tab: 'skills' | 'activity' | 'settings' | 'admin' = 'skills';
 let device: Device = 'monitor';
@@ -140,16 +140,16 @@ function setPrefs(prefs: Partial<Prefs>): void {
   void api.setPrefs(prefs).then(apply);
 }
 
-function devHead(name: string, tag: string, live: boolean): HTMLElement {
+function devHead(name: string, tag: string): HTMLElement {
   return h('div', { class: 'dev-head' },
-    h('span', { class: 'power', role: 'img', 'aria-pressed': String(live), 'aria-label': live ? tr('device.on') : tr('device.off') }),
+    h('span', { class: 'power', role: 'img', 'aria-pressed': 'true', 'aria-label': tr('device.on') }),
     h('span', { class: 'dev-name' }, name), h('span', { class: 'spacer' }),
-    h('span', { class: `dev-tag ${live ? 'live' : 'concept'}` }, tag));
+    h('span', { class: 'dev-tag live' }, tag));
 }
 
-function deviceShell(key: Device, width: number, concept: boolean, ...children: HTMLElement[]): HTMLElement {
+function deviceShell(key: Device, width: number, ...children: HTMLElement[]): HTMLElement {
   const el = h('div', {
-    class: `device${concept ? ' concept' : ''}`, tabindex: 0, role: 'button', 'aria-selected': String(device === key),
+    class: 'device', tabindex: 0, role: 'button', 'aria-selected': String(device === key),
     'data-device': key, style: `width:${width}px`,
   }, ...children);
   el.addEventListener('click', () => selectDevice(key));
@@ -176,8 +176,8 @@ function monitorDevice(v: ServiceView): HTMLElement {
   const retain = h('button', { class: 'toggle', 'aria-pressed': String(v.prefs.retainContent) }, h('span', { class: 'sw' }), tr('monitor.retain'));
   retain.addEventListener('click', (e) => { e.stopPropagation(); setPrefs({ retainContent: !v.prefs.retainContent }); });
 
-  return deviceShell('monitor', 560, false,
-    devHead('SKI / CHANGE MONITOR', tr('monitor.tag'), true),
+  return deviceShell('monitor', 560,
+    devHead('SKI / CHANGE MONITOR', tr('monitor.tag')),
     h('div', { class: 'dev-body' },
       h('div', { class: 'section', style: 'width:130px' },
         h('div', { class: 'sec-label' }, 'NOTIFY'),
@@ -213,8 +213,8 @@ function gateDevice(v: ServiceView): HTMLElement {
     [`VERIFIED ${verified}/${results.length}`, verified === results.length ? 'verified' : 'warn', tr('gate.approvedExact')];
   const mode = policy.kind === 'loaded' ? policy.mode : null;
   const chip = mode === 'enforce' ? tr('gate.chipEnforce') : mode === 'shadow' ? tr('gate.chipShadow') : tr('gate.chipObserve');
-  return deviceShell('gate', 300, false,
-    devHead('SKI / APPROVAL GATE', tr('gate.tag'), true),
+  return deviceShell('gate', 300,
+    devHead('SKI / APPROVAL GATE', tr('gate.tag')),
     h('div', { class: 'dev-body' },
       h('div', { class: 'section', style: 'flex:1' },
         h('div', { class: 'sec-label' }, 'ORG APPROVAL (PKI)'),
@@ -223,30 +223,6 @@ function gateDevice(v: ServiceView): HTMLElement {
         h('div', { class: 'detents' }, h(mode === 'enforce' ? 'span' : 'b', {}, tr('gate.modeObserve')), h('span', {}, '·'), h(mode === 'enforce' ? 'b' : 'span', {}, tr('gate.modeRequire'))),
         h('span', { class: 'mode-chip' }, chip))),
     h('div', { class: 'dev-foot' }, tr('gate.foot')));
-}
-
-function conceptDevices(): HTMLElement[] {
-  const foot = () => h('div', { class: 'dev-foot' }, tr('concept.foot'));
-  const band = (label: string, on: number) => h('div', { class: 'band' },
-    h('div', { class: 'steps' }, ...[0, 1, 2].map((i) => h('div', { class: `step${i >= on ? ' on' : ''}` }))), h('div', { class: 'bl' }, label));
-  const dead = (label: string, angle: number, small = false) => h('div', { class: `knob${small ? ' small' : ''}`, role: 'img', 'aria-label': tr('concept.deadAria', { label }), style: `--angle:${angle}deg` });
-  return [
-    deviceShell('eq', 270, true, devHead('CAPABILITY EQ', tr('concept.tag'), false),
-      h('div', { class: 'dev-body' }, h('div', { class: 'section', style: 'flex:1' },
-        h('div', { class: 'sec-label' }, tr('concept.levels')),
-        h('div', { class: 'bands' }, band(tr('concept.read'), 1), band(tr('concept.write'), 2), band(tr('concept.network'), 2), band(tr('concept.shell'), 2)),
-        h('div', { class: 'sec-sub' }, tr('concept.levelsNote')))), foot()),
-    h('div', { class: 'link' }),
-    deviceShell('limiter', 250, true, devHead('DYNAMICS LIMITER', tr('concept.tag'), false),
-      h('div', { class: 'dev-body' }, h('div', { class: 'section', style: 'flex:1' },
-        h('div', { class: 'sec-label' }, 'CALL BUDGET'), dead(tr('concept.callBudget'), 30), h('div', { class: 'sec-value' }, tr('concept.callsPerSession')),
-        h('div', { class: 'sec-label' }, 'REDUCTION'), h('div', { class: 'gr' }), h('div', { class: 'sec-sub' }, tr('concept.noInput')))), foot()),
-    h('div', { class: 'link' }),
-    deviceShell('clear', 270, true, devHead('CLEAR FILTER', tr('concept.tag'), false),
-      h('div', { class: 'dev-body' },
-        h('div', { class: 'section', style: 'width:50%' }, h('div', { class: 'sec-label' }, 'INTENT'), dead(tr('concept.intent'), 0, true), h('div', { class: 'sec-sub' }, tr('concept.intent'))),
-        h('div', { class: 'section', style: 'width:50%' }, h('div', { class: 'sec-label' }, 'RETURN'), dead(tr('concept.responseFilter'), -60, true), h('div', { class: 'sec-sub' }, tr('concept.returnFields')))), foot()),
-  ];
 }
 
 function renderChain(v: ServiceView): void {
@@ -262,8 +238,6 @@ function renderChain(v: ServiceView): void {
     monitorDevice(v),
     h('div', { class: 'link live' }),
     gateDevice(v),
-    h('div', { class: 'link' }),
-    ...conceptDevices(),
     h('div', { class: 'link' }),
     h('div', { class: 'io' }, h('div', { class: 'k' }, 'AGENT'), h('div', { class: 'v', style: 'font-size:16px' }, host.name),
       h('div', { class: 's' }, host.present ? extension : tr('chain.noPiFolder'), h('br'), tr('chain.policyNext'))),
@@ -494,7 +468,7 @@ function renderGateDetail(v: ServiceView): void {
     h('td', { class: 'mono' }, short(i.pki?.approverKeyId ?? null))));
   const decisions = v.host.recentDecisions.slice().reverse().map((d) => h('tr', {},
     h('td', {}, time(d.timestamp)), h('td', {}, d.skill), h('td', {}, d.action), h('td', {}, d.verdict), h('td', {}, d.event)));
-  const box = h('div', { class: 'concept-pane', style: 'max-width:none' },
+  const box = h('div', { class: 'detail-pane', style: 'max-width:none' },
     h('h2', {}, 'SKI / APPROVAL GATE'),
     h('p', {}, tr('gateDetail.lead')),
     h('dl', { class: 'kv' },
@@ -510,28 +484,10 @@ function renderGateDetail(v: ServiceView): void {
   $('detail').replaceChildren(box);
 }
 
-type ConceptKey = 'eq' | 'limiter' | 'clear';
-const CONCEPTS: Record<ConceptKey, { title: MessageKey; lead: MessageKey; observe: MessageKey; act: MessageKey }> = {
-  eq: { title: 'concept.eq.title', lead: 'concept.eq.lead', observe: 'concept.eq.observe', act: 'concept.eq.act' },
-  limiter: { title: 'concept.limiter.title', lead: 'concept.limiter.lead', observe: 'concept.limiter.observe', act: 'concept.limiter.act' },
-  clear: { title: 'concept.clear.title', lead: 'concept.clear.lead', observe: 'concept.clear.observe', act: 'concept.clear.act' },
-};
-
-function renderConceptDetail(key: ConceptKey): void {
-  const c = CONCEPTS[key];
-  const rows: Array<[string, string]> = [
-    [tr('concept.rowObserve'), tr(c.observe)], [tr('concept.rowAct'), tr(c.act)], [tr('concept.rowStatus'), tr('concept.laterNotConnected')],
-  ];
-  $('detail').style.gridTemplateColumns = '1fr';
-  $('detail').replaceChildren(h('div', { class: 'concept-pane' }, h('h2', {}, tr(c.title)), h('p', {}, tr(c.lead)),
-    h('table', {}, ...rows.map(([k, val]) => h('tr', {}, h('td', {}, k), h('td', {}, val))))));
-}
-
 function renderDetail(): void {
   if (!view) return;
   if (device === 'monitor') renderMonitorDetail(view);
-  else if (device === 'gate') renderGateDetail(view);
-  else renderConceptDetail(device);
+  else renderGateDetail(view);
 }
 
 function selectDevice(key: Device): void {

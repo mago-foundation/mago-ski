@@ -54,7 +54,7 @@ await page.waitForSelector('.result.ok');
 await page.screenshot({ path: path.join(out, '4-remembered.png') });
 
 await page.click('.device[data-device="gate"]');
-await page.waitForSelector('.concept-pane .tbl');
+await page.waitForSelector('.detail-pane .tbl');
 await page.screenshot({ path: path.join(out, '5-approval-gate.png') });
 
 await page.click('.tab[data-tab="activity"]');
