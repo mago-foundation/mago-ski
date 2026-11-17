@@ -8,8 +8,7 @@
 // from the instance config that `init` wrote. The installed package is a root-owned copy of the repository's built `dist`
 // and package.json under `<base>`, so the whole-tree ownership check of `init` is met without weakening it. `checkExec: false`
 // applies only to the node binary and /usr/bin/env, which live outside `<base>` (they are the machine's own). Run
-// `npm run build` first. Codex enforcement is refused by `init` (audit-level in this release), so the Codex live test
-// plans in shadow mode and puts the live mode on the service and the hook config by hand.
+// `npm run build` first. Codex's per-run temporary home is added to the hook configuration by its host harness.
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
@@ -18,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addApprover, approveSkill, initRoot, updateRevocations } from '../../src/admin.ts';
 import { instancePaths, instanceToServiceConfig, readInstanceConfig, type Host } from '../../src/gate/instance.ts';
-import { applyInit, hookConfigText, planInit } from '../../src/gate/setup.ts';
+import { applyInit, planInit } from '../../src/gate/setup.ts';
 import { createGateService, type GateService } from '../../src/gate/service.ts';
 import { generateKeyPair } from '../../src/keys.ts';
 import type { Mode } from '../../src/policy.ts';
@@ -142,12 +141,11 @@ export async function gateWorld(root: string, host: HostSetup): Promise<GateWorl
       if (existsSync(paths.managedDir)) for (const name of await readdir(paths.managedDir)) await rm(path.join(paths.managedDir, name), { recursive: true, force: true });
       w.mode = mode;
       const plan = await planInit({
-        host: host.host, rootFingerprint: rootPair.keyId, mode: host.host === 'codex' ? 'shadow' : mode, hostExes: [host.hostExe],
+        host: host.host, rootFingerprint: rootPair.keyId, mode, hostExes: [host.hostExe],
         base, rootUid: 0, installRoot, nodePath: NODE, checkExec: false,
       });
       await applyInit(plan, { base, rootUid: 0 });
       const cfg = await readInstanceConfig(paths.instance, 0);
-      if (host.host === 'codex') await writeFile(paths.hook, hookConfigText('codex', { ...cfg, mode }), { mode: 0o644 }); // init refuses codex enforce
       await mkdir(paths.decisionSocketDir, { recursive: true, mode: 0o755 }); // systemd's RuntimeDirectory in production
       w.service = createGateService({ ...instanceToServiceConfig(cfg, 0), mode });
       await w.service.start();

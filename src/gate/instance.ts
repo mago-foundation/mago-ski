@@ -50,6 +50,8 @@ export interface InstancePaths {
   managedDir: string;
   /** The host's own configuration file (Claude Code managed-settings.json, Codex requirements.toml). */
   hostConfig: string;
+  /** Codex only: `/etc/codex/managed_config.toml`, the second managed file of the Codex profile. */
+  managedConfig: string | undefined;
   /** The shared systemd template unit. */
   unit: string;
   dropinDir: string;
@@ -76,6 +78,7 @@ export function instancePaths(host: Host, base = '/'): InstancePaths {
     adminSocketDir: path.join(decisionSocketDir, 'admin'),
     managedDir: host === 'claude-code' ? at('etc', 'claude-code', '.claude', 'skills') : at('etc', 'codex', 'skills'),
     hostConfig: host === 'claude-code' ? at('etc', 'claude-code', 'managed-settings.json') : at('etc', 'codex', 'requirements.toml'),
+    managedConfig: host === 'codex' ? at('etc', 'codex', 'managed_config.toml') : undefined,
     unit: at('etc', 'systemd', 'system', 'mago-ski-gate@.service'),
     dropinDir,
     dropin: path.join(dropinDir, 'paths.conf'),

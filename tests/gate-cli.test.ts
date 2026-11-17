@@ -8,7 +8,7 @@ import test, { type TestContext } from 'node:test';
 import { runCli, type GateCliSeams } from '../src/cli.ts';
 import { serializeCanonicalJson } from '../src/canonical-json.ts';
 import { claudeCodeManagedSettings } from '../src/gate/adapters/claude-code-settings.ts';
-import { codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
+import { codexManagedConfigToml, codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
 import { askAdmin, TIMEOUT_MESSAGE, type AskAdmin } from '../src/gate/admin-client.ts';
 import { instancePaths, instanceToServiceConfig, parseInstanceConfig, readInstanceConfig, type Host } from '../src/gate/instance.ts';
 import { createGateService } from '../src/gate/service.ts';
@@ -115,7 +115,7 @@ WantedBy=multi-user.target
   assert.equal(JSON.parse(enforce.files.find((f) => f.role === 'host')!.content).allowManagedHooksOnly, true);
 });
 
-test('planInit codex: golden requirements.toml, Codex hook keys, and the enforce refusal (G9)', async (t) => {
+test('planInit codex: golden requirements.toml and managed_config.toml, Codex hook keys, enforce allowed (C1, C5)', async (t) => {
   const w = await world(t);
   const plan = await planInit(w.opts('codex', { inbox: `${w.base}/inbox` }));
   const p = instancePaths('codex', w.base);
@@ -126,10 +126,15 @@ test('planInit codex: golden requirements.toml, Codex hook keys, and the enforce
     hookTimeoutSec: 5, selfDeadlineMs: 3000, envPath: w.seams.envPath!, userSkillRoots: [],
   }));
   assert.match(by['host']!.content, /command = ".* --no-addons .*codex-hook\.js .*codex-hook\.json shadow"/u);
-  assert.equal(by['hook']!.content, `{"admin_root":"${w.base}/etc/codex/skills","client_deadline_ms":1500,"host_exes":["${w.exe}"],"mode":"shadow","self_deadline_ms":3000,"skill_roots":[],"socket":"${w.base}/run/mago-ski/gate/codex/decision.sock","v":1}\n`);
+  assert.equal(by['hook']!.content, `{"admin_root":"${w.base}/etc/codex/skills","client_deadline_ms":1500,"codex_homes":[],"host_exes":["${w.exe}"],"mode":"shadow","self_deadline_ms":3000,"skill_roots":[],"socket":"${w.base}/run/mago-ski/gate/codex/decision.sock","user_homes":[],"v":1}\n`);
+  assert.equal(by['managed-config']!.path, `${w.base}/etc/codex/managed_config.toml`);
+  assert.equal(by['managed-config']!.content, codexManagedConfigToml());
+  assert.deepEqual(JSON.parse(by['manifest']!.content).files.map((f: { path: string }) => path.relative(w.base, f.path)).filter((f: string) => f.startsWith('etc/codex')), ['etc/codex/managed_config.toml', 'etc/codex/requirements.toml']);
   assert.equal(JSON.parse(by['instance']!.content).inbox_dir, `${w.base}/inbox`);
   assert.equal(JSON.parse(by['instance']!.content).managed_dir, `${w.base}/etc/codex/skills`);
-  await assert.rejects(planInit(w.opts('codex', { mode: 'enforce' })), /Codex enforcement is not complete yet \(see docs\/hosts\/codex\.md\); use --mode shadow/u);
+  const enforce = await planInit(w.opts('codex', { mode: 'enforce' })); // allowed since the Codex profile (C5)
+  assert.match(enforce.files.find((f) => f.role === 'host')!.content, /allow_managed_hooks_only = true/u);
+  assert.match(enforce.files.find((f) => f.role === 'host')!.content, /executor_capability_discovery_v2 = false/u);
   await assert.rejects(planInit(w.opts('claude-code', { platform: 'darwin' })), /Linux only/u);
   await assert.rejects(planInit(w.opts('claude-code', { rootFingerprint: 'sha256:xyz' })), /root-fingerprint/u);
 });
@@ -407,7 +412,10 @@ test('gate CLI: help, usage errors, non-Linux and non-root refusals, --print wri
   await assert.rejects(run(w, ['gate', 'status', '--host', 'codex', '--force']), /Unsupported option --force/u);
   await assert.rejects(run(w, ['gate', 'doctor', '--host', 'codex'], { platform: 'darwin' }), /Linux only/u);
   await assert.rejects(run(w, ['gate', 'init', '--host', 'claude-code', '--root-fingerprint', FP, '--host-exe', w.exe], { uid: UID + 1 }), /administered as root; run this with sudo/u);
-  await assert.rejects(run(w, ['gate', 'init', '--host', 'codex', '--root-fingerprint', FP, '--mode', 'enforce', '--host-exe', w.exe]), /Codex enforcement is not complete yet/u);
+  const codexEnforce = await run(w, ['gate', 'init', '--host', 'codex', '--root-fingerprint', FP, '--mode', 'enforce', '--host-exe', w.exe, '--print']);
+  assert.equal(codexEnforce.result, 0);
+  await assert.rejects(run(w, ['gate', 'init', '--host', 'claude-code', '--root-fingerprint', FP, '--user-home', '/home/a']), /are for --host codex/u);
+  await assert.rejects(run(w, ['gate', 'prune-removed', '--host', 'codex', '--older-than-days', 'x']), /whole number of days/u);
 
   // --print: no root needed, every file shown, nothing written
   const printed = await run(w, ['gate', 'init', '--host', 'claude-code', '--root-fingerprint', FP, '--host-exe', w.exe, '--print'], { uid: UID + 1 });
@@ -423,13 +431,13 @@ test('gate CLI: help, usage errors, non-Linux and non-root refusals, --print wri
   assert.match(bad.stdout, /# .*managed-settings\.json/u);
   assert.match(bad.stderr, /warning: .*not an ELF/u);
   // --force and --print belong to gate init only
-  for (const flag of ['--force', '--print']) {
+  for (const flag of ['--force', '--print', '--no-deny-read', '--lock-user-skill-folders']) {
     await assert.rejects(run(w, ['gate', 'doctor', '--host', 'codex', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
     await assert.rejects(run(w, ['gate', 'run', '--host', 'codex', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
     await assert.rejects(runCli(['verify-all', flag]), new RegExp(`Unsupported option ${flag}`, 'u'));
   }
   const asJson = await run(w, ['gate', 'init', '--host', 'codex', '--root-fingerprint', FP, '--host-exe', w.exe, '--print', '--json']);
-  assert.equal(JSON.parse(asJson.stdout).length, 7);
+  assert.equal(JSON.parse(asJson.stdout).length, 8); // plus managed_config.toml
   assert.equal(await exists(path.join(w.base, 'etc')), false);
 });
 

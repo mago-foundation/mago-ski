@@ -17,7 +17,9 @@ import { existsSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { codexManagedConfigToml, codexRequirementsToml } from '../../src/gate/adapters/codex-requirements.ts';
+import { readInstanceConfig } from '../../src/gate/instance.ts';
+import { hookConfigText } from '../../src/gate/setup.ts';
 import type { Mode } from '../../src/policy.ts';
 import { asHostUser, gateWorld, handOver, HOST_USER, inPrivateMountNamespace, liveBase, liveRoot, MARK, NODE, overlay, writeSkill, type GateWorld } from './gate-world.ts';
 
@@ -99,6 +101,8 @@ interface Run {
   /** Unapproved Skills to create: in the project (.agents/skills) and in the user's own folder (~/.codex/skills). */
   projectSkill?: boolean;
   userSkill?: boolean;
+  /** A Skill planted in ~/.codex/skills/.system before Codex starts (the profile turns bundled Skills off). */
+  plantedSystem?: boolean;
 }
 
 async function runCodex(w: World, name: string, run: Run) {
@@ -107,6 +111,9 @@ async function runCodex(w: World, name: string, run: Run) {
   const codexHome = path.join(home, '.codex');
   const proj = path.join(dir, 'proj');
   for (const d of [codexHome, proj]) await mkdir(d, { recursive: true });
+  // Each fresh host gets a different temporary home; list it just as gate init would for a real user.
+  const instance = await readInstanceConfig(w.paths.instance, 0);
+  await writeFile(w.hookConfig, hookConfigText('codex', instance, { userHomes: [home], codexHomes: [codexHome] }), { mode: 0o644 });
   if (run.projectSkill) await writeSkill(path.join(proj, '.agents', 'skills'), 'project-skill');
   if (run.userSkill) await writeSkill(path.join(codexHome, 'skills'), 'user-skill');
   await writeFile(path.join(codexHome, 'config.toml'),
@@ -116,6 +123,10 @@ async function runCodex(w: World, name: string, run: Run) {
     mode: w.mode, nodePath: NODE, hookEntry: w.hookEntry, configPath: w.hookConfig, hookTimeoutSec: 5, selfDeadlineMs: 3000,
     userSkillRoots: [path.join(codexHome, 'skills'), path.join(codexHome, 'skills', '.system'), path.join(home, '.agents', 'skills')],
   }), { mode: 0o644 });
+
+  // The second managed file of the Codex profile (codex-profile.md C1): bundled and cloud Skills off, descriptions not injected.
+  await writeFile(path.join(ADMIN_ROOT, 'managed_config.toml'), codexManagedConfigToml(), { mode: 0o644 });
+  if (run.plantedSystem) await writeSkill(path.join(codexHome, 'skills', '.system'), 'planted-system-skill');
 
   handOver(dir);
   current = { steps: run.steps ?? [], requests: [] };
@@ -158,7 +169,8 @@ interface Scenario {
 }
 
 const linked = (name: string) => `[$${name}](${ADMIN_SKILLS}/${name}/SKILL.md)`;
-const blocked = (o: Outcome) => o.modelCalls === 0 || o.events.some((e) => /error|blocked/iu.test(e)) || /block|mago-ski/iu.test(o.stderr);
+// No model request alone can also mean that Codex failed to start. Require an actual hook-block observation.
+const blocked = (o: Outcome) => [...o.events, o.stderr].some((e) => /hook[^\n]*blocked|blocked[^\n]*hook/iu.test(e));
 
 const SCENARIOS: Record<string, Scenario> = {
   'listing': {
@@ -180,6 +192,12 @@ const SCENARIOS: Record<string, Scenario> = {
     expect: (o) => ({ 'approved body did not reach the model (bare mention blocked)': o.reached['approved-skill'] === false }),
     known: (o) => ({ 'a bare mention of an admin Skill is usable': o.reached['approved-skill'] === true }),
   },
+  'profile-planted-system': {
+    mode: 'enforce', what: 'profile: a Skill planted in .system is reported, never failing (the managed config removes bundled Skills; whether a planted one is loaded is recorded)',
+    run: () => ({ prompt: 'hello', plantedSystem: true }),
+    expect: (o) => ({ 'the run completed': o.exit === 0 || o.modelCalls > 0 }),
+    known: (o) => ({ 'planted .system Skill is not listed': o.listing?.includes('planted-system-skill') === false }),
+  },
   'mention-project': {
     mode: 'enforce', what: 'a mention of a repo Skill is blocked; its body never reaches the model',
     run: () => ({ prompt: 'use $project-skill now', projectSkill: true }),
@@ -197,9 +215,9 @@ const SCENARIOS: Record<string, Scenario> = {
   },
   'revoked-new-session': {
     mode: 'enforce', what: 'after a revoke the Skill is auto-uninstalled: not listed, and a linked mention is blocked',
-    before: async (w) => { await w.install('other-skill'); await w.revoke('other-skill'); },
+    before: async (w) => { await w.install('other-skill'); const result = await w.revoke('other-skill'); if (typeof result !== 'object' || result === null || !('ok' in result) || result.ok !== true) throw new Error('revocation was not accepted'); },
     run: () => ({ prompt: `use ${linked('other-skill')} now` }),
-    expect: (o) => ({ 'other-skill not listed': !(o.listing ?? []).includes('other-skill'), 'its body did not reach the model': o.reached['other-skill'] === false }),
+    expect: (o) => ({ 'managed link was removed': !existsSync(path.join(ADMIN_SKILLS, 'other-skill')), 'its body did not reach the model': o.reached['other-skill'] === false, 'the prompt was blocked': blocked(o) }),
   },
   'service-down': {
     mode: 'enforce', what: 'the gate service is stopped: a linked mention of the installed Skill is blocked (fail closed)',

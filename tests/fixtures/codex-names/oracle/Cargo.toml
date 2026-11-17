@@ -1,0 +1,13 @@
+# Oracle harness for plainNameLine (design codex-profile.md D4/E5). Build against the codex-skills crate at the
+# rust-v0.166.0 Cargo.lock of github.com/openai/codex, then run it over corpus.json (see main.rs).
+# NOT BUILT in the environment that wrote it (no network to the Codex source): the corpus's `codexName` values are
+# hand-checked against the YAML rules and parser.rs, and must be regenerated with this harness when it can be built.
+[package]
+name = "codex-names-oracle"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1"
+# Path dependency on a checkout of openai/codex at rust-v0.166.0 (workspace member `skills`).
+codex-skills = { path = "../../../../../codex/codex-rs/skills" }

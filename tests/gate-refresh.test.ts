@@ -92,16 +92,16 @@ test('enforce: a newer list in the inbox revokes the current generation, which i
   assert.equal((await f.status())['autoUninstalled'].length, 1);
 });
 
-test('shadow: nothing is uninstalled, would-uninstall is recorded', { skip: LINUX_ONLY }, async (t) => {
+test('shadow: a revocation still uninstalls (it does in every mode)', { skip: LINUX_ONLY }, async (t) => {
   const f = await fixture(t, { mode: 'shadow' });
   const digest = await f.install('alpha', await writeSkill(f.work, 'alpha'));
   await f.drop(await f.makeList({ revoke: digest }));
   assert.equal((await f.svc.handleAdmin({ v: 1, cmd: 'refresh' })).ok, true);
   await decide(f.svc, 'session-start', HOST);
-  assert.equal((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'REVOKED'); // still installed
+  assert.notEqual((await decide(f.svc, 'skill-invoke', HOST, 'alpha')).verdict, 'VERIFIED');
   const s = await f.status();
-  assert.deepEqual(s['autoUninstalled'], []);
-  assert.deepEqual(s['wouldUninstall'], [{ name: 'alpha', digest, verdict: 'REVOKED' }]);
+  assert.deepEqual(s['autoUninstalled'].map((u: { name: string; digest: string; verdict: string }) => [u.name, u.digest, u.verdict]), [['alpha', digest, 'REVOKED']]);
+  assert.deepEqual(s['wouldUninstall'], []);
 });
 
 test('rejected documents change nothing and are reported', { skip: LINUX_ONLY }, async (t) => {
