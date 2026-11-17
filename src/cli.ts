@@ -637,13 +637,19 @@ function printResult(result: VerificationResult, json: boolean): void {
   // A VERIFIED line must not read as "everything in this folder is approved" when the Skill excludes files from its digest.
   const notCovered = result.verdict === 'VERIFIED' ? pathsNotCovered(result.excluded) : [];
   const note = notCovered.length > 0 ? `  (${notCovered.length} path${notCovered.length === 1 ? '' : 's'} not covered by the certificate: ${shownPaths(notCovered)})` : '';
-  process.stdout.write(`${mark.padEnd(4)} ${result.verdict.padEnd(17)} ${result.skillName}  ${result.reason}${note}\n`);
+  // The name can be a folder's name when SKILL.md could not be read, and a reason can quote paths: neither may carry a
+  // line break or a terminal escape that would draw a second, made-up result line.
+  process.stdout.write(`${mark.padEnd(4)} ${result.verdict.padEnd(17)} ${terminalSafe(result.skillName)}  ${terminalSafe(result.reason)}${note}\n`);
 }
 
-/** Up to three paths, with control and bidirectional characters escaped (the names come from the Skill). */
+/** Text from a Skill or its folder, for one terminal line: control, line-separator and bidirectional characters are escaped. */
+export function terminalSafe(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, '0')}`);
+}
+
+/** Up to three paths, escaped for the terminal (the names come from the Skill). */
 function shownPaths(paths: readonly string[]): string {
-  const safe = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, '0')}`);
-  return `${paths.slice(0, 3).map(safe).join(', ')}${paths.length > 3 ? ', ...' : ''}`;
+  return `${paths.slice(0, 3).map(terminalSafe).join(', ')}${paths.length > 3 ? ', ...' : ''}`;
 }
 
 function notCoveredNote(paths: readonly string[]): string {
@@ -982,7 +988,12 @@ async function runPolicyCheck(sub: string | undefined, parsed: Parsed, now: Date
     report.verdict = trust.verdict;
     report.reason  = trust.reason;
   }
+  // Without a state file a host remembers nothing between runs, so an older, still valid trust root, revocation list,
+  // root event log or timestamp is accepted again. The policy loads, so this is said here, where a setup is checked.
+  report.rollback_protection = policy.statePath !== null;
   print(report);
+  if (policy.statePath === null)
+    process.stderr.write('warning: the policy has no state_file, so this host does not remember the versions it has seen: an older, still valid trust root or revocation list would be accepted again. Add "state_file" to the policy.\n');
   return trust.ok ? 0 : 1;
 }
 

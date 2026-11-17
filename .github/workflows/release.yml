@@ -99,16 +99,20 @@ jobs:
           echo "### mago-ski $RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$tarball\` sha256 \`$sha256\`" >> "$GITHUB_STEP_SUMMARY"
 
+      # Step outputs reach the scripts as environment variables, never as text pasted into the script.
       - name: Smoke-test the packed command
         shell: bash
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           dir="$(mktemp -d)"
-          cp "release/${{ steps.pack.outputs.tarball }}" "$dir/"
+          cp "release/$TARBALL" "$dir/"
           cd "$dir"
           npm init -y > /dev/null
-          npm install --ignore-scripts "./${{ steps.pack.outputs.tarball }}"
-          npx --no-install mago-ski --version | grep -Fx "mago-ski ${{ steps.meta.outputs.version }}"
+          npm install --ignore-scripts "./$TARBALL"
+          npx --no-install mago-ski --version | grep -Fx "mago-ski $VERSION"
           npx --no-install mago-ski --help > /dev/null
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -138,14 +142,20 @@ jobs:
 
       - name: Verify the tarball is the one that was built and tested
         shell: bash
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
         run: |
           set -euo pipefail
           cd release
           sha256sum --check SHA256SUMS
-          [[ "$(sha256sum '${{ needs.build.outputs.tarball }}' | cut -d' ' -f1)" == "${{ needs.build.outputs.sha256 }}" ]]
+          [[ "$(sha256sum "$TARBALL" | cut -d' ' -f1)" == "$SHA256" ]]
 
       - name: Publish to npm with provenance
-        run: npm publish "./release/${{ needs.build.outputs.tarball }}" --provenance --access public
+        shell: bash
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: npm publish "./release/$TARBALL" --provenance --access public
 
   github-release:
     needs: [build, publish]
