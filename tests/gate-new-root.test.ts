@@ -2,7 +2,7 @@
 // so a new root starts with empty memory instead of reading the old root's state as corrupt, and `gate init` refuses a
 // changed root fingerprint unless --new-root is given.
 import assert from 'node:assert/strict';
-import { chmod, copyFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -10,7 +10,9 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { runCli, type GateCliSeams } from '../src/cli.ts';
 import { instancePaths, readInstanceConfig } from '../src/gate/instance.ts';
+import { updateRevocations } from '../src/admin.ts';
 import { createGateService, trustStoreDir, type GateServiceConfig } from '../src/gate/service.ts';
+import { migrateFlatTrustStore } from '../src/gate/trust-store.ts';
 import { applyInit, planInit, type InitOptions } from '../src/gate/setup.ts';
 import { generateKeyPair } from '../src/keys.ts';
 import { adoptTrustDocuments } from '../src/recovery-admin.ts';
@@ -225,4 +227,79 @@ test('gate init --new-root through the CLI: refusal text, --print note, the summ
   const json = await run(init(FP_A, '--new-root', '--json'));
   assert.deepEqual((JSON.parse(json.stdout) as { root_change: unknown }).root_change, { from: FP_B, to: FP_A });
   await assert.rejects(run(['gate', 'status', '--host', 'claude-code', '--new-root']), /--new-root/u);
+});
+
+test('a trust store from before the per-root layout keeps its rollback memory: carried over, or the start fails closed (N4)', { skip: LINUX_ONLY }, async (t) => {
+  const org = await setupOrg(t, { now: new Date() });
+  const base = await scratch(t);
+  const work = await tempDir(t);
+  const dirs = { stateDir: path.join(base, 'state'), generationsDir: path.join(base, 'gens'), managedDir: path.join(base, 'managed'), decisionSocketDir: path.join(base, 'dec'), adminSocketDir: path.join(base, 'adm') };
+  const service = (rootFingerprint: string) => createGateService({ ...dirs, rootFingerprint, mode: 'enforce', hostExes: [NODE], rootUid: UID, reconcileIntervalMs: 3_600_000 });
+  const b64 = async (file: string) => (await readFile(file)).toString('base64');
+  const accept = async (svc: ReturnType<typeof service>, list: string) =>
+    (await svc.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(org.trustRoot), revocations_b64: await b64(list) })) as Record<string, unknown>;
+  const status = async (svc: ReturnType<typeof service>) => (await svc.handleAdmin({ v: 1, cmd: 'status' })) as Record<string, unknown>;
+  const flat = path.join(dirs.stateDir, 'trust');
+  const perRoot = trustStoreDir(dirs.stateDir, org.rootKeyId);
+  const files = async (dir: string) => (await readdir(dir, { withFileTypes: true })).filter((e) => !e.isDirectory()).map((e) => e.name).sort();
+  /** Turns the per-root store into the layout of an earlier build: its files directly in `<state>/trust`. */
+  const flatten = async () => { for (const f of await readdir(perRoot)) await rename(path.join(perRoot, f), path.join(flat, f)); await rm(perRoot, { recursive: true }); };
+
+  const newer = path.join(work, 'revocations-2.json');
+  await updateRevocations({ rootKeyPath: org.rootKey, revocationsPath: org.revocations, out: newer, now: new Date() });
+  let svc = service(org.rootKeyId);
+  await svc.start();
+  assert.equal((await accept(svc, org.revocations)).ok, true);
+  const savedOlder = path.join(work, 'older-store');
+  await cp(perRoot, savedOlder, { recursive: true }); // the store as it is with the older list
+  assert.equal((await accept(svc, newer)).ok, true);
+  await svc.stop();
+  await flatten();
+  const before = await files(flat);
+  assert.equal(before.includes('manifest.json'), true);
+
+  // 1. Another root: the old state does not verify, nothing is opened, nothing is removed.
+  const other = `sha256:${'5a'.repeat(32)}`;
+  svc = service(other);
+  await svc.start();
+  const refused = await status(svc);
+  assert.equal(refused['ok'], false);
+  assert.match(String(refused['error']), /trust state from an earlier build .* does not verify under root sha256:5a/u);
+  assert.equal((await svc.handleAdmin({ v: 1, cmd: 'accept-trust', trust_root_b64: await b64(org.trustRoot), revocations_b64: await b64(newer) })).ok, false);
+  await svc.stop();
+  assert.deepEqual(await files(flat), before);
+
+  // 2. The same root: carried over; the older list is still refused.
+  svc = service(org.rootKeyId);
+  await svc.start();
+  assert.equal((await status(svc))['trust'], 'ready');
+  assert.deepEqual(await files(flat), []);
+  assert.deepEqual(await files(perRoot), before);
+  const rolledBack = await accept(svc, org.revocations);
+  assert.equal(rolledBack['ok'], false);
+  assert.equal((await accept(svc, newer)).ok, true); // unchanged
+  await svc.stop();
+
+  // 3. A per-root store that was filled with the older list after the upgrade is replaced by the state from before it.
+  await flatten();
+  await cp(savedOlder, perRoot, { recursive: true });
+  assert.equal(await migrateFlatTrustStore(flat, perRoot, org.rootKeyId), 'migrated');
+  svc = service(org.rootKeyId);
+  await svc.start();
+  assert.equal((await status(svc))['trust'], 'ready');
+  assert.equal((await accept(svc, org.revocations)).ok, false);
+  await svc.stop();
+
+  // 4. A per-root store that is at least as new is kept, and the old files go; documents without a manifest stop the start.
+  for (const f of await readdir(savedOlder)) await copyFile(path.join(savedOlder, f), path.join(flat, f));
+  assert.equal(await migrateFlatTrustStore(flat, perRoot, org.rootKeyId), 'kept-newer');
+  assert.deepEqual(await files(flat), []);
+  assert.equal(await migrateFlatTrustStore(flat, perRoot, org.rootKeyId), 'none');
+  await rm(perRoot, { recursive: true });
+  for (const f of (await readdir(savedOlder)).filter((x) => x !== 'manifest.json')) await copyFile(path.join(savedOlder, f), path.join(flat, f));
+  await assert.rejects(migrateFlatTrustStore(flat, perRoot, org.rootKeyId), /documents but no manifest/u);
+  svc = service(org.rootKeyId);
+  await svc.start();
+  assert.equal((await status(svc))['ok'], false);
+  await svc.stop();
 });

@@ -60,13 +60,22 @@ sudo mago-ski gate doctor --host H
 
 `gate doctor`'s trust line names this case when the store is empty.
 
+### N4. A store from before the per-root layout is carried over, or the start fails closed
+
+A machine set up with a build from before N1 has its documents and manifest directly in `<stateDir>/trust`. Ignoring them would reset rollback protection even though the root did not change: the per-root store would start empty and accept an older, still valid trust root or revocation list, including one from before a revocation.
+
+At start, before the store is opened, `migrateFlatTrustStore` (`src/gate/trust-store.ts`) looks at `<stateDir>/trust`. Per-root stores are folders; any other entry is the old store.
+
+- **The old state verifies under the configured root, and the per-root store is empty.** The documents are copied, then the manifest (the commit point), with the same versions and the same highest trusted time. The copy is read back and verified, and only then are the old files removed, manifest first. A stop in between is finished at the next start.
+- **Both hold state** (a build with N1 ran before this one and documents were accepted). The state that is at least as new in both documents is kept, with the later trusted time. So a per-root store that was filled with older documents after the upgrade is replaced by the state from before it.
+- **Anything else: the service does not open a trust store.** This covers an old state that does not verify under the configured root (it belongs to another root, or is damaged), documents with no manifest, and two states that are each newer in one document. `gate status` reports the reason, enforce mode blocks every Skill, and `gate trust` is refused. The ways out are named in the message: start once with the root the old state belongs to, or remove the files (not the folders) in `<stateDir>/trust` to give that state up.
+
 ## What this does not do
 
 - **The gate does not follow root events.** Each machine is moved by an administrator (or a fleet tool running the four commands). A root key that was revoked, and not yet replaced on a machine, is still the gate's root there.
 - **The new root starts with empty rollback memory.** Until the first accepted documents set the minimum, the gate would accept any document pair validly signed by the new root, including an early one. Only documents signed after the adoption exist, and only root or the organisation's inbox can deliver them, so the window is small. Carrying the old root's version numbers forward as a floor was considered and left out: it would add a second kind of state to the trust store, and it would lock out an organisation that re-creates its documents from version 1.
 - **There is no record of the move in the decision log.** The move is visible in `gate status` (`root_fingerprint`), in the instance config, and as `hide-all:trust-no-state` and `restore` reconcile records in enforce mode.
 - **Old per-root folders are never removed.** They are small (two documents and a manifest).
-- **Stores from unreleased builds.** A machine set up with a build from before this change has its documents directly in `<stateDir>/trust`. They are ignored; run `gate trust` once after upgrading. The gate has not been in a release, so no released version is affected.
 
 ## Tests
 
@@ -77,3 +86,4 @@ sudo mago-ski gate doctor --host H
 - Enforce mode: after the move reconcile hides the installed Skill, and restores it once the new documents are accepted.
 - `planInit`: refusal without the flag (nothing written), the root change with it, refusal of `--new-root` with the same root or with no instance, and an ordinary re-run afterwards.
 - The CLI: refusal text, the `--print` note and exit code, the summary line, `root_change` in `--json`, and that `--new-root` is refused by other gate commands.
+- Migration (N4): an old flat store keeps its versions (an older list is still refused after the upgrade) and its trusted time; a per-root store filled with older documents is replaced; a newer per-root store is kept; a flat store of another root, or documents without a manifest, stop the start and keep the old files.
