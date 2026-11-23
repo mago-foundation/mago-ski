@@ -518,11 +518,11 @@ test('the armed key is dropped when the pin changes, when the role is gone, and 
   assert.equal((await w.session.status()).armed, null);
 
   // The idle timer is driven by the mock clock, not by waiting.
+  // The mock clock is on before the key is armed: a real 30 ms timer could expire on a slow machine before the check.
   const idle = await world(t, { idleMs: 30 });
-  await idle.session.arm(idle.org.approverKey);
-  assert.equal((await idle.session.status()).armed?.role, 'approver');
   t.mock.timers.enable({ apis: ['setTimeout'] });
   await idle.session.arm(idle.org.approverKey);
+  assert.equal((await idle.session.status()).armed?.role, 'approver');
   t.mock.timers.tick(31);
   t.mock.timers.reset();
   assert.equal((await idle.session.status()).armed, null);
