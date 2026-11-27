@@ -71,7 +71,7 @@
 // MODE/CONFIG/OWNERSHIP rules are the Claude adapter's (claude-code.ts): argv[1] is the mode, enforce wins, config and
 // socket must be root-owned, the adapter's own environment is not read. Extra config keys: `admin_root` (default
 // /etc/codex/skills; must be the gate service's `managedDir`) and `skill_roots` (extra absolute non-admin roots).
-import { lstat, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { isRecord } from '../../canonical-json.ts';
 import { readRegularFile } from '../../fs-safe.ts';
@@ -267,10 +267,7 @@ export async function readProcEnviron(pid: number): Promise<HostEnv> {
 async function dotenvMayMoveHome(codexHome: string): Promise<boolean> {
   const file = `${codexHome}/.env`;
   try {
-    const st = await lstat(file);
-    if (!st.isFile() || st.size > MAX_ENVIRON_BYTES) return true; // symlink, FIFO, directory, huge: not inspected
-    // nosemgrep: mago-no-raw-read-of-signed-input -- /proc/<pid>/environ of the host process, size checked above; only searched for HOME
-    return (await readFile(file)).includes('HOME');
+    return (await readRegularFile(file, '.env', MAX_ENVIRON_BYTES)).includes('HOME');
   } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
