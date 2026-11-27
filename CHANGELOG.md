@@ -4,10 +4,29 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-27
+
+Security fixes from an independent secure code review of 0.4.0. Upgrade every host, gate and CI workflow that uses mago-ski.
+
 ### Security
 
-- **Keys that left a role before `root_events_after` are now refused** (F-08). A host set up after a rotation reads the events before its starting point without checking them, and uses them only to refuse: the keys they show leaving the root, timestamp or recovery role can no longer be approvers or take a role in a later event. A policy that pins a key those events retired is `UNVERIFIABLE`, as is an event there that does not parse. The [root recovery spec](docs/spec/root-recovery-v1.md#walking-the-log) is updated.
+- Fixes in the root event walk, signing and document writes, the Pi host, the GitHub Action, the company gate and the desktop GUI.
 - The [threat model](docs/threat-model.md#accepted-risks) lists the review findings that are kept on purpose, and why.
+
+### Changed
+
+- A policy that pins a key which root events before `root_events_after` show leaving the root, timestamp or recovery role is now `UNVERIFIABLE`, as is an unparseable event in that range. Upgrade note:
+
+> Before upgrading hosts, run `mago-ski policy check --policy FILE` with 0.4.1 against each organisation's policy. If it fails, publish a corrected policy first: in enforce mode a host that cannot verify the policy blocks every Skill.
+
+- Pi: a policy that is named (the `policy` option or `MAGO_SKI_POLICY`) but missing now blocks Skills instead of turning checking off. A missing policy at the default location still means mago-ski is not set up there.
+- `approve`, `verify` and `diff` name the paths that `.skilldigestignore` excludes.
+- `policy check` reports when rollback protection is missing.
+- `root adopt` replaces only files that are unchanged since it read them.
+
+### Added
+
+- Static analysis on every pull request: CodeQL, Semgrep (with project rules in `.semgrep.yml`, run locally with `npm run sast`) and zizmor.
 
 ## [0.4.0] - 2026-11-17
 
