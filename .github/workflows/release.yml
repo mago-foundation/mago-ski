@@ -186,11 +186,14 @@ jobs:
           Tarball: \`$TARBALL\`
           SHA-256: \`$SHA256\`
 
+          Changes: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/CHANGELOG.md
+
           Verify the provenance after installing: \`npm audit signatures\`"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             # A release written by hand is kept as it is; only the published files are attached.
             gh release upload "$TAG" "release/$TARBALL" release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           else
+            # No --generate-notes: PR titles can describe security fixes in more detail than the changelog.
             gh release create "$TAG" "release/$TARBALL" release/SHA256SUMS \
-              --repo "$GITHUB_REPOSITORY" --title "mago-ski $TAG" --notes "$notes" --generate-notes --verify-tag
+              --repo "$GITHUB_REPOSITORY" --title "mago-ski $TAG" --notes "$notes" --verify-tag
           fi
