@@ -73,6 +73,7 @@ export async function loadConfig(file: string, rootUid = 0, extraKeys: readonly 
   if (!path.isAbsolute(file)) throw new Error('config path must be absolute');
   const st = await lstat(file);
   if (!st.isFile() || (st.mode & 0o022) !== 0 || st.uid !== rootUid) throw new Error('config must be a regular, root-owned, non-writable file');
+  // nosemgrep: mago-no-raw-read-of-signed-input -- the hook config, checked just above as a root-owned regular file that only root can write
   const raw = parseStrictJson(await readFile(file));
   if (!isRecord(raw)) throw new Error('config must be an object');
   const allowed = ['v', 'socket', 'mode', 'host_exes', 'client_deadline_ms', 'self_deadline_ms', ...extraKeys];

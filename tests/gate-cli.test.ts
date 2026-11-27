@@ -10,7 +10,7 @@ import { serializeCanonicalJson } from '../src/canonical-json.ts';
 import { claudeCodeManagedSettings } from '../src/gate/adapters/claude-code-settings.ts';
 import { codexManagedConfigToml, codexRequirementsToml } from '../src/gate/adapters/codex-requirements.ts';
 import { askAdmin, TIMEOUT_MESSAGE, type AskAdmin } from '../src/gate/admin-client.ts';
-import { instancePaths, instanceToServiceConfig, parseInstanceConfig, readInstanceConfig, type Host } from '../src/gate/instance.ts';
+import { buildId, instancePaths, instanceToServiceConfig, parseInstanceConfig, readInstanceConfig, type Host } from '../src/gate/instance.ts';
 import { createGateService } from '../src/gate/service.ts';
 import { applyInit, checkRootOwnedChain, checkRootOwnedTree, defaultHostExe, doctor, planInit, type InitOptions } from '../src/gate/setup.ts';
 import { approve, LINUX_ONLY, setupOrg, tempDir, writeSkill } from './helpers.ts';
@@ -68,7 +68,7 @@ test('planInit claude-code: golden file contents, order, modes and folders', asy
   const by = Object.fromEntries(plan.files.map((f) => [f.role, f]));
 
   assert.equal(by['instance']!.path, `${w.base}/etc/mago-ski/gate/claude-code.json`);
-  assert.equal(by['instance']!.content, `{"admin_socket_dir":"${w.base}/run/mago-ski/gate/claude-code/admin","build_id":"mago-ski 0.4.0","decision_socket_dir":"${w.base}/run/mago-ski/gate/claude-code","generations_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/generations","host":"claude-code","host_exes":["${w.exe}"],"inbox_dir":null,"managed_dir":"${w.base}/etc/claude-code/.claude/skills","mode":"shadow","root_fingerprint":"${FP}","state_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/state","v":1}\n`);
+  assert.equal(by['instance']!.content, `{"admin_socket_dir":"${w.base}/run/mago-ski/gate/claude-code/admin","build_id":"${buildId()}","decision_socket_dir":"${w.base}/run/mago-ski/gate/claude-code","generations_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/generations","host":"claude-code","host_exes":["${w.exe}"],"inbox_dir":null,"managed_dir":"${w.base}/etc/claude-code/.claude/skills","mode":"shadow","root_fingerprint":"${FP}","state_dir":"${w.base}/var/lib/mago-ski/gate/claude-code/state","v":1}\n`);
   assert.equal(by['hook']!.content, `{"client_deadline_ms":1500,"host_exes":["${w.exe}"],"mode":"shadow","self_deadline_ms":3000,"socket":"${w.base}/run/mago-ski/gate/claude-code/decision.sock","v":1}\n`);
   assert.equal(by['unit']!.path, `${w.base}/etc/systemd/system/mago-ski-gate@.service`);
   assert.equal(by['unit']!.content, `[Unit]
@@ -384,7 +384,7 @@ test('instance config validation: unknown keys, wrong types, permissions', async
   const cfg = await readInstanceConfig(p.instance, UID);
   assert.deepEqual(instanceToServiceConfig(cfg, UID), {
     stateDir: p.stateDir, generationsDir: p.generationsDir, managedDir: p.managedDir, decisionSocketDir: p.decisionSocketDir, adminSocketDir: p.adminSocketDir,
-    rootFingerprint: FP, mode: 'shadow', hostExes: [w.exe], rootUid: UID, buildId: 'mago-ski 0.4.0',
+    rootFingerprint: FP, mode: 'shadow', hostExes: [w.exe], rootUid: UID, buildId: buildId(),
   });
   assert.equal(instanceToServiceConfig({ ...cfg, inbox_dir: '/in' }, UID).inboxDir, '/in');
   await assert.rejects(readInstanceConfig(p.instance, UID + 1), /owned by root/u);

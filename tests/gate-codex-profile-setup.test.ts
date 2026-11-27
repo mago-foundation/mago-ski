@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, readdir, readFile, rename, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -296,4 +296,44 @@ test('the home scan answers incomplete, never none, when a bound stops it; docto
   const unreadable = await scanForSkillFile(root);
   await chmod(path.join(root, 'd4', 'x'), 0o755);
   if (UID !== 0) assert.equal(unreadable, 'incomplete');
+});
+
+test('--lock-user-skill-folders does not follow links: a linked home part is refused, nothing outside the home is touched', { skip: LINUX_ONLY }, async (t) => {
+  const w = await world(t);
+  const a = await w.home('alice');
+  const victim = path.join(w.base, 'victim');
+  await mkdir(victim, { mode: 0o700 });
+  const before = await stat(victim);
+  const touched: string[] = [];
+  const chattr = async (p: string, via?: string) => { touched.push(`${p}|${via ?? ''}`); };
+  const isImmutable = async () => false;
+  // ~/.agents is a link to a folder outside the home
+  await symlink(victim, path.join(a, '.agents'));
+  const plan = await planInit(w.opts({ userHomes: [a], lockUserSkillFolders: true, chattr, isImmutable }));
+  await assert.rejects(applyInit(plan, { base: w.base, rootUid: UID, chattr, isImmutable }), /\.agents must be a real folder to be locked/u);
+  assert.deepEqual(touched, []);
+  assert.deepEqual(await readdir(victim), []); // no skills folder was made through the link
+  assert.equal((await stat(victim)).mode, before.mode);
+  // ~/.codex/skills is a link
+  await rm(path.join(a, '.agents'));
+  await mkdir(path.join(a, '.codex'), { recursive: true });
+  await symlink(victim, path.join(a, '.codex', 'skills'));
+  await assert.rejects(applyInit(await planInit(w.opts({ userHomes: [a], lockUserSkillFolders: true, chattr, isImmutable })), { base: w.base, rootUid: UID, force: true, chattr, isImmutable }), /\.codex\/skills must be a real folder to be locked/u);
+  assert.deepEqual(touched, []);
+  // a home that is itself reached through a link is refused in the plan
+  const linkHome = path.join(w.base, 'home', 'alias');
+  await symlink(a, linkHome);
+  assert.match((await planInit(w.opts({ userHomes: [linkHome], lockUserSkillFolders: true }))).problems.join('\n'), /alias is not a folder/u);
+  await symlink(path.join(w.base, 'home'), path.join(w.base, 'homes'));
+  assert.match((await planInit(w.opts({ userHomes: [path.join(w.base, 'homes', 'alice')], lockUserSkillFolders: true }))).problems.join('\n'), /homes\/alice is not a real path/u);
+  // a Skill added after the plan is not locked in
+  const b = await w.home('bob');
+  const planB = await planInit(w.opts({ userHomes: [b], lockUserSkillFolders: true, chattr, isImmutable }));
+  await mkdir(path.join(b, '.agents', 'skills', 'late'), { recursive: true });
+  await assert.rejects(applyInit(planB, { base: w.base, rootUid: UID, force: true, chattr, isImmutable }), /\.agents\/skills now holds late/u);
+  // the real case: the tool is given the open handle, not the path
+  const c = await w.home('carol');
+  await applyInit(await planInit(w.opts({ userHomes: [c], lockUserSkillFolders: true, chattr, isImmutable })), { base: w.base, rootUid: UID, force: true, chattr, isImmutable });
+  assert.equal(touched.length, 3);
+  for (const call of touched) assert.match(call, /^.*\|\/proc\/\d+\/fd\/\d+$/u);
 });

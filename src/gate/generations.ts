@@ -381,9 +381,11 @@ export async function readGeneration(generationsRoot: string, name: string, dige
 async function seal(dir: string, files: readonly TreeFile[]): Promise<void> {
   const dirs = new Set(['']);
   for (const f of files) {
+    // nosemgrep: mago-no-path-chown-chmod -- sealing a generation inside the service's root-owned generation store; no user can write there
     await chmod(path.join(dir, f.path), f.exec ? 0o555 : 0o444);
     for (let d = path.posix.dirname(f.path); d !== '.'; d = path.posix.dirname(d)) dirs.add(d);
   }
+  // nosemgrep: mago-no-path-chown-chmod -- sealing a generation inside the service's root-owned generation store; no user can write there
   for (const d of [...dirs].sort((a, b) => b.length - a.length)) await chmod(path.join(dir, d), 0o555);
 }
 

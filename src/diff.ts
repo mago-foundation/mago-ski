@@ -1,4 +1,4 @@
-import { collectSkillTree, compareTreePaths, sha256Hex, type TreeFile } from './tree-digest.ts';
+import { collectSkillTree, compareTreePaths, pathsNotCovered, sha256Hex, type TreeFile } from './tree-digest.ts';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const MAX_ANALYZED_TEXT_BYTES = 2 * 1024 * 1024;
@@ -82,6 +82,8 @@ export interface DiffResult {
   };
   diff_truncated: boolean;
   files: FileChange[];
+  /** Paths each side's `.skilldigestignore` keeps out of the digest. They are not compared: UNCHANGED says nothing about them. */
+  not_compared: { base: string[]; candidate: string[] };
 }
 
 /** Drops trailing sentence punctuation. A loop, because /[.,;:!?]+$/ backtracks quadratically on a long run. */
@@ -530,5 +532,6 @@ export async function diffSkillTrees(baseRoot: string, candidateRoot: string): P
     },
     diff_truncated: diff.truncated,
     files: diff.files,
+    not_compared: { base: pathsNotCovered(base.excluded), candidate: pathsNotCovered(candidate.excluded) },
   };
 }

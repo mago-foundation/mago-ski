@@ -155,7 +155,7 @@ The remaining window, between the final hash and the `rename`, is stated in the 
 - **The walk.** `RootWalk` gains `retired: string[]` (sorted, unique). It is filled from `WalkState.retired`, and `cloneWalk` copies it.
 - **The host check.** In `loadPolicyTrust`'s `if (walk)` block, after the existing collision check, a trust root that lists an approver whose key id is in `walk.retired` fails with the trust reason `trust root lists approver <id>, which has held the root or timestamp role; a key that left those roles never takes another`. The failure has the same shape as the collision failure.
 - **Scope, stated in both specs and the CHANGELOG:**
-  - Only keys retired in events this host walked (after `root_events_after`) are known. A key retired before that is not.
+  - Keys retired in walked events, and keys that the events before `root_events_after` show leaving a role (read only to refuse), are known.
   - The gate trust store (`src/gate/trust-store.ts`) calls `loadTrustContext` directly and is out of scope.
   - On upgrade, a trust root that already lists such a key stops loading. The fix is `root remove-approver`.
 - **No word "closes".** The design and the specs say "refuses re-enrolment of a key retired in walked events".
@@ -909,7 +909,7 @@ These decisions resolve the v6 readiness check (gaps 1–7) and the v6 comprehen
 
 ### R2. Scope of "former recovery key" (readiness 4, comprehension B1)
 
-- **What it holds.** `formerRecovery` holds keys that left a recovery set in walked events, after `root_events_after`. That is the same scope as `retired` (V2).
+- **What it holds.** `formerRecovery` holds keys that left a recovery set in walked events, and keys that the events before `root_events_after` show leaving one. That is the same scope as `retired` (V2).
 - **Wiring.**
   1. Add a `WalkState.formerRecovery` field.
   2. In the rotate branch (`root-events.ts:323`, where `newRecovery` is known), add `current.keyIds.filter((k) => !newRecovery.keyIds.includes(k))`.

@@ -8,6 +8,7 @@ import { refreshAdminStatus, renderAdmin, setAdminPolling } from './admin.ts';
 import { actionDigest, detailMatches } from './binding.ts';
 import { $, h } from './dom.ts';
 import { currentLang, locale, noteText, setCurrentLang, tr, type Note } from './lang.ts';
+import { lineSafe } from '../i18n/dialog-safe.ts';
 import { LANGS, type Lang, type MessageKey } from '../i18n/messages.ts';
 
 declare global {
@@ -29,9 +30,7 @@ const HISTORY_KEY: Record<HistoryEvent['kind'], MessageKey> = {
 const NOTIFY_KEY: Record<Prefs['notify'], MessageKey> = { off: 'notify.off', grouped: 'notify.grouped', immediate: 'notify.immediate' };
 
 /** Invisible and bidirectional control characters are shown as code points, never applied to the text. */
-function visible(text: string): string {
-  return text.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
-}
+const visible = lineSafe;
 const NOTIFY_STEPS: Array<[Prefs['notify'], number]> = [['off', -120], ['grouped', 0], ['immediate', 120]];
 const RETENTION_STEPS: Array<[number, number]> = [[7, -100], [30, -20], [90, 60], [365, 130]];
 

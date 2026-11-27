@@ -29,3 +29,12 @@ test('canonical JSON rejects duplicate keys, reordering and floats', () => {
   assert.throws(() => parseCanonicalJsonBytes(Buffer.from('{"a":1}')), /trailing LF/u);
   assert.deepEqual(parseCanonicalJsonBytes(Buffer.from('{"a":1,"b":[true,null]}\n')), { a: 1, b: [true, null] });
 });
+
+test('an envelope too large to be read back is refused when it is made, not after it is written', () => {
+  const pair = generateKeyPairSync('ed25519');
+  const keyId = keyIdFromSpkiDer(pair.publicKey.export({ format: 'der', type: 'spki' }));
+  const fits = signEnvelope('application/test', Buffer.alloc(3 * 1024 * 1024 - 1024, 0x61), keyId, pair.privateKey);
+  assert.equal(parseEnvelope(envelopeBytes(fits), 'test').payloadBytes.length, 3 * 1024 * 1024 - 1024);
+  const tooLarge = signEnvelope('application/test', Buffer.alloc(3 * 1024 * 1024 + 4096, 0x61), keyId, pair.privateKey); // over 4 MiB as base64
+  assert.throws(() => envelopeBytes(tooLarge), /the limit for a document is 4194304 bytes\. Nothing was written/u);
+});

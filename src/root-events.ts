@@ -2,7 +2,7 @@
 // policy, signs numbered root events that revoke or replace the root key. Hosts walk the log from the policy's
 // starting point at every trust check; one event that breaks a rule makes the whole log UNVERIFIABLE.
 import { sign, verify, type KeyObject } from 'node:crypto';
-import { canonicalBytes, exactKeys, isRecord, parseCanonicalJsonBytes, requireArray, requirePositiveInteger, requireString } from './canonical-json.ts';
+import { canonicalBytes, exactKeys, isRecord, readableCanonicalBytes, parseCanonicalJsonBytes, requireArray, requirePositiveInteger, requireString } from './canonical-json.ts';
 import { preAuthEncoding } from './dsse.ts';
 import { parseSpki, validateKeyId, type PublicKeyInfo } from './keys.ts';
 import { CLOCK_SKEW_MS, formatTimestamp, parseTimestamp, requireValidDate } from './time.ts';
@@ -247,7 +247,7 @@ export function emptyRootEventLog(): Buffer {
 }
 
 export function rootEventLogBytes(envelopes: MultiEnvelope[]): Buffer {
-  return canonicalBytes({ events: envelopes, type: ROOT_EVENTS_TYPE });
+  return readableCanonicalBytes({ events: envelopes, type: ROOT_EVENTS_TYPE }, 'The root event log');
 }
 
 /** `sha256:` + the SHA-256 of the envelope as canonical JSON with its trailing LF (the host state's event_digest). */
@@ -402,8 +402,64 @@ function applyEvent(
 }
 
 /**
+ * Keys that left a role in the events before `root_events_after`. Those events are not checked (the policy pins the
+ * state after them, not the keys that signed them), so what they say is used only to refuse: a key named here can never
+ * be an approver or take a role in a walked event, and nothing is ever accepted because of them. Someone who can change
+ * the log can make a host refuse more, which they can already do by deleting the log; with freshness, the timestamp
+ * covers the whole file anyway. An event here that retires a key the policy pins contradicts the policy and throws.
+ */
+function keysLeftBeforeStart(envelopes: Array<MultiEnvelope & { payloadBytes: Buffer }>, start: RootStart): { retired: Set<string>; formerRecovery: Set<string> } {
+  const retired = new Set<string>();
+  const formerRecovery = new Set<string>();
+  let recovery: string[] | null = null;
+  let timestampKeyId: string | null = null;
+  for (let index = 0; index < start.eventsAfter; index += 1) {
+    const label = `root event ${index + 1} (before root_events_after)`;
+    const envelope = envelopes[index]!;
+    if (envelope.payloadType !== ROOT_EVENT_PAYLOAD_TYPE)
+      throw new Error(`${label} has the wrong payload type`);
+    let event: RootEvent;
+    try {
+      event = parseRootEventPayload(envelope.payloadBytes);
+    } catch (error) {
+      throw new Error(`${label}: ${(error as Error).message}`);
+    }
+    if (event.sequence !== index + 1)
+      throw new Error(`${label} carries sequence ${event.sequence}`);
+    if (event.action === 'revoke') {
+      retired.add(event.rootKeyId);
+      continue;
+    }
+    const newRecovery = event.newRecovery!.keyIds;
+    if (event.newRoot!.keyId !== event.rootKeyId)
+      retired.add(event.rootKeyId);
+    if (event.newTimestamp) {
+      if (timestampKeyId !== null && timestampKeyId !== event.newTimestamp.keyId)
+        retired.add(timestampKeyId);
+      timestampKeyId = event.newTimestamp.keyId;
+    }
+    // Signers not in the new set come from the set this event replaces, as does every key of an earlier new set.
+    for (const keyId of [...event.signers.map((key) => key.keyId), ...(recovery ?? [])])
+      if (!newRecovery.includes(keyId))
+        formerRecovery.add(keyId);
+    recovery = newRecovery;
+  }
+  for (const keyId of recovery ?? [])
+    if (!start.recovery.keyIds.includes(keyId))
+      formerRecovery.add(keyId);
+  for (const keyId of retired) {
+    const pinned = keyId === start.rootKeyId ? 'root' : keyId === start.timestampKeyId ? 'timestamp' : start.recovery.keyIds.includes(keyId) ? 'recovery' : null;
+    if (pinned)
+      throw new Error(`the events before root_events_after show key ${keyId} leaving the root or timestamp role, but the policy pins it as the ${pinned} key`);
+  }
+  return { retired, formerRecovery };
+}
+
+/**
  * Walks the root event log from the policy's starting point. Throws (the log is UNVERIFIABLE) if any event after
  * `eventsAfter` breaks a rule; events are never skipped. Hashes every event so rollback and fork checks can use them.
+ * Keys that left a role in the events before `eventsAfter` are read without checking signatures and used only to refuse
+ * (see keysLeftBeforeStart).
  */
 export function walkRootEvents(bytes: Uint8Array, start: RootStart, now: Date): RootWalk {
   requireValidDate(now, 'Verification time');
@@ -411,13 +467,14 @@ export function walkRootEvents(bytes: Uint8Array, start: RootStart, now: Date): 
   const envelopes = parseRootEventLog(bytes);
   if (envelopes.length < start.eventsAfter)
     throw new Error(`root event log has ${envelopes.length} event(s), fewer than root_events_after (${start.eventsAfter})`);
+  const before = keysLeftBeforeStart(envelopes, start);
   let state: WalkState = {
     activeRootKeyId: start.rootKeyId,
     recovery:        start.recovery,
     timestampKeyId:  start.timestampKeyId,
     revoked:         null,
-    retired:         new Set(),
-    formerRecovery:  new Set(),
+    retired:         before.retired,
+    formerRecovery:  before.formerRecovery,
     lastIssuedAt:    null,
   };
   for (let index = start.eventsAfter; index < envelopes.length; index += 1)

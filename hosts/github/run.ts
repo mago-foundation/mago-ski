@@ -4,7 +4,7 @@
 // therefore add certificates but cannot change who is trusted to issue them.
 import { appendFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { isInside } from '../../src/fs-safe.ts';
+import { isInside, realpathAllowingMissing } from '../../src/fs-safe.ts';
 import { isMainModule } from '../../src/main-module.ts';
 import {
   DiscoveryBudgetError, findSkillDirs, loadPolicy, loadPolicyTrust, tooDeepResult, trustFailureEvent, verifyWithPolicy, type Policy, type TrustFailureEvent,
@@ -53,21 +53,23 @@ function within(root: string, target: string, label: string): string {
 /** Containment on resolved paths, so a symlink cannot point a policy path outside its checkout. */
 async function withinReal(root: string, target: string, label: string): Promise<string> {
   within(root, target, label);
-  let resolved: string;
-  try {
-    resolved = await realpath(target);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return target;
-    throw error;
-  }
+  // The existing part of the path is resolved even when the last parts are missing: a link on the way still counts.
+  const resolved = await realpathAllowingMissing(target);
   if (!isInside(await realpath(root), resolved)) throw new Error(`${label} must stay inside ${root} (it resolves to ${resolved})`);
   return target;
 }
 
-/** Re-anchors a path from the policy checkout into the workspace checkout. */
+/**
+ * Re-anchors a path from the policy checkout into the workspace checkout. The action places the base checkout inside the
+ * workspace (`.mago-ski-base`), so "inside the workspace" is not enough: a path of the pull request that resolves into the
+ * base checkout would have the check read the base revision's Skills or certificates instead of the pull request's.
+ */
 async function toWorkspace(policyRoot: string, workspace: string, target: string, label: string): Promise<string> {
   const relative = path.relative(policyRoot, within(policyRoot, target, label));
-  return await withinReal(workspace, path.join(workspace, relative), label);
+  const moved = await withinReal(workspace, path.join(workspace, relative), label);
+  if (policyRoot !== workspace && isInside(await realpathAllowingMissing(policyRoot), await realpathAllowingMissing(moved)))
+    throw new Error(`${label} must not resolve into the base checkout (${policyRoot})`);
+  return moved;
 }
 
 export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHubCheckResult> {
@@ -115,7 +117,8 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   }
   let discovery;
   try {
-    discovery = await findSkillDirs(policy.skillDirs);
+    // The base checkout sits inside the workspace on pull requests; its Skills are not the pull request's.
+    discovery = await findSkillDirs(policy.skillDirs, undefined, policyRoot === workspace ? {} : { exclude: [policyRoot] });
   } catch (error) {
     if (!(error instanceof DiscoveryBudgetError)) throw error;
     // Bounded fail-closed report: nothing is verified and no per-Skill rows are produced.
@@ -155,8 +158,23 @@ export async function runGitHubCheck(options: GitHubCheckOptions): Promise<GitHu
   return { mode: policy.mode, results, exitCode: failures.length > 0 && policy.mode === 'enforce' ? 1 : 0, summary };
 }
 
-function escapeAnnotation(value: string): string {
+/** Escapes the message part of a workflow command (after the `::`). */
+export function escapeAnnotation(value: string): string {
   return value.replace(/%/gu, '%25').replace(/\r/gu, '%0D').replace(/\n/gu, '%0A');
+}
+
+/**
+ * Escapes a property value of a workflow command (`file=...`). Properties are separated by `,` and end at `::`, so a path
+ * from the pull request must not be able to add a property or end the list: `:` and `,` are escaped as well.
+ */
+export function escapeAnnotationProperty(value: string): string {
+  return escapeAnnotation(value).replace(/:/gu, '%3A').replace(/,/gu, '%2C');
+}
+
+/** One annotation line for a failing Skill. */
+export function annotationLine(level: 'error' | 'warning', file: string | null, verdict: string, message: string): string {
+  const location = file === null ? '' : `file=${escapeAnnotationProperty(file)},`;
+  return `::${level} ${location}title=mago-ski ${escapeAnnotationProperty(verdict)}::${escapeAnnotation(message)}\n`;
 }
 
 async function main(): Promise<void> {
@@ -172,8 +190,8 @@ async function main(): Promise<void> {
     }
     annotations += 1;
     const level = result.mode === 'enforce' || result.trustFailure === 'root-revoked' ? 'error' : 'warning';
-    const location = result.budgetExceeded || result.trustFailure ? '' : `file=${escapeAnnotation(path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md')))},`;
-    process.stdout.write(`::${level} ${location}title=mago-ski ${entry.verdict}::${escapeAnnotation(`${entry.skillName}: ${entry.reason}`)}\n`);
+    const file = result.budgetExceeded || result.trustFailure ? null : path.relative(path.resolve(workspace), path.join(entry.skillDir, 'SKILL.md'));
+    process.stdout.write(annotationLine(level, file, entry.verdict, `${entry.skillName}: ${entry.reason}`));
   }
   process.stdout.write(`${result.summary}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${result.summary}\n`);

@@ -10,7 +10,7 @@ import type { ForbiddenKey } from './policy.ts';
 import { isDisplaySafeText } from './root-events.ts';
 import { readRevocationsForUpdate, signRevocations, type Revocations } from './revocations.ts';
 import { addDuration, truncateToSecond } from './time.ts';
-import { CERTIFICATE_FILENAME, collectSkillTree, sha256Hex, requireSkillRoot, SKILL_FILENAME } from './tree-digest.ts';
+import { CERTIFICATE_FILENAME, collectSkillTree, pathsNotCovered, sha256Hex, requireSkillRoot, SKILL_FILENAME } from './tree-digest.ts';
 import { MAX_APPROVERS, MAX_SCOPES, readTrustRootForUpdate, signTrustRoot, type TrustRoot } from './trust-root.ts';
 import { skillNameFromSkillFile } from './verify.ts';
 
@@ -512,7 +512,7 @@ export async function approveSkill(options: {
   outDir?: string;
   /** Awaited after the certificate is built and just before it is written; a throw writes nothing. */
   beforeSign?: (info: { skillName: string; digest: string }) => void | Promise<void>;
-}): Promise<{ path: string; skillName: string; digest: string; certificateId: string; expiresAt: Date }> {
+}): Promise<{ path: string; skillName: string; digest: string; certificateId: string; expiresAt: Date; /** Paths a `.skilldigestignore` keeps out of the digest: this approval does not cover them. */ notCovered: string[] }> {
   const skillDir = path.resolve(options.skillDir);
   const expected = options.expectDigest === undefined ? null : validateDigest(options.expectDigest, 'expected digest');
 
@@ -584,8 +584,8 @@ export async function approveSkill(options: {
 
   const targetPath = options.out
     ?? (options.outDir === undefined ? path.join(tree.root, CERTIFICATE_FILENAME) : path.join(options.outDir, `${skillName}.cert.json`));
+  const parsed     = parseCertificate(bytes); // before the write: a certificate that cannot be read back is never left on disk
   const written    = await writeFileAtomic(targetPath, bytes);
-  const parsed     = parseCertificate(bytes);
 
   return {
     path: written,
@@ -593,5 +593,6 @@ export async function approveSkill(options: {
     digest: tree.digest,
     certificateId: parsed.id,
     expiresAt,
+    notCovered: pathsNotCovered(tree.excluded),
   };
 }
