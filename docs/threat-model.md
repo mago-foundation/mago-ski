@@ -35,6 +35,18 @@ mago-ski answers one question: **is the Skill this agent is about to use the exa
 - **Files excluded from the digest** (`.skilldigestignore`, root `.git`) are not approved. The Pi host refuses to read them from a verified Skill, but other tools may still use them.
 - **Windows.** Not supported yet. Windows has no POSIX executable bit, so it cannot reproduce Linux and macOS digests; see the [digest spec](spec/skill-tree-v2.md).
 
+## Accepted risks
+
+Findings from security reviews that were kept on purpose. A review that raises one again should say what changed.
+
+| Risk | Why it is kept |
+|---|---|
+| **`verifySkill` reads `SKILL.md` twice** (once for the digest, once for the name), so a file swapped in between gives a different name | It fails closed: a name that does not match the certificate is refused. Discovery stops at the outer `SKILL.md`, whose digest covers any nested one |
+| **Gate: one user can spend the decision socket's rate limit for others** | Telling users apart needs the connecting process's credentials (`SO_PEERCRED`), which Node does not provide. Changing this means a native addon or a different socket design |
+| **Gate: revoked Skill generations stay readable on disk** until they are pruned | Sessions admitted before the revocation may still read them. Every new use is refused, in every mode |
+| **Gate: the host binary is matched by path, not by inode** | An inode check would refuse every host after a normal upgrade. A process that fakes the path can only be the user's own, which [What it does not protect against](#what-it-does-not-protect-against) already covers |
+| **Codex: a user can rename `~/.codex`** to get around `--lock-user-skill-folders` | Listed in the [Codex guide](hosts/codex.md#what-codex-leaves-to-your-organisation); `gate doctor` reports it. Preventing it needs control of the home directory, which the organisation has, not mago-ski |
+
 ## Revocation timing
 
 Revocation is not instant everywhere. A host acts on a revocation once it reads the updated list. Until then it accepts its current list for as long as that list is unexpired, so the list's lifetime (30 days by default, set with `--expires`) is the longest a revoked certificate can still pass. Shorten it for high-risk organizations and republish often (`revoke refresh`). The host state file stops a host from being moved back to an older list. In CI there is no state file; the Action reads the list from the protected base revision, so a revocation applies to pull requests once it is merged there. With `freshness` in a v2 policy, the bound drops to the timestamp's `max_lifetime` (24 hours by default): a host that is not given the new list stops trusting the old one when its timestamp expires.

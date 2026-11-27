@@ -256,6 +256,61 @@ test('root_events_after lets a host set up after a rotation start at the next ev
   assert.match(!short.ok ? short.reason : '', /fewer than root_events_after/u);
 });
 
+test('F-08: keys that left a role before root_events_after are refused, never trusted, and a pin they contradict is UNVERIFIABLE', async (t) => {
+  const org = await setupRecoveryOrg(t, { freshness: true });
+  const [a, b] = org.recovery as [Key, Key, Key];
+  const d = await org.key('d');
+  const e = await org.key('e');
+  const r1 = await org.key('r1');
+  const t1 = await org.key('t1');
+  const t2 = await org.key('t2');
+  await (await event(org, { action: 'rotate', signers: [a, b, d, e], newRoot: r1, newRecovery: [d, e], rotateThreshold: 2, revokeThreshold: 1, newTimestamp: t1 })).append();
+  await (await event(org, { action: 'rotate', signers: [d, e], newRoot: r1, newRecovery: [d, e], rotateThreshold: 2, revokeThreshold: 1, newTimestamp: t2, now: later(1) })).append();
+  await adoptTrustDocuments({ rootKeyPath: r1.priv, fromRootKeyId: org.root.keyId, trustRootPath: org.trustRoot, revocationsPath: org.revocations, now: later(2) });
+  // A host set up after both events pins r1, {d, e} and t2, and walks nothing.
+  await org.writePolicy({
+    root_fingerprint: r1.keyId, recovery: { key_ids: [d.keyId, e.keyId].sort(), rotate_threshold: 2, revoke_threshold: 1 }, root_events_after: 2,
+    state_file: 'state-new.json', freshness: undefined,
+  });
+  clearRootWalkCache();
+  assert.equal((await loadPolicyTrust(await org.policy(), later(3))).ok, true);
+  const forbidden = Object.fromEntries((await forbiddenApproverKeys(await org.policy(), later(3))).map((item) => [item.keyId, item.why]));
+  assert.equal(forbidden[r1.keyId], 'root', 'the active root is labelled root, not retired');
+  assert.equal(forbidden[org.root.keyId], 'retired');
+  assert.equal(forbidden[t1.keyId], 'retired');
+  assert.equal(forbidden[a.keyId], 'formerRecovery');
+  assert.equal(forbidden[b.keyId], 'formerRecovery');
+  assert.equal(forbidden[d.keyId], 'recovery');
+  // The host refuses a trust root that brings the old root back as an approver.
+  await addApprover({ rootKeyPath: r1.priv, trustRootPath: org.trustRoot, now: later(4), publicKeyPath: org.root.pub, name: 'Old root', scopes: ['*'], expires: '30d' });
+  const refused = await loadPolicyTrust(await org.policy(), later(5));
+  assert.equal(!refused.ok && refused.reason, `trust root lists approver ${org.root.keyId}, which has held the root or timestamp role; a key that left those roles never takes another`);
+  // A walked rotate cannot bring the old root or the old timestamp key back either.
+  const back = await event(org, { action: 'rotate', signers: [d, e], newRoot: org.root, newRecovery: [d, e], rotateThreshold: 2, revokeThreshold: 1, now: later(5) });
+  await assert.rejects(back.append(), /has left the root role and cannot return/u);
+  const asRecovery = await event(org, {
+    action: 'rotate', signers: [d, e, t1], newRoot: r1, newRecovery: [d, e, t1], rotateThreshold: 2, revokeThreshold: 1, now: later(5),
+  });
+  await assert.rejects(asRecovery.append(), /has held the root or timestamp role/u);
+  // A policy that pins a key the earlier events retired contradicts the log.
+  await org.writePolicy({ root_fingerprint: org.root.keyId, recovery: { key_ids: [d.keyId, e.keyId].sort(), rotate_threshold: 2, revoke_threshold: 1 }, root_events_after: 2 });
+  clearRootWalkCache();
+  const contradicted = await loadPolicyTrust(await org.policy(), later(6));
+  assert.match(!contradicted.ok ? contradicted.reason : '', /the events before root_events_after show key .* leaving the root or timestamp role, but the policy pins it as the root key/u);
+});
+
+test('F-08: an event before root_events_after that cannot be read makes the log UNVERIFIABLE', async (t) => {
+  const org = await setupRecoveryOrg(t);
+  const r1 = await org.key('r1');
+  const real = await event(org, { action: 'rotate', signers: [org.recovery[0]!, org.recovery[1]!], newRoot: r1 });
+  const envelope = JSON.parse(await readFile(real.out, 'utf8'));
+  const policy = await org.policy();
+  const start = { rootKeyId: r1.keyId, recovery: policy.recovery!.set, timestampKeyId: null, eventsAfter: 1 };
+  const payload = Buffer.from(JSON.stringify({ type: 'mago.root-event/v1' })).toString('base64');
+  assert.throws(() => walkRootEvents(rootEventLogBytes([{ ...envelope, payload }]), start, NOW), /^Error: root event 1 \(before root_events_after\): /u);
+  assert.throws(() => walkRootEvents(rootEventLogBytes([{ ...envelope, payloadType: 'text/plain' }]), start, NOW), /root event 1 \(before root_events_after\) has the wrong payload type/u);
+});
+
 test('an approver that is also a recovery key makes the trust root UNVERIFIABLE', async (t) => {
   const org = await setupRecoveryOrg(t);
   await addApprover({ rootKeyPath: org.root.priv, trustRootPath: org.trustRoot, now: T0, publicKeyPath: org.recovery[2]!.pub, name: 'Trustee C', scopes: ['*'], expires: '30d' });
