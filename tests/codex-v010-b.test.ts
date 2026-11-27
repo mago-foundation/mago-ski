@@ -95,7 +95,9 @@ for (const [index, hostile] of HOSTILE_DIRS.entries()) {
     const result = await s.emit('input', input('/skill:approved-skill go'), s.ctx);
     assert.deepEqual(result, { action: 'handled' });
     const everything = JSON.stringify([result, s.notices]);
-    assert.doesNotMatch(everything, /IGNORE ALL|previous instructions|<skill|passwd|-->/u);
+    for (const forbidden of ['IGNORE ALL', 'previous instructions', '<skill', 'passwd', '-->']) {
+      assert.ok(!everything.includes(forbidden), `hostile fragment ${JSON.stringify(forbidden)} leaked`);
+    }
     assert.match(s.notices.join('\n'), /certificate does not cover the path/u);
   });
 }

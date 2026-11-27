@@ -104,8 +104,15 @@ function main() {
   if (problem) { console.log(JSON.stringify({ ...plan, results: plan.scenarios.map((id) => ({ id, status: 'SKIP', reason: problem })) }, null, 2)); process.exitCode = 2; return; }
   const script = path.join(root, 'tests', 'live', `${opts.host}-gate.live.ts`);
   // In particular, never inherit MAGO_LIVE_NS or MAGO_LIVE_KEEP: the harness must create its own namespace and remove its temporary keys.
-  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin' };
-  for (const key of ['CODEX_BIN', 'CLAUDE_BIN', 'MAGO_LIVE_USER']) if (process.env[key]) env[key] = process.env[key];
+  const codexBin = process.env.CODEX_BIN;
+  const claudeBin = process.env.CLAUDE_BIN;
+  const liveUser = process.env.MAGO_LIVE_USER;
+  const env = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    ...(codexBin ? { CODEX_BIN: codexBin } : {}),
+    ...(claudeBin ? { CLAUDE_BIN: claudeBin } : {}),
+    ...(liveUser ? { MAGO_LIVE_USER: liveUser } : {}),
+  };
   const results = [];
   for (const [id, name] of scenarios[opts.host]) {
     if (!opts.json) process.stderr.write(`Running ${id}...\n`);
@@ -113,7 +120,7 @@ function main() {
     results.push(classify(opts.host, id, name, child));
   }
   const version = spawnSync(opts.host === 'codex' ? env.CODEX_BIN : (env.CLAUDE_BIN || executable('claude')), ['--version'], { encoding: 'utf8', timeout: 5000, env });
-  console.log(JSON.stringify({ ...plan, node: process.version, hostVersion: version.status === 0 ? version.stdout.trim().slice(0, 120) : 'unknown', hostUser: env.MAGO_LIVE_USER ?? 'root', results, cleanup: results.every((r) => r.status === 'PASS' || r.status === 'FAIL') ? 'Harness completed its cleanup for each scenario.' : 'Some runs were incomplete; check the disposable test machine for remaining temporary resources.' }, null, 2));
+  console.log(JSON.stringify({ ...plan, node: process.version, hostVersion: version.status === 0 ? version.stdout.trim().slice(0, 120) : 'unknown', hostUser: liveUser || 'root', results, cleanup: results.every((r) => r.status === 'PASS' || r.status === 'FAIL') ? 'Harness completed its cleanup for each scenario.' : 'Some runs were incomplete; check the disposable test machine for remaining temporary resources.' }, null, 2));
   if (results.some((r) => r.status !== 'PASS')) process.exitCode = results.some((r) => r.status === 'FAIL') ? 1 : 2;
 }
 

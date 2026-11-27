@@ -4,13 +4,42 @@ import { lstat, open, realpath, rename, unlink, type FileHandle } from 'node:fs/
 import path from 'node:path';
 
 const noFollow                = fsConstants.O_NOFOLLOW ?? 0;
-// Never block in open(2) on a FIFO swapped in after the lstat check; the fstat below then rejects it.
+// Never block in open(2) on a FIFO; O_NONBLOCK lets open return (or fail with ENXIO) and fstat rejects non-regular files.
 const nonBlock                = fsConstants.O_NONBLOCK ?? 0;
 const DEFAULT_MAX_READ_BYTES  = 1024 * 1024;
 const READ_CHUNK_BYTES        = 64 * 1024;
 const DEFAULT_FILE_MODE       = 0o644;
 const DEFAULT_LOG_MODE        = 0o600;
 const TEMP_RANDOM_BYTES       = 6;
+
+function isNonRegularOpenError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'ELOOP' || code === 'EISDIR' || code === 'ENXIO' || code === 'EOPNOTSUPP';
+}
+
+async function openRegularHandle(
+  filePath: string,
+  flags: number,
+  notRegularMessage: string,
+  mode?: number,
+): Promise<FileHandle> {
+  try {
+    return mode === undefined ? await open(filePath, flags) : await open(filePath, flags, mode);
+  } catch (error) {
+    if (isNonRegularOpenError(error)) {
+      throw new Error(notRegularMessage);
+    }
+    throw error;
+  }
+}
+
+export interface ReadOwnedRegularFileOptions {
+  maxBytes?: number;
+  uid: number;
+  disallowGroupOtherWrite?: boolean;
+  notRegularMessage?: string;
+  ownershipMessage?: string;
+}
 
 function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
@@ -36,61 +65,96 @@ export function isInside(root: string, candidate: string): boolean {
   );
 }
 
+async function readRegularHandle(
+  handle: FileHandle,
+  before: BigIntStats,
+  label: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  if (before.size > BigInt(maxBytes))
+    throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  while (total <= maxBytes) {
+    const remaining     = maxBytes + 1 - total;
+    const chunk         = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, remaining));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    if (bytesRead === 0)
+      break;
+    total += bytesRead;
+
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+
+  const after = await handle.stat({ bigint: true });
+  if (total > maxBytes || !sameFileVersion(before, after) || BigInt(total) !== after.size)
+    throw new Error(`${label} changed while being read or exceeds its size limit`);
+
+  return Buffer.concat(chunks, total);
+}
+
+async function openAndReadRegularFile(
+  filePath: string,
+  label: string,
+  maxBytes: number,
+  notRegularMessage: string,
+  validateStat?: (before: BigIntStats) => void,
+): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error(`Invalid maxBytes limit for ${label}`);
+  }
+
+  const handle = await openRegularHandle(
+    filePath,
+    fsConstants.O_RDONLY | noFollow | nonBlock,
+    notRegularMessage,
+  );
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile())
+      throw new Error(notRegularMessage);
+
+    validateStat?.(before);
+    return await readRegularHandle(handle, before, label, maxBytes);
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
- * Reads a regular, non-symlink file, failing if it changes while being read.
- * The type and size are checked before any content is read, and at most `maxBytes` (+1 to detect growth) are read.
+ * Reads a regular, non-symlink file without following symlinks on the final path component, failing if it changes
+ * while being read. Opens directly with `O_NOFOLLOW | O_NONBLOCK`, then checks the opened handle's type and size
+ * before reading at most `maxBytes` (+1 to detect growth).
  */
 export async function readRegularFile(
   filePath: string,
   label: string,
   maxBytes = DEFAULT_MAX_READ_BYTES,
 ): Promise<Buffer> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-    throw new Error(`Invalid maxBytes limit for ${label}`);
-  }
+  return await openAndReadRegularFile(filePath, label, maxBytes, `${label} must be a regular, non-symlink file`);
+}
 
-  const maxLimit  = BigInt(maxBytes);
-  const entry     = await lstat(filePath, { bigint: true });
-  if (entry.isSymbolicLink() || !entry.isFile()) {
-    throw new Error(`${label} must be a regular, non-symlink file`);
-  }
-  if (entry.size > maxLimit) {
-    throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
-  }
+/**
+ * Reads a regular, non-symlink file whose opened handle is owned by `options.uid` (and by default not writable by
+ * group or others), failing if it changes while being read.
+ */
+export async function readOwnedRegularFile(
+  filePath: string,
+  label: string,
+  options: ReadOwnedRegularFileOptions,
+): Promise<Buffer> {
+  const maxBytes          = options.maxBytes ?? DEFAULT_MAX_READ_BYTES;
+  const notRegularMessage = options.notRegularMessage ?? `${label} must be a regular, non-symlink file`;
+  const ownershipMessage  = options.ownershipMessage ?? `${label} must be owned by root and not writable by group or others`;
+  const checkMode         = options.disallowGroupOtherWrite ?? true;
 
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(filePath, fsConstants.O_RDONLY | noFollow | nonBlock);
-    const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || !sameFileIdentity(entry, before))
-      throw new Error(`${label} changed while being read`);
-
-    if (before.size > maxLimit)
-      throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
-
-    const chunks: Buffer[] = [];
-    let total = 0;
-
-    while (total <= maxBytes) {
-      const remaining     = maxBytes + 1 - total;
-      const chunk         = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, remaining));
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
-      if (bytesRead === 0)
-        break;
-      total += bytesRead;
-
-      chunks.push(chunk.subarray(0, bytesRead));
+  return await openAndReadRegularFile(filePath, label, maxBytes, notRegularMessage, (before) => {
+    if (before.uid !== BigInt(options.uid) || (checkMode && (before.mode & 0o022n) !== 0n)) {
+      throw new Error(ownershipMessage);
     }
-
-    const after = await handle.stat({ bigint: true });
-    if (total > maxBytes || !sameFileVersion(before, after) || BigInt(total) !== after.size)
-      throw new Error(`${label} changed while being read or exceeds its size limit`);
-
-
-    return Buffer.concat(chunks, total);
-  } finally {
-    await handle?.close();
-  }
+  });
 }
 
 /** Resolves a file path and requires it to be outside `root` (both canonicalized). */
@@ -300,28 +364,16 @@ export async function appendToRegularFile(
   label: string,
   mode = DEFAULT_LOG_MODE,
 ): Promise<void> {
-  const target = path.resolve(filePath);
-  const flags  = fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | noFollow | nonBlock;
-  let existing: BigIntStats | undefined;
+  const target            = path.resolve(filePath);
+  const flags             = fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | noFollow | nonBlock;
+  const notRegularMessage = `${label} must be a regular, non-symlink file`;
+  const handle            = await openRegularHandle(target, flags, notRegularMessage, mode);
 
-  try {
-    existing = await lstat(target, { bigint: true });
-    if (existing.isSymbolicLink() || !existing.isFile())
-      throw new Error(`${label} must be a regular, non-symlink file`);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT')
-      throw error;
-  }
-
-  const handle = await open(target, flags, mode);
   try {
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile())
-      throw new Error(`${label} must be a regular file`);
-    
-    if (existing && !sameFileIdentity(existing, opened))
-      throw new Error(`${label} changed while being opened`);
-    
+      throw new Error(notRegularMessage);
+
     await handle.appendFile(text, 'utf8');
   } finally {
     await handle.close();

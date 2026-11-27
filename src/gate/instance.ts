@@ -1,9 +1,9 @@
 // One gate instance per host (design docs/design/gate-cli.md, section 1, G1, G7). This module is the single place that knows
 // where an instance keeps its files, what its config file holds and how that maps to the service's own config.
-import { lstat, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { isRecord } from '../canonical-json.ts';
+import { readOwnedRegularFile } from '../fs-safe.ts';
 import { validateKeyId } from '../keys.ts';
 import type { Mode } from '../policy.ts';
 import { MODES } from './contract.ts';
@@ -122,11 +122,12 @@ export function parseInstanceConfig(raw: unknown): InstanceConfig {
 
 /** Reads the instance config. It must be a regular file owned by `rootUid` and not writable by group or others. */
 export async function readInstanceConfig(file: string, rootUid = 0): Promise<InstanceConfig> {
-  const info = await lstat(file);
-  if (!info.isFile()) throw new Error(`${file} must be a regular file`);
-  if (info.uid !== rootUid || (info.mode & 0o022) !== 0) throw new Error(`${file} must be owned by root and not writable by group or others`);
-  // nosemgrep: mago-no-raw-read-of-signed-input -- the instance config, checked just above as root-owned and not writable by others
-  return parseInstanceConfig(parseStrictJson(await readFile(file)));
+  const bytes = await readOwnedRegularFile(file, file, {
+    uid: rootUid,
+    notRegularMessage: `${file} must be a regular file`,
+    ownershipMessage: `${file} must be owned by root and not writable by group or others`,
+  });
+  return parseInstanceConfig(parseStrictJson(bytes));
 }
 
 /** The service's own config for an instance. */

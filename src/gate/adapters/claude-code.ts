@@ -25,9 +25,10 @@
 // source says enforce (decideAction additionally never lets a service answer downgrade it).
 // The adapter reads no environment variables. The config, its socket directory and the socket must be owned by root
 // (uid 0); argv cannot change that (tests inject a uid through HookDeps via their own entry point).
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { isRecord } from '../../canonical-json.ts';
+import { readOwnedRegularFile } from '../../fs-safe.ts';
 import { validateSkillName } from '../../names.ts';
 import type { Mode } from '../../policy.ts';
 import { decideAction, type GateRequest } from '../contract.ts';
@@ -71,10 +72,12 @@ const notApproved = (verdict: string): string =>
 /** Strict, closed config: root-owned in production (a deployment requirement; here only "not group/other writable"). */
 export async function loadConfig(file: string, rootUid = 0, extraKeys: readonly string[] = []): Promise<HookConfig> {
   if (!path.isAbsolute(file)) throw new Error('config path must be absolute');
-  const st = await lstat(file);
-  if (!st.isFile() || (st.mode & 0o022) !== 0 || st.uid !== rootUid) throw new Error('config must be a regular, root-owned, non-writable file');
-  // nosemgrep: mago-no-raw-read-of-signed-input -- the hook config, checked just above as a root-owned regular file that only root can write
-  const raw = parseStrictJson(await readFile(file));
+  const msg = 'config must be a regular, root-owned, non-writable file';
+  const raw = parseStrictJson(await readOwnedRegularFile(file, 'config', {
+    uid: rootUid,
+    notRegularMessage: msg,
+    ownershipMessage: msg,
+  }));
   if (!isRecord(raw)) throw new Error('config must be an object');
   const allowed = ['v', 'socket', 'mode', 'host_exes', 'client_deadline_ms', 'self_deadline_ms', ...extraKeys];
   if (Object.keys(raw).some((k) => !allowed.includes(k)) || raw['v'] !== 1) throw new Error('config has unknown fields or version');
