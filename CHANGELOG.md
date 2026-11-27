@@ -146,7 +146,8 @@ First release, published to npm as `@mago-foundation/mago-ski`.
 - Specifications, threat model, test vectors for other implementations, and demos.
 - Linux and macOS support. Windows is not supported in 0.1.
 
-[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mago-foundation/mago-ski/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mago-foundation/mago-ski/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mago-foundation/mago-ski/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mago-foundation/mago-ski/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mago-foundation/mago-ski/compare/v0.1.0...v0.2.0
