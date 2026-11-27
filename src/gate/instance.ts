@@ -125,6 +125,7 @@ export async function readInstanceConfig(file: string, rootUid = 0): Promise<Ins
   const info = await lstat(file);
   if (!info.isFile()) throw new Error(`${file} must be a regular file`);
   if (info.uid !== rootUid || (info.mode & 0o022) !== 0) throw new Error(`${file} must be owned by root and not writable by group or others`);
+  // nosemgrep: mago-no-raw-read-of-signed-input -- the instance config, checked just above as root-owned and not writable by others
   return parseInstanceConfig(parseStrictJson(await readFile(file)));
 }
 

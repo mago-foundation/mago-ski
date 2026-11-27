@@ -142,7 +142,7 @@ test('enforce: a verified file swapped after verification is blocked on read', a
   await h.prompt('read it');
   const results = h.toolResults();
   assert.doesNotMatch(results, /SWAPPED-CONTENT/u);
-  assert.match(results, /changed after verification/u);
+  assert.match(results, /changed since approval|changed after verification/u); // the whole Skill is re-checked before the read
 });
 
 test('enforce: bash referencing an unverified Skill and edits to an approved Skill are blocked', async (t) => {

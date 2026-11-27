@@ -1,0 +1,6 @@
+# zizmor configuration (the sast workflow). Each exception says why it is safe.
+rules:
+  adhoc-packages:
+    ignore:
+      # The release smoke test installs the tarball the same job just built and checksummed, to test what is published.
+      - release.yml

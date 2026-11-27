@@ -178,3 +178,30 @@ test('003-H: grep stays allowed when the in-tree certificate is the one that ver
   await s.run();
   assert.equal(await s.tool('grep', { pattern: 'REF', path: s.approved }), undefined);
 });
+
+test('a policy that was named but is missing blocks Skills; a missing default policy does not', async (t) => {
+  const root = await tempDir(t, 'mago-ski-skills-');
+  const dir = await writeSkill(root, 'some-skill');
+  const { api, emit } = fakePi();
+  createMagoSkiExtension({ policyPath: path.join(root, 'no-such-policy.json') })(api as never);
+  const notes: string[] = [];
+  const ctx = { cwd: root, hasUI: true, ui: { notify(m: string) { notes.push(m); }, setStatus() {} } };
+  const event = { systemPromptOptions: { skills: [{ name: 'some-skill', filePath: path.join(dir, 'SKILL.md'), baseDir: dir }] } };
+  await emit('before_agent_start', event, ctx);
+  assert.deepEqual(event.systemPromptOptions.skills, []); // nothing is advertised: the setup is broken, not absent
+  assert.match(notes.join('\n'), /cannot load policy .*no-such-policy\.json.*Blocking all Skills/su);
+});
+
+test('a relative shell path to an unverified Skill is blocked; read re-checks the whole Skill', async (t) => {
+  const s = await setup(t);
+  await s.run();
+  const blocked = await s.tool('bash', { command: 'cat unapproved-skill/SKILL.md' }); // relative to the working directory
+  assert.equal(blocked?.block, true);
+  assert.equal(await s.tool('bash', { command: 'cat approved-skill/SKILL.md' }), undefined);
+  assert.equal(await s.tool('read', { path: path.join(s.approved, 'ref.md') }), undefined);
+  // another file of the Skill changes after the run started: a read of an unchanged file is stopped too
+  await writeFile(path.join(s.approved, 'SKILL.md'), '---\nname: approved-skill\ndescription: changed\n---\nchanged\n');
+  const read = await s.tool('read', { path: path.join(s.approved, 'ref.md') });
+  assert.equal(read?.block, true);
+  assert.match(read.reason, /UNAPPROVED_CHANGE/u);
+});

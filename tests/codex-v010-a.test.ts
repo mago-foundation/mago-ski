@@ -311,3 +311,10 @@ test('F4: a huge run after an age key prefix neither throws nor stalls, and a re
   assert.equal(containsPrivateKey(Buffer.from('age-secret-key-1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce')), true);
   assert.equal(containsPrivateKey(Buffer.from('AGE-SECRET-KEY-1SHORT')), false);
 });
+
+test('write targets that differ only in case are the same file on macOS', async () => {
+  const { samePath } = await import('../src/policy.ts');
+  assert.equal(samePath('/p/state.json', '/p/STATE.JSON', 'darwin'), true);
+  assert.equal(samePath('/p/state.json', '/p/STATE.JSON', 'linux'), false);
+  assert.equal(samePath('/p/a', '/p/a', 'linux'), true);
+});

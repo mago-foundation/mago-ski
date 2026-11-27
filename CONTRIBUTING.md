@@ -34,8 +34,25 @@ bash examples/demo.sh
 | `npm run build` | Compiles to `dist/` (what the published package ships) |
 | `node src/cli.ts --help` | Runs the CLI from source |
 | `node scripts/vectors.ts --write` | Regenerates `tests/vectors/` after a format change |
+| `npm run sast` | Semgrep with mago-ski's own rules (`.semgrep.yml`). Needs the `semgrep` command |
 
 One test needs the official, checksum-pinned Cosign v3.1.3 binary and is skipped without it: set `MAGO_COSIGN_BIN` to run it.
+
+### Static analysis
+
+The `sast` workflow runs on every pull request and must be green, like the tests:
+
+- **Semgrep** with mago-ski's own rules in [`.semgrep.yml`](.semgrep.yml) and the community TypeScript, Node.js and Actions rules. The project rules encode how this code base must do things: trust-carrying files are read with `readRegularFile`, ownership and modes inside folders a user controls are set on open handles, renderer text never goes through HTML, child processes never use a shell, workflow command properties are escaped.
+- **CodeQL** (`security-extended`) for the TypeScript sources and the workflows. Its findings appear under the repository's code scanning alerts.
+- **zizmor** for the workflows and `action.yml`, configured in [`.github/zizmor.yml`](.github/zizmor.yml).
+
+Run the project rules before you push with `npm run sast` (install Semgrep with `pipx install semgrep`), or without installing it:
+
+```bash
+docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep semgrep scan --config .semgrep.yml --error --metrics=off --timeout 60
+```
+
+A finding that is safe for a reason the rule cannot see gets a comment on the line before it, `// nosemgrep: <rule-id> -- <the reason>`, so the reason is reviewed with the code. Semgrep is not part of `npm run check`: `check` also runs before publishing, and it needs only Node.js.
 
 ### Testing the installed package
 

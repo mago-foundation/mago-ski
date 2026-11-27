@@ -187,7 +187,9 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
         }
         policy = await loadPolicy(policyPath);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        // No policy at the default place means mago-ski is not set up here. A policy that was named (the option, or
+        // MAGO_SKI_POLICY) and is missing is a broken setup: a mistyped path must not switch checking off.
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' && explicit === undefined) {
           if (ctx.hasUI) ctx.ui.notify(`mago-ski: no policy at ${policyPath}; Skills are not being checked`, 'warning');
           return;
         }
@@ -322,7 +324,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
      * a line is kept only if it names something that exists under `root` and is not in an unverified
      * Skill. Returns null when nothing had to be removed.
      */
-    async function filterListing(text: string, root: string, unverified: Entry[]): Promise<{ text: string; list: string; removed: number } | null> {
+    async function filterListing(text: string, root: string, unverified: Entry[], hit: Set<Entry>): Promise<{ text: string; list: string; removed: number } | null> {
       const notice = /\n\n(\[(?:\d+ (?:results|entries) limit reached(?:\. Use limit=\d+ for more(?:, or refine pattern)?)?|[\d.]+KB limit reached)(?:\. [\d.]+KB limit reached)?\])$/u.exec(text);
       const body = notice ? text.slice(0, notice.index) : text;
       if (body === '(empty directory)' || body === 'No files found matching pattern') return null;
@@ -335,7 +337,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
           try {
             await lstat(abs);
             const real = await canonical(abs);
-            inSkill = unverified.some((entry) => dirsOf(entry).some((dir) => isInside(dir, abs) || isInside(dir, real)));
+            for (const entry of unverified) if (dirsOf(entry).some((dir) => isInside(dir, abs) || isInside(dir, real))) { inSkill = true; hit.add(entry); }
           } catch {
             inSkill = true; // not a real path (part of a name with a newline) or unreadable: do not pass it on
           }
@@ -356,11 +358,21 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       return enforcing() ? { block: true, reason: `mago-ski: Skill "${entry.name}" ${verdict}: ${reason}` } : undefined;
     }
 
-    async function checkShell(toolName: string, command: string): Promise<Block> {
+    /** The spellings of Skill directories a command could use: absolute, `~/...`, and relative to the working directory. */
+    function shellForms(dirs: Iterable<string>, cwd: string): Set<string> {
+      const forms = new Set(dirs);
+      for (const dir of [...forms]) {
+        if (dir.startsWith(homedir())) forms.add(`~${dir.slice(homedir().length)}`);
+        const relative = path.relative(cwd, dir);
+        if (relative !== '' && !path.isAbsolute(relative)) forms.add(relative);
+      }
+      return forms;
+    }
+
+    async function checkShell(toolName: string, command: string, cwd: string): Promise<Block> {
       // Best-effort: shell commands can reach files in ways a string match cannot see.
       for (const entry of [...entries]) {
-        const forms = new Set([...dirsOf(entry), entry.baseDir]);
-        for (const dir of [...forms]) if (dir.startsWith(homedir())) forms.add(`~${dir.slice(homedir().length)}`);
+        const forms = shellForms([...dirsOf(entry), entry.baseDir], cwd);
         if (![...forms].some((form) => command.includes(form))) continue;
         const current = entry.result.verdict === 'VERIFIED' ? await reverify(entry) : entry;
         if (current.result.verdict !== 'VERIFIED') {
@@ -426,12 +438,16 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
 
       const unverified = inside.find((entry) => entry.result.verdict !== 'VERIFIED');
       if (unverified) return await judge(unverified, `tool:${toolName}`, unverified.result.verdict, unverified.result.reason);
-      const entry = inside[0];
+      let entry = inside[0];
       if (!entry) return undefined;
       if (toolName === 'edit' || toolName === 'write') {
         return await judge(entry, `tool:${toolName}`, 'UNAPPROVED_CHANGE', 'changing an approved Skill would invalidate its certificate');
       }
       if (toolName !== 'read') return undefined; // find and ls show names, not contents
+      // Like the shell, grep and /skill: paths: the whole Skill and its trust are checked again, so a revocation, an expiry
+      // or a change to another file of the Skill since the run started also stops a read.
+      entry = await reverify(entry);
+      if (entry.result.verdict !== 'VERIFIED') return await judge(entry, 'tool:read', entry.result.verdict, entry.result.reason);
       const opened = piReadTarget(piPath);
       const resolved = await canonical(opened).catch(() => opened);
       if (!isInside(entry.realDir, resolved)) {
@@ -455,8 +471,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       const reason = 'mago-ski: Skill verification failed earlier in this run; Skill files are blocked until it succeeds';
       if (SHELL_TOOLS.has(toolName)) {
         const command = String(input.command ?? '');
-        const forms = new Set(knownDirs);
-        for (const dir of knownDirs) if (dir.startsWith(homedir())) forms.add(`~${dir.slice(homedir().length)}`);
+        const forms = shellForms(knownDirs, cwd);
         return [...forms].some((form) => command.includes(form)) ? { block: true, reason } : undefined;
       }
       const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
@@ -486,7 +501,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
         // Pi lists each Skill's path to the model; a verified Skill whose path is not plainly spelled stays out of the list.
         const unsafe = new Set<string>();
         for (const entry of checked) {
-          const problem = promptPathProblem(entry.filePath, [ctx.cwd, homedir()]);
+          const problem = promptPathProblem(entry.filePath, [ctx.cwd, homedir()]) ?? promptPathProblem(entry.baseDir, [ctx.cwd, homedir()]);
           if (!problem || entry.result.verdict !== 'VERIFIED') continue;
           unsafe.add(entry.lexDir);
           if (!reportedPaths.has(entry.lexDir)) {
@@ -551,22 +566,26 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       const input = event.input as Record<string, unknown>;
       const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
       const { targets, piPath } = await toolTargets(event.toolName, rawPath, ctx.cwd);
-      const unverified = contained(targets).filter((entry) => entry.result.verdict !== 'VERIFIED');
+      // Every unverified Skill, not only those below the searched directory: a link inside it can lead to one elsewhere.
+      const unverified = entries.filter((entry) => entry.result.verdict !== 'VERIFIED');
       if (unverified.length === 0) return undefined;
+      const hit = new Set<Entry>();
+      const below = new Set(contained(targets));
 
       const content = [...event.content];
       let list: string | undefined;
       let removed = 0;
       for (const [index, item] of content.entries()) {
         if (item.type !== 'text') continue;
-        const filtered = await filterListing(item.text, piPath, unverified);
+        const filtered = await filterListing(item.text, piPath, unverified, hit);
         if (!filtered) continue;
         content[index] = { ...item, text: filtered.text };
         list = filtered.list;
         removed += filtered.removed;
       }
       if (removed === 0) return undefined;
-      for (const entry of unverified) await judge(entry, `tool:${event.toolName}`, entry.result.verdict, entry.result.reason);
+      // Lines hidden for another reason (not a real path) are attributed to the unverified Skills below the searched directory.
+      for (const entry of unverified) if (hit.has(entry) || (hit.size === 0 && below.has(entry))) await judge(entry, `tool:${event.toolName}`, entry.result.verdict, entry.result.reason);
       if (!enforcing()) return undefined;
       // The truncation record in `details` carries the unfiltered text too.
       const details = event.details as { truncation?: Record<string, unknown> } | undefined;
@@ -583,7 +602,7 @@ export function createMagoSkiExtension(options: MagoSkiPiOptions = {}) {
       if (!SHELL_TOOLS.has(toolName) && !FILE_TOOLS.has(toolName)) return undefined;
       if (failedClosed && enforcing()) return await latchBlock(toolName, input, ctx.cwd);
       if (entries.length === 0) return undefined;
-      if (SHELL_TOOLS.has(toolName)) return await checkShell(toolName, typeof input.command === 'string' ? input.command : '');
+      if (SHELL_TOOLS.has(toolName)) return await checkShell(toolName, typeof input.command === 'string' ? input.command : '', ctx.cwd);
       const rawPath = typeof input.path === 'string' && input.path !== '' ? input.path : '.';
       return await checkFileTool(toolName, rawPath, ctx.cwd);
     });

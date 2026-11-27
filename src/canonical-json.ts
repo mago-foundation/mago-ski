@@ -92,6 +92,18 @@ export function canonicalBytes(value: unknown): Buffer {
   return Buffer.from(serializeCanonicalJson(value), 'utf8');
 }
 
+/**
+ * canonicalBytes for a document that will be read back with parseCanonicalJsonBytes: refuses bytes the reader would refuse
+ * for size. A signed document must not be written when no verifier can load it (a revocation list that grew too large
+ * would otherwise replace a working one and block every host).
+ */
+export function readableCanonicalBytes(value: unknown, label: string): Buffer {
+  const bytes = canonicalBytes(value);
+  if (bytes.byteLength > MAX_CANONICAL_JSON_BYTES)
+    throw new Error(`${label} would be ${bytes.byteLength} bytes; the limit for a document is ${MAX_CANONICAL_JSON_BYTES} bytes. Nothing was written`);
+  return bytes;
+}
+
 export function parseCanonicalJsonBytes(input: Uint8Array, label = 'JSON document'): unknown {
   let text: string;
   let value: unknown;

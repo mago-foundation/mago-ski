@@ -13,6 +13,7 @@ import { collectSkillTree, type SkillTree } from '../../../src/tree-digest.ts';
 import { resolveSkillName, unverifiable, VERDICTS, type VerificationResult } from '../../../src/verify.ts';
 import { defaultRoots, readHost, type HostSnapshot } from './host.ts';
 import { isSafeRelativePath, Store, type DiscoveryRoot, type PersistedState, type SkillInstance } from './store.ts';
+import { hasHidden } from '../i18n/dialog-safe.ts';
 import { diffLines } from './textdiff.ts';
 import type {
   ActionResult, Baseline, ChangeView, CheckEvent, DiscoveryRootView, FileChangeView, FileRecord, HistoryEvent,
@@ -77,7 +78,6 @@ export function displayName(name: string): string {
   return clean || '(unnamed)';
 }
 
-const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u;
 
 export function observationState(instance: SkillInstance): ObservationState {
   if (instance.presence === 'missing') return 'missing';
@@ -527,6 +527,7 @@ export class ObservationService extends EventEmitter {
         if (!isSafeRelativePath(file.path) || !isInside(dir, target) || target === dir) throw new Error(`unsafe recorded path ${JSON.stringify(file.path)}`);
         await mkdir(path.dirname(target), { recursive: true });
         await writeNewFile(target, bytes, 0o600);
+        // nosemgrep: mago-no-path-chown-chmod -- a file this process just created with O_EXCL in its own fresh mkdtemp folder
         await chmod(target, file.exec ? 0o700 : 0o600);
       }
       return { dir, bytes: written };
@@ -589,7 +590,7 @@ export class ObservationService extends EventEmitter {
           lines = diffLines(oldText, newText);
           if (!lines) note = 'Too large or too different to show line by line.';
           else if (!lines.some((l) => l.kind === 'add' || l.kind === 'del')) note = 'Only line endings or the final newline changed; the bytes differ.';
-          else if (lines.some((l) => l.kind === 'add' && INVISIBLE.test(l.text))) note = 'Added lines contain invisible or bidirectional control characters, shown as ⟨U+…⟩.';
+          else if (lines.some((l) => l.kind === 'add' && hasHidden(l.text))) note = 'Added lines contain invisible or bidirectional control characters, shown as ⟨U+…⟩.';
         }
         files.push({
           path: change.path, change: change.change, execBefore: change.exec_before, execAfter: change.exec_after,

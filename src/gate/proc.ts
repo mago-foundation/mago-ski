@@ -27,9 +27,20 @@ export async function bootId(): Promise<string> {
 
 /** Milliseconds since boot (CLOCK_BOOTTIME, so suspend counts and wall-clock steps do not matter). */
 export async function bootMs(): Promise<number> {
-  const first = (await readFile('/proc/uptime', 'utf8')).split(' ')[0] ?? '';
-  if (!/^\d+\.\d+$/u.test(first)) throw new Error('unexpected /proc/uptime format');
-  return Math.floor(Number(first) * 1000);
+  return parseUptimeMs(await readFile('/proc/uptime', 'utf8'));
+}
+
+/**
+ * The first field of /proc/uptime (`seconds.hundredths`) in milliseconds, with integer arithmetic. `Number("2.01") * 1000`
+ * is 2009.9999999999998, which floors to 2009: one millisecond before the same instant as processFacts computes it from
+ * clock ticks. A host that asked in the tick it started in was then refused as "started in the future".
+ */
+export function parseUptimeMs(text: string): number {
+  const m = /^(\d+)\.(\d+)$/u.exec(text.split(' ')[0] ?? '');
+  if (!m) throw new Error('unexpected /proc/uptime format');
+  const ms = Number(m[1]) * 1000 + Number(m[2]!.padEnd(3, '0').slice(0, 3));
+  if (!Number.isSafeInteger(ms)) throw new Error('unexpected /proc/uptime format');
+  return ms;
 }
 
 /**

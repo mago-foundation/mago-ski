@@ -454,8 +454,10 @@ export async function adoptTrustDocuments(options: {
   const root = await loadPrivateKey(options.rootKeyPath);
   if (root.keyId === options.fromRootKeyId)
     throw new Error('The new root key is the same as the current one; nothing to adopt');
-  const currentTrust = readTrustRootForUpdate(await readRegularFile(options.trustRootPath, 'Trust root', 4 * 1024 * 1024), options.fromRootKeyId);
-  const currentList  = readRevocationsForUpdate(await readRegularFile(options.revocationsPath, 'Revocation list', 8 * 1024 * 1024), options.fromRootKeyId, currentTrust.root.publicKey);
+  const trustRead    = await readRegularFile(options.trustRootPath, 'Trust root', 4 * 1024 * 1024);
+  const listRead     = await readRegularFile(options.revocationsPath, 'Revocation list', 8 * 1024 * 1024);
+  const currentTrust = readTrustRootForUpdate(trustRead, options.fromRootKeyId);
+  const currentList  = readRevocationsForUpdate(listRead, options.fromRootKeyId, currentTrust.root.publicKey);
   if (currentTrust.approvers.some((approver) => approver.keyId === root.keyId))
     throw new Error('The new root key is listed as an approver; remove it first');
   const issuedAt = truncateToSecond(options.now);
@@ -475,8 +477,9 @@ export async function adoptTrustDocuments(options: {
   };
   const trustBytes = signTrustRoot(trustRoot, root.privateKey);
   const listBytes  = signRevocations(revocations, root.privateKey);
-  await writeFileAtomic(options.trustRootPath, trustBytes);
-  await writeFileAtomic(options.revocationsPath, listBytes);
+  // Each file is replaced only if it is still the one that was read and re-signed (like every other root write).
+  await writeFileAtomic(options.trustRootPath, trustBytes, undefined, { expectSha256: `sha256:${sha256Hex(trustRead)}` });
+  await writeFileAtomic(options.revocationsPath, listBytes, undefined, { expectSha256: `sha256:${sha256Hex(listRead)}` });
   return { trustRoot, trustRootVersion: trustRoot.version, revocationsVersion: revocations.version };
 }
 

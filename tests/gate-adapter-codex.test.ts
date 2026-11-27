@@ -150,6 +150,8 @@ test('codex hook: real service; mentions, bash, revoke', { skip: LINUX_ONLY }, a
   denied(await run(bash('cat ~/.agents/skills/rogue/SKILL.md')), MSG_NOT_ADMIN);
   denied(await run(bash('ls ./.codex/skills')), MSG_NOT_ADMIN);
   silent(await run(bash(`cat ${r.admin}/alpha/SKILL.md`)));
+  // the admin root in another case is another path: neither removed as "the admin Skill's own file" nor left unchecked
+  denied(await run(bash(`cat ${path.join(path.dirname(r.admin), path.basename(r.admin).toUpperCase())}/alpha/SKILL.md`)), MSG_NOT_ADMIN);
   silent(await run(bash('ls -la && echo hi')));
   silent(await run(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { x: 1 } })));
   await revoke(alpha);
