@@ -4,6 +4,11 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Security
+
+- **Keys that left a role before `root_events_after` are now refused** (F-08). A host set up after a rotation reads the events before its starting point without checking them, and uses them only to refuse: the keys they show leaving the root, timestamp or recovery role can no longer be approvers or take a role in a later event. A policy that pins a key those events retired is `UNVERIFIABLE`, as is an event there that does not parse. The [root recovery spec](docs/spec/root-recovery-v1.md#walking-the-log) is updated.
+- The [threat model](docs/threat-model.md#accepted-risks) lists the review findings that are kept on purpose, and why.
+
 ## [0.4.0] - 2026-11-17
 
 ### Added
