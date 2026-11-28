@@ -113,6 +113,7 @@ mago-ski 0.4 supports **Linux and macOS** (Node.js 22.23.4, 24.22.1 or 26.12.1 o
 | Host | What it does | Docs |
 |---|---|---|
 | **Pi** | Extension, in enforce mode: unverified Skills are not advertised to the model, `/skill:` cannot load them, file tools refuse their files, and verified files are re-hashed on read | [docs/hosts/pi.md](docs/hosts/pi.md) |
+| **Skill check Action** (free, no keys) | For any Skill repository: fails when a Skill uses a website or runs commands that its [OWASP USF](https://github.com/OWASP/www-project-agentic-skills-top-10/blob/main/universal-skill-format.md) manifest in `SKILL.md` does not declare, and lists what a pull request adds | [docs/hosts/skill-check.md](docs/hosts/skill-check.md) |
 | **GitHub Actions** | In enforce mode, fails the check when a Skill found under the policy's `skill_dirs` lacks a valid certificate. Trust comes from the base revision, so a PR cannot approve itself | [docs/hosts/github-action.md](docs/hosts/github-action.md) |
 | **CLI** | `verify`, `verify-all`, `diff`, `digest`, `inspect` and `policy check`, plus the key, root, revoke and approve commands, and the root recovery commands (`recovery`, `root-events`, `timestamp`). Run `mago-ski --help` | |
 | **Claude Code and Codex** (Linux only) | The company gate (`mago-ski gate …`) installs approved Skills into an admin-owned folder and checks every use of a Skill. Tried with the real hosts in non-interactive sessions | [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md), [docs/capabilities.md](docs/capabilities.md), live test results for [Claude Code](docs/spikes/claude-code-gate-live.md) and [Codex](docs/spikes/codex-gate-live.md) |
@@ -165,7 +166,7 @@ Capability scanners such as SkilLock report what a Skill change does at pull-req
 - [Threat model](docs/threat-model.md): what is and is not protected
 - Specs: [tree digest](docs/spec/skill-tree-v2.md), [certificate](docs/spec/skill-certificate-v1.md), [trust documents and policy](docs/spec/trust-documents-v1.md), [verification order](docs/spec/verification.md), [root recovery](docs/spec/root-recovery-v1.md), [GUI administration rack](docs/spec/gui-admin-rack-v1.md) (draft)
 - [Test vectors](tests/vectors/) for other implementations
-- Hosts: [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md), [Pi](docs/hosts/pi.md), [GitHub Action](docs/hosts/github-action.md), [adapter interface](docs/hosts/adapter-interface.md)
+- Hosts: [Claude Code](docs/hosts/claude-code.md), [Codex](docs/hosts/codex.md), [Pi](docs/hosts/pi.md), [GitHub Action](docs/hosts/github-action.md), [Skill check Action](docs/hosts/skill-check.md), [adapter interface](docs/hosts/adapter-interface.md)
 - [Live scenario guide](scenarios/START-HERE.md): try the gate with Claude Code or Codex in an isolated Linux environment
 - [Pi interception spike](docs/phase1/pi-interception.md), [Claude Code interception spike](docs/spikes/claude-code-interception.md), gate live tests for [Claude Code](docs/spikes/claude-code-gate-live.md) and [Codex](docs/spikes/codex-gate-live.md)
 - [Security policy](SECURITY.md): how to report a vulnerability

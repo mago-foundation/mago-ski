@@ -4,6 +4,10 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Skill check Action (`uses: mago-foundation/mago-ski/check@…`), free and without keys: reads the OWASP Universal Skill Format v1.0 `permissions` and `requires` blocks from each `SKILL.md` frontmatter and fails when a Skill uses a website its `network.allow` does not cover, has scripts or shell code while `shell` is not `true`, or has no manifest. On pull requests it lists in plain words what the change adds. See [docs/hosts/skill-check.md](docs/hosts/skill-check.md).
+
 ## [0.4.1] - 2026-11-27
 
 Security fixes from an independent secure code review of 0.4.0. Upgrade every host, gate and CI workflow that uses mago-ski.
