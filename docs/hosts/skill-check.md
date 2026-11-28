@@ -81,7 +81,7 @@ A few YAML forms make readers disagree, or are accepted by some readers and refu
 
 ## On pull requests
 
-The summary also lists what the change adds compared with the base branch, in plain words: new websites used or declared, a switch to `shell: true`, new scripts, new programs in shell code, new files to read or write, files no longer protected from writes, and new tools. This list is for the reviewer and does not affect the result: pass or fail depends only on the pull request's own files. The base revision is checked out to the runner's temporary folder, outside the workspace. A repository that contains a `.mago-ski-check-base` path is refused, because the check reserves that path.
+The summary also lists what the change adds compared with the base branch, in plain words: new websites used or declared, a switch to `shell: true`, new scripts, new programs in shell code, new files to read or write, files no longer protected from writes, and new tools. This list is for the reviewer and does not affect the result: pass or fail depends only on the pull request's own files. The base revision is checked out directly to the runner's temporary folder, outside the workspace, without persisting credentials.
 
 ## Limits
 

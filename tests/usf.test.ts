@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, lstat, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
+import { buildBaseRepoUrl, checkoutBaseRevision, validateBaseSha } from '../hosts/github/check-base.ts';
 import { runSkillCheck } from '../hosts/github/check.ts';
 import { observeSkill } from '../src/profile.ts';
 import { checkSkill, describeAdditions, suggestedManifest } from '../src/usf-check.ts';
@@ -301,4 +305,96 @@ test('a symlinked Skill folder is not followed', async (t) => {
   const result = await runSkillCheck({ workspace, searchPath: 'skills' });
   assert.equal(result.exitCode, 1);
   assert.match(result.checks[0]!.problems[0]!, /could not be read: Skill root must be a real directory/u);
+});
+
+const execFileAsync = promisify(execFile);
+
+test('check-base validates SHAs and GitHub repository URLs', () => {
+  const sha1 = 'a'.repeat(40);
+  const sha256 = '0123456789abcdef'.repeat(4);
+  assert.equal(validateBaseSha(sha1), sha1);
+  assert.equal(validateBaseSha(sha256), sha256);
+  for (const badSha of [undefined, '', 'A'.repeat(40), 'a'.repeat(39), '--upload-pack=x', 'refs/heads/main']) {
+    assert.throws(() => validateBaseSha(badSha), /invalid pull request base revision/u);
+  }
+
+  assert.deepEqual(buildBaseRepoUrl('https://github.com', 'mago-foundation/mago-ski'), {
+    repoUrl: 'https://github.com/mago-foundation/mago-ski.git',
+    authScope: 'https://github.com',
+  });
+  assert.deepEqual(buildBaseRepoUrl('https://github.example.com/sub/', 'org.1/repo_2'), {
+    repoUrl: 'https://github.example.com/sub/org.1/repo_2.git',
+    authScope: 'https://github.example.com/sub',
+  });
+  for (const [server, repo] of [
+    [undefined, 'org/repo'],
+    ['http://github.com', 'org/repo'],
+    ['https://user:pass@github.com', 'org/repo'],
+    ['https://github.com?x=1', 'org/repo'],
+    ['https://github.com#frag', 'org/repo'],
+    ['https://github.com', undefined],
+    ['https://github.com', 'org'],
+    ['https://github.com', 'org/repo/extra'],
+    ['https://github.com', '../repo'],
+    ['https://github.com', 'org/-repo'],
+  ] as const) {
+    assert.throws(() => buildBaseRepoUrl(server, repo), /invalid GitHub/u);
+  }
+});
+
+test('check-base checks out an older base revision without persisting credentials and cleans up on error', async (t) => {
+  const root = await tempDir(t);
+  const work = path.join(root, 'work');
+  const bare = path.join(root, 'bare.git');
+  const dest = path.join(root, 'dest');
+  await mkdir(work);
+
+  const git = (cwd: string, ...args: string[]) => execFileAsync('git', ['-C', cwd, ...args]);
+  await git(work, 'init', '--quiet');
+  await git(work, 'config', 'user.name', 'Test User');
+  await git(work, 'config', 'user.email', 'test@example.com');
+  await writeSkill(path.join(work, 'skills'), 'demo', { 'SKILL.md': md('permissions:\n  shell: false\n', 'base body\n') });
+  await git(work, 'add', '.');
+  await git(work, 'commit', '--quiet', '-m', 'base commit');
+  const baseSha = (await git(work, 'rev-parse', 'HEAD')).stdout.trim();
+
+  await writeSkill(path.join(work, 'skills'), 'demo', { 'SKILL.md': md('permissions:\n  shell: true\n', 'head body\n') });
+  await git(work, 'add', '.');
+  await git(work, 'commit', '--quiet', '-m', 'head commit');
+
+  await execFileAsync('git', ['clone', '--quiet', '--bare', work, bare]);
+  await git(bare, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+
+  const secretToken = 'ghs_secret_test_token_value';
+  const out = await checkoutBaseRevision({
+    repoUrl: pathToFileURL(bare).href,
+    baseSha,
+    destination: dest,
+    token: secretToken,
+    authScope: 'https://github.com',
+  });
+  assert.equal(out, dest);
+  assert.equal((await git(dest, 'rev-parse', 'HEAD')).stdout.trim(), baseSha);
+  assert.match(await readFile(path.join(dest, 'skills', 'demo', 'SKILL.md'), 'utf8'), /base body/u);
+  const gitConfig = await readFile(path.join(dest, '.git', 'config'), 'utf8');
+  assert.equal(gitConfig.includes('extraheader'), false);
+  assert.equal(gitConfig.includes(secretToken), false);
+
+  await assert.rejects(
+    checkoutBaseRevision({
+      repoUrl: pathToFileURL(bare).href,
+      baseSha: '0'.repeat(40),
+      destination: dest,
+      token: secretToken,
+      authScope: 'https://github.com',
+    }),
+    (err: Error) => !err.message.includes(secretToken),
+  );
+  await assert.rejects(lstat(dest), { code: 'ENOENT' });
+});
+
+test('check/action.yml fetches the base revision via check-base.ts instead of actions/checkout', async () => {
+  const actionYml = await readFile(path.resolve(import.meta.dirname, '..', 'check', 'action.yml'), 'utf8');
+  assert.equal(actionYml.includes('actions/checkout'), false);
+  assert.match(actionYml, /hosts\/github\/check-base\.ts/u);
 });
