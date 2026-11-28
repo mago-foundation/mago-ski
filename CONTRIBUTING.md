@@ -106,7 +106,7 @@ Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `ci`, `build`.
 ## Code guidelines
 
 - **TypeScript only.** Strict mode, and only erasable syntax (no `enum`, `namespace` or parameter properties), so Node can run the sources without a build step. Import local files with their `.ts` extension.
-- **No runtime dependencies.** Use Node's standard library. Adding a dependency needs a strong reason and a maintainer's agreement; dev dependencies are fine when they serve tests or builds.
+- **One runtime dependency: `yaml`**, pinned exactly, so Skill frontmatter is read as other YAML readers read it. Otherwise use Node's standard library. Adding a dependency needs a strong reason and a maintainer's agreement; dev dependencies are fine when they serve tests or builds.
 - **Fail closed.** Anything that cannot be checked must end as `UNVERIFIABLE` (and block in enforce mode), never as `VERIFIED`. Error paths must not fail open.
 - **Treat inputs as hostile.** Skill trees, certificates, policy files, tool arguments in Pi, and anything in a pull request can be attacker-controlled. Validate exact fields, bound sizes, and avoid following symlinks unless the code says why.
 - **Keep secrets away from everything.** Private keys and tokens must never reach Skill trees, logs, decision records, output or the model.
@@ -140,7 +140,7 @@ A change is security-sensitive if it affects what counts as `VERIFIED`, what a h
 User-facing text (README, docs, CLI messages, Action metadata) must match what the code does:
 
 - Do not claim a certificate makes a Skill safe or benign. It records who approved which exact version.
-- Do not claim OWASP compliance, endorsement or "reference implementation" status, or USF metadata support.
+- Do not claim OWASP compliance, endorsement or "reference implementation" status. For USF, say only what the code does: mago-ski reads the `permissions` and `requires` blocks of USF v1.0 and checks them against the observed profile. It does not check `content_hash`, `signature` or the other USF fields.
 - Qualify enforcement: it applies in enforce mode, on supported hosts, within the limits in the threat model.
 - Do not claim support for hosts or platforms that are not supported yet.
 

@@ -95,7 +95,7 @@ function trimTrailingPunctuation(value: string): string {
   return value.slice(0, end);
 }
 
-function collectOrigins(contents: Map<string, Buffer>): {
+export function collectOrigins(contents: Map<string, Buffer>): {
   origins: string[];
   complete: boolean
 } {

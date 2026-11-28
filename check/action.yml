@@ -1,0 +1,91 @@
+name: mago-ski skill check
+
+description: >-
+  Free check for Skill repositories. Shows what each Skill's files contain (websites, scripts, shell code) and,
+  for Skills that declare their needs in an OWASP Universal Skill Format manifest, fails when the declaration
+  does not cover it. On pull requests it lists what the change adds. No keys or accounts needed.
+
+branding:
+  icon: check-square
+  color: blue
+
+inputs:
+  path:
+    description: Folder to search for Skills (folders with a SKILL.md), relative to the repository root.
+    required: false
+    default: .
+  require-manifest:
+    description: Fail Skills that do not declare their needs in an OWASP USF manifest. By default they pass and their profile is shown.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Check the runner platform
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        echo "::error title=mago-ski skill check::Windows runners are not supported yet. Use ubuntu or macos runners."
+        exit 2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22.23.4
+
+    # The one runtime dependency (yaml), installed from the lockfile with its integrity hash; no install scripts run.
+    - name: Install the check's dependency
+      shell: bash
+      env:
+        MAGO_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        npm ci --prefix "$MAGO_ACTION_PATH/.." --omit=dev --ignore-scripts --no-audit --no-fund
+
+    # The base checkout only feeds the "this change adds" list; the result depends on the pull request alone.
+    # actions/checkout can only write inside the workspace, so the base is checked out there and then moved out of it,
+    # and nothing in the workspace is ever skipped. A pull request that holds the reserved path is refused.
+    - name: Check the reserved base checkout path
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -e "$GITHUB_WORKSPACE/.mago-ski-check-base" || -L "$GITHUB_WORKSPACE/.mago-ski-check-base" ]]; then
+          echo "::error title=mago-ski skill check::the repository contains .mago-ski-check-base, a path this check reserves"
+          exit 2
+        fi
+
+    - name: Check out the base revision
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.event.pull_request.base.sha }}
+        path: .mago-ski-check-base
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Move the base checkout out of the workspace
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf -- "${RUNNER_TEMP:?}/mago-ski-check-base"
+        mv -- "$GITHUB_WORKSPACE/.mago-ski-check-base" "$RUNNER_TEMP/mago-ski-check-base"
+
+    - name: Check Skills
+      shell: bash
+      env:
+        MAGO_PATH: ${{ inputs.path }}
+        MAGO_REQUIRE_MANIFEST: ${{ inputs.require-manifest }}
+        MAGO_EVENT: ${{ github.event_name }}
+        MAGO_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        base=()
+        if [[ "$MAGO_EVENT" == pull_request || "$MAGO_EVENT" == pull_request_target ]]; then
+          base=("$RUNNER_TEMP/mago-ski-check-base")
+        fi
+        # Runs from this action's own checkout (pinned by the caller's `uses:` ref), never from the repository under review.
+        node "$MAGO_ACTION_PATH/../hosts/github/check.ts" "$GITHUB_WORKSPACE" "$MAGO_PATH" "$MAGO_REQUIRE_MANIFEST" ${base[@]+"${base[@]}"}

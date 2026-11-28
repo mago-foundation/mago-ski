@@ -1,4 +1,5 @@
-# Publishes @mago-foundation/mago-ski to npm when a version tag (v1.2.3) is pushed on main.
+# Publishes @mago-foundation/mago-ski to npm when a version tag is pushed on main: v1.2.3 becomes npm's `latest`,
+# a pre-release tag (v1.2.3-beta.1, -alpha.N, -rc.N) is published under `next` and marked as a GitHub pre-release.
 
 name: release
 
@@ -22,14 +23,15 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      dist_tag: ${{ steps.meta.outputs.dist_tag }}
       tarball: ${{ steps.pack.outputs.tarball }}
       sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - name: Validate the tag name
         shell: bash
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Release tag must look like v1.2.3, got: $RELEASE_TAG"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::Release tag must look like v1.2.3 or v1.2.3-beta.1 (alpha, beta, rc), got: $RELEASE_TAG"
             exit 1
           fi
 
@@ -77,6 +79,8 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A pre-release must never become what `npm install` gives by default.
+          if [[ "$version" == *-* ]]; then echo "dist_tag=next" >> "$GITHUB_OUTPUT"; else echo "dist_tag=latest" >> "$GITHUB_OUTPUT"; fi
 
       - name: Install development dependencies
         run: npm ci --ignore-scripts
@@ -159,7 +163,11 @@ jobs:
         shell: bash
         env:
           TARBALL: ${{ needs.build.outputs.tarball }}
-        run: npm publish "./release/$TARBALL" --provenance --access public
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$DIST_TAG" == latest || "$DIST_TAG" == next ]]
+          npm publish "./release/$TARBALL" --provenance --access public --tag "$DIST_TAG"
 
   github-release:
     needs: [build, publish]
@@ -179,8 +187,11 @@ jobs:
           TAG: ${{ env.RELEASE_TAG }}
           TARBALL: ${{ needs.build.outputs.tarball }}
           SHA256: ${{ needs.build.outputs.sha256 }}
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
         run: |
           set -euo pipefail
+          prerelease=()
+          if [[ "$DIST_TAG" == next ]]; then prerelease=(--prerelease --latest=false); fi
           notes="Published to npm with provenance: https://www.npmjs.com/package/$PACKAGE_NAME/v/${TAG#v}
 
           Tarball: \`$TARBALL\`
@@ -192,8 +203,9 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             # A release written by hand is kept as it is; only the published files are attached.
             gh release upload "$TAG" "release/$TARBALL" release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+            if [[ "$DIST_TAG" == next ]]; then gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --latest=false; fi
           else
             # No --generate-notes: PR titles can describe security fixes in more detail than the changelog.
             gh release create "$TAG" "release/$TARBALL" release/SHA256SUMS \
-              --repo "$GITHUB_REPOSITORY" --title "mago-ski $TAG" --notes "$notes" --verify-tag
+              --repo "$GITHUB_REPOSITORY" --title "mago-ski $TAG" --notes "$notes" --verify-tag ${prerelease[@]+"${prerelease[@]}"}
           fi
