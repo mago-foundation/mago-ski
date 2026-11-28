@@ -217,6 +217,14 @@ export async function verifyPublishedBy(skillDir: string, options: VerifyPublish
   // Cosign checks a private copy, and the statement is read from the same bytes: the file cannot change in between.
   const bytes = await readRegularFile(options.bundlePath, 'Sigstore bundle', MAX_BUNDLE_BYTES);
   const parts = bundleParts(parseJson(bytes, 'the Sigstore bundle'));
+  // Plain-words reasons for the common refusals, read before Cosign runs. Cosign still decides; these only explain.
+  if (!parts.statement.subject.some((subject) => subject?.digest?.sha256 === digestHex))
+    throw new Error(`the attestation is for other bytes: it does not name this Skill's digest ${mine.digest}`);
+  const claimed = fulcioIdentity(parts.certificate);
+  if (options.repository !== undefined && !(claimed.build_signer_uri ?? '').toLowerCase().startsWith(`https://github.com/${options.repository.toLowerCase()}/`))
+    throw new Error(`the attestation was signed by ${claimed.build_signer_uri ?? 'an unknown signer'}, not by a workflow of ${options.repository}`);
+  if (options.workflow !== undefined && !(claimed.build_signer_uri ?? '').includes(`/${options.workflow}@`))
+    throw new Error(`the attestation was signed by ${claimed.build_signer_uri ?? 'an unknown signer'}, not by ${options.workflow}`);
   const scratch = await mkdtemp(path.join(os.tmpdir(), 'mago-ski-bundle-'));
   try {
     const copy = path.join(scratch, 'bundle.json');
