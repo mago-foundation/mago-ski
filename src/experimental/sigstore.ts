@@ -164,3 +164,29 @@ export async function verifySigstoreBlob(options: {
   await runCosign(options.binaryPath, buildCosignVerifyArgs(bundle, trustedRoot, options.certificateIdentity, options.certificateOidcIssuer, payload), 60_000, verificationEnv(process.env));
   return { valid: true };
 }
+
+export function buildCosignVerifyAttestationArgs(options: {
+  bundlePath: string; trustedRootPath: string; digestHex: string; predicateType: string; identityRegexp: string; issuer: string;
+}): string[] {
+  return [
+    'verify-blob-attestation', '--bundle', options.bundlePath, '--trusted-root', options.trustedRootPath,
+    '--digest', options.digestHex, '--digestAlg', 'sha256', '--type', options.predicateType, '--check-claims=true',
+    '--certificate-identity-regexp', options.identityRegexp, '--certificate-oidc-issuer', options.issuer,
+  ];
+}
+
+/**
+ * Verifies an in-toto attestation in a Sigstore bundle for a subject known only by its sha256 digest, offline against
+ * the given trusted root: the signature, the certificate chain, the transparency-log proof, the signer identity and
+ * that the statement names this digest. The caller reads the statement from the same bundle bytes afterwards.
+ */
+export async function verifySigstoreAttestation(options: {
+  binaryPath: string; bundlePath: string; trustedRootPath: string; digestHex: string; predicateType: string; identityRegexp: string; issuer: string;
+}): Promise<{ valid: true }> {
+  const bundlePath = await requireRegularFile(options.bundlePath, 'Sigstore bundle');
+  const trustedRootPath = await requireRegularFile(options.trustedRootPath, 'Sigstore trusted root');
+  if (!/^[0-9a-f]{64}$/u.test(options.digestHex)) throw new Error('subject digest must be 64 lowercase hex characters');
+  if (!options.identityRegexp || !options.issuer) throw new Error('a certificate identity and OIDC issuer are required');
+  await runCosign(options.binaryPath, buildCosignVerifyAttestationArgs({ ...options, bundlePath, trustedRootPath }), 60_000, verificationEnv(process.env));
+  return { valid: true };
+}

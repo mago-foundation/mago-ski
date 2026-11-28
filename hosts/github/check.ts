@@ -16,6 +16,8 @@ export interface SkillCheckRunOptions {
   searchPath: string;
   /** Checkout of the pull request's base revision, when there is one. */
   baseRoot?: string;
+  /** Fail Skills without a readable USF manifest. */
+  requireManifest?: boolean;
 }
 
 export interface SkillCheckRun {
@@ -35,7 +37,7 @@ async function isDirectory(target: string): Promise<boolean> {
   }
 }
 
-export async function runSkillCheck({ workspace, searchPath, baseRoot }: SkillCheckRunOptions): Promise<SkillCheckRun> {
+export async function runSkillCheck({ workspace, searchPath, baseRoot, requireManifest = false }: SkillCheckRunOptions): Promise<SkillCheckRun> {
   const root = path.resolve(workspace);
   const additions = new Map<string, string[]>();
   const failed = (error: string): SkillCheckRun => ({
@@ -56,7 +58,7 @@ export async function runSkillCheck({ workspace, searchPath, baseRoot }: SkillCh
 
   const checks: SkillCheck[] = [];
   for (const skillDir of skillDirs) {
-    const check = await checkSkill(skillDir, root);
+    const check = await checkSkill(skillDir, root, { requireManifest });
     checks.push(check);
     if (baseRoot !== undefined) {
       const baseDir = path.join(path.resolve(baseRoot), check.dir);
@@ -67,7 +69,7 @@ export async function runSkillCheck({ workspace, searchPath, baseRoot }: SkillCh
   }
   for (const directory of tooDeep) {
     checks.push({
-      format: 'owasp.usf/v1.0', dir: path.relative(root, directory), ok: false, manifest: null, manifestError: null, usedHosts: [], undeclaredHosts: [], scripts: [],
+      format: 'owasp.usf/v1.0', dir: path.relative(root, directory), ok: false, profile: null, manifest: null, declared: false, manifestError: null, undeclaredHosts: [],
       problems: ['this folder is too deeply nested; Skills below it were not checked. Point the path input closer to the Skills'], notes: [],
     });
   }
@@ -76,23 +78,31 @@ export async function runSkillCheck({ workspace, searchPath, baseRoot }: SkillCh
   const ordered = [...failures, ...checks.filter((check) => check.ok)];
   const shown = ordered.slice(0, MAX_SUMMARY_ROWS);
   const lines = [
-    `### mago-ski skill check: ${checks.length - failures.length}/${checks.length} Skills match what they declare`,
+    `### mago-ski skill check: ${checks.length - failures.length}/${checks.length} Skills pass`,
     '',
-    '_Checks what each Skill declares in its OWASP Universal Skill Format manifest against what its files contain. It does not say a Skill is safe._',
+    '_Shows what each Skill\'s files contain, and, for Skills that declare their needs in an OWASP Universal Skill Format manifest, whether the declaration covers it. It does not say a Skill is safe._',
     '',
   ];
   for (const check of shown) {
     lines.push(`#### ${check.ok ? 'pass' : 'fail'}: ${markdownCell(check.dir)}`, '');
     for (const problem of check.problems) lines.push(`- ${markdownCell(problem)}`);
+    if (check.profile) {
+      const p = check.profile;
+      const none = (values: readonly string[]) => (values.length === 0 ? 'none' : values.slice(0, 20).join(', ') + (values.length > 20 ? ` and ${values.length - 20} more` : ''));
+      lines.push(`- Websites in its files: ${markdownCell(none(p.web_hosts))}`);
+      lines.push(`- Scripts and shell code: ${markdownCell(none(p.scripts.map((s) => `${s.path} (${s.reason})`)))}`);
+      if (p.programs.length > 0) lines.push(`- Programs named in shell code: ${markdownCell(none(p.programs))}`);
+      lines.push(`- Declared in USF: ${check.manifest ? 'yes' : check.declared ? 'unreadable' : 'no'}`);
+    }
     const added = additions.get(check.dir);
     if (added && added.length > 0) {
       lines.push('', 'This change:');
       for (const line of added) lines.push(`- ${markdownCell(line)}`);
     }
     for (const note of check.notes) lines.push(`- _note:_ ${markdownCell(note)}`);
-    if (!check.ok && check.manifestError === null && (check.manifest === null || check.undeclaredHosts.length > 0 || check.scripts.length > 0)) {
-      // Host names passed the URL parser and allow no backtick, so they cannot close this fence.
-      lines.push('', `A \`permissions\` block for the SKILL.md frontmatter that matches what was found (review it before you paste it):`, '', '```yaml', suggestedManifest(check), '```');
+    if ((check.profile !== null && !check.declared) || (!check.ok && check.manifest !== null)) {
+      // suggestedManifest lists only plain host names, which cannot close this fence.
+      lines.push('', `To declare what was found, add this to the SKILL.md frontmatter (review it first: it lists what the files contain, not what the Skill should be allowed to do):`, '', '```yaml', suggestedManifest(check), '```');
     }
     lines.push('');
   }
@@ -101,9 +111,9 @@ export async function runSkillCheck({ workspace, searchPath, baseRoot }: SkillCh
 }
 
 async function main(): Promise<void> {
-  const [workspace, searchPath, baseRoot] = process.argv.slice(2);
-  if (!workspace || !searchPath) throw new Error('usage: check.ts WORKSPACE PATH [BASE_ROOT]');
-  const result = await runSkillCheck({ workspace, searchPath, ...(baseRoot ? { baseRoot } : {}) });
+  const [workspace, searchPath, requireManifest, baseRoot] = process.argv.slice(2);
+  if (!workspace || !searchPath || (requireManifest !== 'true' && requireManifest !== 'false')) throw new Error('usage: check.ts WORKSPACE PATH true|false [BASE_ROOT]');
+  const result = await runSkillCheck({ workspace, searchPath, requireManifest: requireManifest === 'true', ...(baseRoot ? { baseRoot } : {}) });
   if (result.error) process.stdout.write(`::error title=mago-ski skill check::${escapeAnnotation(result.error)}\n`);
   let annotations = 0;
   for (const check of result.checks) {

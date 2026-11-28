@@ -1,9 +1,9 @@
 name: mago-ski skill check
 
 description: >-
-  Free check for Skill repositories. Compares what each Skill declares in its OWASP Universal Skill Format
-  manifest (SKILL.md frontmatter) with what its files contain, and fails when a Skill uses a website or runs
-  commands it did not declare. On pull requests it lists what the change adds. No keys or accounts needed.
+  Free check for Skill repositories. Shows what each Skill's files contain (websites, scripts, shell code) and,
+  for Skills that declare their needs in an OWASP Universal Skill Format manifest, fails when the declaration
+  does not cover it. On pull requests it lists what the change adds. No keys or accounts needed.
 
 branding:
   icon: check-square
@@ -14,6 +14,10 @@ inputs:
     description: Folder to search for Skills (folders with a SKILL.md), relative to the repository root.
     required: false
     default: .
+  require-manifest:
+    description: Fail Skills that do not declare their needs in an OWASP USF manifest. By default they pass and their profile is shown.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -29,6 +33,15 @@ runs:
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: 22.23.4
+
+    # The one runtime dependency (yaml), installed from the lockfile with its integrity hash; no install scripts run.
+    - name: Install the check's dependency
+      shell: bash
+      env:
+        MAGO_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        npm ci --prefix "$MAGO_ACTION_PATH/.." --omit=dev --ignore-scripts --no-audit --no-fund
 
     # The base checkout only feeds the "this change adds" list; the result depends on the pull request alone.
     # actions/checkout can only write inside the workspace, so the base is checked out there and then moved out of it,
@@ -65,6 +78,7 @@ runs:
       shell: bash
       env:
         MAGO_PATH: ${{ inputs.path }}
+        MAGO_REQUIRE_MANIFEST: ${{ inputs.require-manifest }}
         MAGO_EVENT: ${{ github.event_name }}
         MAGO_ACTION_PATH: ${{ github.action_path }}
       run: |
@@ -74,4 +88,4 @@ runs:
           base=("$RUNNER_TEMP/mago-ski-check-base")
         fi
         # Runs from this action's own checkout (pinned by the caller's `uses:` ref), never from the repository under review.
-        node "$MAGO_ACTION_PATH/../hosts/github/check.ts" "$GITHUB_WORKSPACE" "$MAGO_PATH" ${base[@]+"${base[@]}"}
+        node "$MAGO_ACTION_PATH/../hosts/github/check.ts" "$GITHUB_WORKSPACE" "$MAGO_PATH" "$MAGO_REQUIRE_MANIFEST" ${base[@]+"${base[@]}"}

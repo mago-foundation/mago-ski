@@ -1,10 +1,13 @@
 # Skill check Action (free, no keys)
 
-A GitHub Action for any repository that publishes Skills. It compares what each Skill declares about itself with what its files contain, and fails the check when a Skill uses something it did not declare. It needs no keys, no accounts and no mago-ski setup.
+A GitHub Action for any repository that publishes Skills. It works on the Skills that exist today: it needs no keys, no accounts, no mago-ski setup and no new file from the author.
 
-It reads the [OWASP Universal Skill Format](https://github.com/OWASP/www-project-agentic-skills-top-10/blob/main/universal-skill-format.md) (USF) v1.0 from the YAML frontmatter of each `SKILL.md`. The authors do not have to add a mago-ski file.
+For every Skill (a folder with a `SKILL.md`) it does two things:
 
-The check does not say that a Skill is safe. It says whether the Skill's files match what the Skill declares.
+1. **Shows what the Skill's files contain**: the websites they name, the files that are code (scripts, executables, shell code blocks) and the programs that shell code calls. This is the Skill's [observed profile](../spec/observed-profile-v1.md). It is computed from the bytes alone and never from what the Skill says about itself.
+2. **Checks a declaration, if the Skill has one.** A Skill may declare its needs in the `permissions` block of the [OWASP Universal Skill Format](https://github.com/OWASP/www-project-agentic-skills-top-10/blob/main/universal-skill-format.md) (USF) v1.0, in its `SKILL.md` frontmatter. If it does, the check fails when the declaration does not cover what the files contain.
+
+The check does not say that a Skill is safe. It states what the files contain and whether the Skill's own declaration covers it.
 
 ## Set up
 
@@ -24,13 +27,30 @@ jobs:
       - uses: mago-foundation/mago-ski/check@v0.5.0
 ```
 
-Pin the Action to a full commit SHA if your repository pins its Actions. Use `pull_request`, not `pull_request_target`: the check needs no secrets and no write access.
+Pin the Action to a full commit SHA if your repository pins its Actions. Use `pull_request`, not `pull_request_target`: the check needs no secrets and no write access. The Action installs its single dependency (`yaml`) from mago-ski's lockfile, with install scripts turned off.
 
-Input: `path` (default `.`): the folder to search for Skills (any folder that holds a `SKILL.md`). `.git` and `node_modules` are skipped.
+Inputs:
+
+- `path` (default `.`): the folder to search for Skills. `.git` and `node_modules` folders are skipped.
+- `require-manifest` (default `false`): when `true`, a Skill without a readable USF declaration fails.
+
+Run the same check locally with `mago-ski check SKILL_DIR [--require-manifest]`.
+
+## Results
+
+| Situation | Result |
+|---|---|
+| No `permissions` block | **Pass**, with the profile shown and a block to paste. Fails only with `require-manifest: true`. |
+| The declaration covers the profile | **Pass.** |
+| A web address (`http://` or `https://`) in any file has a host that `permissions.network.allow` does not cover | **Fail** |
+| Scripts or shell code exist and `permissions.shell` is not `true` | **Fail** |
+| A `permissions` block exists but cannot be read one way only (see below) | **Fail** |
+| A `permissions` block exists and some files could not be searched (binary, not UTF-8, over 2 MiB, or left out by `.skilldigestignore`; images, fonts and media are fine) | **Fail**: the declaration cannot be checked against them |
+| The frontmatter is not valid YAML and declares nothing | **Pass**, with a note that hosts may not read the Skill's name and description |
+
+`network.allow` entries are host names: `api.example.com` covers only that host; `*.example.com` covers its subdomains but not `example.com` itself; `"*"` covers every host, and the summary says so. `files`, `tools` and `requires.binaries` are shown but not checked against the files, because a tool cannot reliably tell them from ordinary text.
 
 ## Declaring what a Skill needs
-
-Add a `permissions` block to the frontmatter of `SKILL.md`:
 
 ```yaml
 ---
@@ -49,37 +69,23 @@ requires:
 ---
 ```
 
-When a check fails, the job summary shows a `permissions` block filled in from what was found. Read it before you paste it in: it lists what the files contain, not what the Skill should be allowed to do.
+The job summary shows a block filled in from the profile. Read it before you paste it: it lists what the files contain, not what the Skill should be allowed to do.
 
-## What fails the check
+## How the frontmatter is read
 
-| Rule | Fails when |
-|---|---|
-| Websites | A web address (`http://` or `https://`) in any file of the Skill has a host that `permissions.network.allow` does not cover. |
-| Commands | The Skill has scripts or shell commands and `permissions.shell` is not `true`. Scripts are files with the executable bit, files that start with `#!`, files with a script extension (`.sh`, `.py`, `.js`, `.ts`, `.rb`, `.ps1` and others), and shell code blocks (`bash`, `sh`, `console`, `powershell` and others) in Markdown files. |
-| No manifest | `SKILL.md` has no `permissions` block. |
-| Files it cannot search | A file is binary, not UTF-8 text, or larger than 2 MiB, unless it is an image, font, audio or video file (by extension). A file left out by `.skilldigestignore` fails too: the Skill's own files cannot decide what the check skips. |
-| Unreadable manifest | The `permissions` or `requires` block uses YAML this check does not accept (see below), or a value has the wrong type. |
+The frontmatter is ordinary YAML and is read with a full YAML parser, so anything a YAML reader accepts is accepted: multi-line and quoted descriptions, folded and literal blocks, anchors, Unicode.
 
-`network.allow` entries are host names: `api.example.com` covers only that host; `*.example.com` covers its subdomains but not `example.com` itself; `"*"` covers every host, and the summary says so.
+YAML readers disagree on some unquoted values. YAML 1.1 (used by PyYAML and others) reads `yes`, `no`, `on`, `off`, some numbers and dates as non-text; YAML 1.2 reads them as text. The declaration is therefore read under both rules. If a declared field reads differently, the check reports it instead of guessing which reader a host uses. Write `shell: true` or `false`, and quote values such as `"on"`.
 
-`files`, `tools` and `requires.binaries` are listed in the summary but not checked against the files: a tool cannot reliably tell them from ordinary text.
-
-Images, fonts and media files are not searched; the summary names them.
+A few YAML forms make readers disagree, or are accepted by some readers and refused by PyYAML. A frontmatter that uses them cannot carry a declaration: directives and document markers inside it (`%YAML`, `---`, `...`), tags (`!!str`, `!x`), `?` keys, lists or maps used as keys, tabs outside quoted or `|`/`>` text (in unquoted values and keys too), a `:` without a key, control characters and the Unicode line breaks U+0085, U+2028 and U+2029, duplicate keys, more than 2,000 keys or 50 anchors and aliases, or more than 64 KiB. A Skill that uses them and has a `permissions` key fails; one without a `permissions` key passes with a note.
 
 ## On pull requests
 
-The summary also lists what the change adds compared with the base branch, in plain words: new websites used or declared, a switch to `shell: true`, new scripts, new files to read or write, files no longer protected from writes, new tools and new programs. This list is for the reviewer and does not affect the result: pass or fail depends only on the pull request's own files. The base revision is checked out to the runner's temporary folder, outside the workspace; a repository that contains a `.mago-ski-check-base` path is refused, because the check reserves it.
-
-## Accepted YAML
-
-The whole frontmatter is read with a strict subset of YAML, so that this check and another YAML reader cannot disagree about what a Skill declares: nested `key: value` blocks, lists written as `- item` lines (items may be `key: value` blocks, as in the USF `changelog`) or as `[a, b]` on one line, plain, `'single'` or `"double"` quoted values on one line, `|` and `>` blocks (with an optional `+` or `-`, but no indentation digit), plain values that go on over more-indented lines, `true`/`false`, and `#` comments. Anchors, aliases, tags, quoted or `?` keys, `{…}` maps, quoted or `[…]` values over several lines, tabs (except inside `|` and `>` text), a `?` in an unquoted `[…]` item, the bare values `=` and `<<`, dates that do not exist, duplicate keys, an unquoted value that contains `: `, control characters and Unicode spaces (such as the no-break space) are refused anywhere in the frontmatter, and the Skill then fails with the line number. Only `permissions` and `requires` are used; the other keys are read but not checked. As in YAML 1.1, unquoted `yes`, `no`, `on`, `off`, numbers and dates are not text: write `shell: true`, and quote a host such as `"on"`.
+The summary also lists what the change adds compared with the base branch, in plain words: new websites used or declared, a switch to `shell: true`, new scripts, new programs in shell code, new files to read or write, files no longer protected from writes, and new tools. This list is for the reviewer and does not affect the result: pass or fail depends only on the pull request's own files. The base revision is checked out to the runner's temporary folder, outside the workspace. A repository that contains a `.mago-ski-check-base` path is refused, because the check reserves that path.
 
 ## Limits
 
-- Written instructions cannot be fully checked by a tool. A Skill can tell the model, in ordinary words, to visit a site or run a command, and this check will not see it unless the address or code block is written out. Review by a person stays in the picture.
-- USF v1.0 is a proposal and may change; this check follows it.
-- `content_hash` and `signature` are not checked yet. USF does not yet define what they cover. Signing comes in a later step of 0.5.0.
-- Shell code blocks are found only in Markdown files (`.md`, `.markdown`, `.mdx`); in other text files only scripts by type, `#!` or the executable bit count.
-- Web addresses are found only when written with `http://` or `https://`. Skills inside `.git` and `node_modules` folders are not searched.
+- Written instructions cannot be fully checked by a tool. A Skill can tell the model, in ordinary words, to visit a site or run a command. The check sees it only when the address or code is written out. Review by a person stays in the picture.
+- Web addresses are found only when written with `http://` or `https://` (not `ws://`, `ftp://`, `ssh://`, `git@…` or a bare host name). Shell code is found in fenced Markdown code blocks only: not in indented code blocks, HTML `<pre><code>`, other languages' code that starts a process (Python's `os.system`, `awk`'s `system()`), or non-Markdown text files; there, scripts count by type, `#!` or the executable bit.
+- USF v1.0 is a proposal and may change; this check follows it. `content_hash` and `signature` are not checked: USF does not yet define what they cover. Keyless signing of releases comes in the next step of 0.5.0.
 - Linux and macOS runners only.

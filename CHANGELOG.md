@@ -6,7 +6,16 @@ All notable changes to mago-ski are documented here. The format follows [Keep a 
 
 ### Added
 
-- Skill check Action (`uses: mago-foundation/mago-ski/check@…`), free and without keys: reads the OWASP Universal Skill Format v1.0 `permissions` and `requires` blocks from each `SKILL.md` frontmatter and fails when a Skill uses a website its `network.allow` does not cover, has scripts or shell code while `shell` is not `true`, or has no manifest. On pull requests it lists in plain words what the change adds. See [docs/hosts/skill-check.md](docs/hosts/skill-check.md).
+- Skill check Action (`uses: mago-foundation/mago-ski/check@…`), free and without keys, for any Skill repository. It shows each Skill's observed profile: the websites its files name, its scripts and shell code, and the programs that shell code calls. For Skills that declare their needs in an OWASP Universal Skill Format v1.0 `permissions` block in `SKILL.md`, it fails when the declaration does not cover the profile. Skills without a declaration pass with their profile shown (`require-manifest: true` makes them fail). On pull requests it lists in plain words what the change adds. See [docs/hosts/skill-check.md](docs/hosts/skill-check.md).
+- `mago-ski check SKILL_DIR`: the same check on the command line.
+- Spec: [observed profile v1](docs/spec/observed-profile-v1.md) (`mago.observed-profile/v1`).
+- Publish Action (`uses: mago-foundation/mago-ski/publish@…`): after the check passes, signs a published-by statement for every Skill with the repository's own GitHub identity through `actions/attest`, with no stored key. Public repositories are recorded in the public Sigstore log. See [docs/hosts/publish.md](docs/hosts/publish.md).
+- `mago-ski attestation verify SKILL_DIR`: checks a published-by bundle offline (pinned Cosign v3.1.3, local trusted root) for the Skill's exact bytes, prints the publisher's repository, numeric ids, workflow and commit, and reports any difference between the publisher's record and the bytes.
+- Admission rules (`mago.admission/v0`): `mago-ski admit` decides whether a Skill is admitted, from its profile, declaration, review and publisher; `mago-ski admission check` checks a rule file; `mago-ski admission diff OLD NEW --against-log` lists the past decisions a new rule file would change. See [docs/spec/admission-v0.md](docs/spec/admission-v0.md).
+
+### Changed
+
+- mago-ski now has one runtime dependency, `yaml` (pinned), so frontmatter is read as other YAML readers read it. A declared field that YAML 1.1 and YAML 1.2 read differently is reported, not guessed.
 
 ## [0.4.1] - 2026-11-27
 
