@@ -1,0 +1,80 @@
+name: mago-ski publish
+
+description: >-
+  Signs a published-by statement for every Skill in the repository: "this repository published these exact
+  Skill bytes, with this declaration and this observed profile". Keyless: it uses the repository's own GitHub
+  identity through actions/attest, and public repositories are recorded in the public Sigstore log. Every Skill
+  must pass the mago-ski skill check first. It states who published what; it does not say a Skill is safe.
+
+branding:
+  icon: award
+  color: blue
+
+inputs:
+  path:
+    description: Folder to search for Skills (folders with a SKILL.md), relative to the repository root.
+    required: false
+    default: .
+  require-manifest:
+    description: Refuse to sign when a Skill has no readable OWASP USF declaration.
+    required: false
+    default: 'false'
+
+outputs:
+  bundle-path:
+    description: Path of the Sigstore bundle that holds the signed statement.
+    value: ${{ steps.attest.outputs.bundle-path }}
+  attestation-url:
+    description: URL of the attestation on GitHub.
+    value: ${{ steps.attest.outputs.attestation-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the runner platform
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        echo "::error title=mago-ski publish::Windows runners are not supported yet. Use ubuntu or macos runners."
+        exit 2
+
+    # Signing runs with the repository's identity: never for code a pull request proposes.
+    - name: Refuse pull request events
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || github.event_name == 'workflow_run'
+      shell: bash
+      run: |
+        echo "::error title=mago-ski publish::the publish Action signs with the repository's identity and does not run on pull_request, pull_request_target or workflow_run events; run it on release or on pushes to a protected branch"
+        exit 2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22.23.4
+
+    # The one runtime dependency (yaml), installed from the lockfile with its integrity hash; no install scripts run.
+    - name: Install mago-ski's dependency
+      shell: bash
+      env:
+        MAGO_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        npm ci --prefix "$MAGO_ACTION_PATH/.." --omit=dev --ignore-scripts --no-audit --no-fund
+
+    - name: Check Skills and write the statement
+      shell: bash
+      env:
+        MAGO_PATH: ${{ inputs.path }}
+        MAGO_REQUIRE_MANIFEST: ${{ inputs.require-manifest }}
+        MAGO_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        rm -rf -- "${RUNNER_TEMP:?}/mago-ski-publish"
+        node "$MAGO_ACTION_PATH/../hosts/github/publish.ts" "$GITHUB_WORKSPACE" "$MAGO_PATH" "$MAGO_REQUIRE_MANIFEST" "$RUNNER_TEMP/mago-ski-publish"
+
+    - name: Sign with the repository's identity
+      id: attest
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-checksums: ${{ runner.temp }}/mago-ski-publish/subjects.txt
+        predicate-type: https://magofoundation.dev/attestation/published-by/v1
+        predicate-path: ${{ runner.temp }}/mago-ski-publish/predicate.json

@@ -45,13 +45,13 @@ export function markdownCell(value: string): string {
     .slice(0, 500);
 }
 
-function within(root: string, target: string, label: string): string {
+export function within(root: string, target: string, label: string): string {
   if (!isInside(root, target)) throw new Error(`${label} must stay inside ${root}`);
   return target;
 }
 
 /** Containment on resolved paths, so a symlink cannot point a policy path outside its checkout. */
-async function withinReal(root: string, target: string, label: string): Promise<string> {
+export async function withinReal(root: string, target: string, label: string): Promise<string> {
   within(root, target, label);
   // The existing part of the path is resolved even when the last parts are missing: a link on the way still counts.
   const resolved = await realpathAllowingMissing(target);

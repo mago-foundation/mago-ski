@@ -9,7 +9,7 @@ import { constants as fsConstants, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isRecord, parseCanonicalJsonBytes, serializeCanonicalJson } from '../canonical-json.ts';
-import { readRegularFile, writeFileAtomic } from '../fs-safe.ts';
+import { readOwnedRegularFile, readRegularFile, writeFileAtomic } from '../fs-safe.ts';
 import { validateKeyId } from '../keys.ts';
 import type { Mode } from '../policy.ts';
 import { claudeCodeManagedSettings } from './adapters/claude-code-settings.ts';
@@ -78,9 +78,15 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * It is opened without following a link; the type and owner are checked on the descriptor, and only then are its first 4 bytes read.
  */
 export async function checkHostExe(exe: string, uid: number, stopAt = '/'): Promise<void> {
-  const info = await lstat(exe);
-  if (!info.isFile()) throw new Error(`${exe} is not a regular file`);
-  const handle = await open(exe, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  let handle: FileHandle;
+  try {
+    handle = await open(exe, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (e) {
+    const code = errnoCode(e);
+    if (code === 'ELOOP' || code === 'EISDIR' || code === 'ENXIO' || code === 'EOPNOTSUPP')
+      throw new Error(`${exe} is not a regular file`);
+    throw e;
+  }
   try {
     const fd = await handle.stat();
     if (!fd.isFile()) throw new Error(`${exe} is not a regular file`);
@@ -464,9 +470,7 @@ function manifestText(files: PlannedFile[], previous?: Map<string, string>): str
 async function readManifest(file: string, uid: number): Promise<Map<string, string> | undefined> {
   let raw: unknown;
   try {
-    const info = await lstat(file);
-    if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) return undefined;
-    raw = parseCanonicalJsonBytes(await readRegularFile(file, 'manifest', 1024 * 1024), 'manifest');
+    raw = parseCanonicalJsonBytes(await readOwnedRegularFile(file, 'manifest', { uid, maxBytes: 1024 * 1024 }), 'manifest');
   } catch { return undefined; }
   if (!isRecord(raw) || raw['v'] !== 1 || !Array.isArray(raw['files'])) return undefined;
   const out = new Map<string, string>();
@@ -548,14 +552,16 @@ export async function planInit(opts: InitOptions): Promise<InitPlan> {
   const sharedOwn = await readManifest(p.sharedManifest, uid);
   const foreign: string[] = [];
   for (const f of files) {
-    const info = await lstat(f.path).catch((e: unknown) => { if (errnoCode(e) === 'ENOENT' || errnoCode(e) === 'ENOTDIR') return undefined; throw e; });
-    if (!info) continue;
-    let ours = false;
-    if (info.isFile()) {
-      // nosemgrep: mago-no-raw-read-of-signed-input -- a system host file gate init would replace, hashed to see whether mago-ski wrote it
-      const h = sha256(await readFile(f.path));
-      ours = own?.get(f.path) === h || sharedOwn?.get(f.path) === h;
+    let bytes: Buffer | undefined;
+    try {
+      bytes = await readRegularFile(f.path, f.path);
+    } catch (e: unknown) {
+      const code = errnoCode(e);
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      if (code !== undefined) throw e;
     }
+    const h = bytes ? sha256(bytes) : undefined;
+    const ours = h !== undefined && (own?.get(f.path) === h || sharedOwn?.get(f.path) === h);
     if (!ours) foreign.push(f.path);
   }
   // The manifests themselves: an existing one that is not a root-owned regular manifest is foreign too.
@@ -703,13 +709,6 @@ export interface DoctorOptions extends Seams {
   skillScanLimits?: SkillScanLimits;
 }
 
-/** lstat: a regular file (not a symlink) owned by `uid` and not writable by group or others. */
-async function trustedRegularFile(file: string, uid: number): Promise<void> {
-  const info = await lstat(file);
-  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${file} must be a regular file, not a symlink`);
-  if (info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(NOT_ROOT(file));
-}
-
 /** Read-only checks, in the order of the design (v1 section 6, G6, G12). Never throws. */
 export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
@@ -756,16 +755,14 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   // Host config and hook config: exact content of what `gate init` would write now.
   // Codex: the listed homes live in the hook config (the instance config does not know them); deny_read is present or not as written.
   const homes: CodexHomes = (host === 'codex' ? await readHookHomes(p.hook) : undefined) ?? { userHomes: [], codexHomes: [] };
-  // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: the root-owned host config, only searched for one line
-  const denyRoots = host === 'codex' && /^deny_read = /mu.test(await readFile(p.hostConfig, 'utf8').catch(() => '')) ? codexDenyRoots(homes) : [];
   const hookExpected = hookConfigText(host, c, homes);
   let hostFileMode: Mode | undefined;
   try {
+    const msg = `${p.hostConfig} must be a regular file owned by root and not writable by others`;
+    const hostBytes = await readOwnedRegularFile(p.hostConfig, p.hostConfig, { uid, notRegularMessage: msg, ownershipMessage: msg });
+    const denyRoots = host === 'codex' && /^deny_read = /mu.test(hostBytes.toString('utf8')) ? codexDenyRoots(homes) : [];
     const expected = hostConfigText(host, c.mode, tc, p.hook, denyRoots);
-    const info = await lstat(p.hostConfig);
-    if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${p.hostConfig} must be a regular file owned by root and not writable by others`);
-    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above as a root-owned regular file not writable by others
-    const have = sha256(await readFile(p.hostConfig));
+    const have = sha256(hostBytes);
     if (have === sha256(expected)) { hostFileMode = c.mode; add('host config', 'PASS', `${p.hostConfig} matches what gate init writes`); }
     else {
       const other = c.mode === 'shadow' ? 'enforce' : 'shadow';
@@ -778,16 +775,14 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
   // The unit and the drop-in: root-owned regular files with the content the plan would write.
   for (const [label, file, expected] of [['unit', p.unit, unitText(tc)], ['drop-in', p.dropin, dropinText(c, p.stateRoot)]] as const) {
     try {
-      await trustedRegularFile(file, uid);
-      // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above by trustedRegularFile
-      if (sha256(await readFile(file)) !== sha256(expected)) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
+      const bytes = await readOwnedRegularFile(file, file, { uid, notRegularMessage: `${file} must be a regular file, not a symlink`, ownershipMessage: NOT_ROOT(file) });
+      if (sha256(bytes) !== sha256(expected)) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
       add(label, 'PASS', `${file} matches what gate init writes`);
     } catch (e) { add(label, 'FAIL', message(e)); }
   }
   try {
-    await trustedRegularFile(p.hook, uid);
-    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above by trustedRegularFile
-    if (sha256(await readFile(p.hook)) !== sha256(hookExpected)) throw new Error(`${p.hook} differs from what gate init would write now; run gate init again`);
+    const bytes = await readOwnedRegularFile(p.hook, p.hook, { uid, notRegularMessage: `${p.hook} must be a regular file, not a symlink`, ownershipMessage: NOT_ROOT(p.hook) });
+    if (sha256(bytes) !== sha256(hookExpected)) throw new Error(`${p.hook} differs from what gate init would write now; run gate init again`);
     add('hook config', 'PASS', `${p.hook} matches what gate init writes`);
   } catch (e) { add('hook config', 'FAIL', message(e)); }
 
@@ -864,8 +859,7 @@ export async function doctor(host: Host, opts: DoctorOptions = {}): Promise<Doct
 
 async function readHookHomes(file: string): Promise<CodexHomes | undefined> {
   try {
-    // nosemgrep: mago-no-raw-read-of-signed-input -- the root-owned hook config; doctor checks its ownership and content separately
-    const raw = parseStrictJson(await readFile(file));
+    const raw = parseStrictJson(await readRegularFile(file, 'hook config'));
     if (!isRecord(raw)) return undefined;
     const list = (v: unknown): string[] | undefined => (Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]) : undefined);
     const userHomes = list(raw['user_homes']);
@@ -916,10 +910,9 @@ async function codexDoctor(c: InstanceConfig, p: InstancePaths, homes: CodexHome
   // managed_config.toml: exact content, root-owned.
   try {
     const file = p.managedConfig!;
-    const info = await lstat(file);
-    if (!info.isFile() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error(`${file} must be a regular file owned by root and not writable by others`);
-    // nosemgrep: mago-no-raw-read-of-signed-input -- doctor: checked just above as a root-owned regular file not writable by others
-    if (sha256(await readFile(file)) !== sha256(codexManagedConfigToml())) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
+    const msg = `${file} must be a regular file owned by root and not writable by others`;
+    const bytes = await readOwnedRegularFile(file, file, { uid, notRegularMessage: msg, ownershipMessage: msg });
+    if (sha256(bytes) !== sha256(codexManagedConfigToml())) throw new Error(`${file} differs from what gate init would write now; run gate init again`);
     add('managed config', 'PASS', `${file} matches what gate init writes`);
   } catch (e) { add('managed config', 'FAIL', errnoCode(e) === 'ENOENT' ? `${p.managedConfig} does not exist; run gate init again` : message(e)); }
   // The hook config must list the homes (an unlisted HOME blocks bare mentions).

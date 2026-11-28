@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { addApprover, approveSkill, initRoot, removeApprover, renewTrustRoot, updateRevocations } from './admin.ts';
 import { parseCertificate } from './certificate.ts';
 import { diffSkillTrees } from './diff.ts';
+import { checkSkill } from './usf-check.ts';
+import { verifyPublishedBy } from './published-by.ts';
+import { AdmissionRulesError, evaluate, parseRules, replay, type AdmissionRecord, type Facts } from './admission.ts';
+import { collectSkillFacts } from './admission-evidence.ts';
+import { appendFile } from 'node:fs/promises';
 import { readRegularFile } from './fs-safe.ts';
 import { generateKeyPair, validateKeyId } from './keys.ts';
 import {
@@ -56,6 +61,14 @@ CHECKING SKILLS
   verify SKILL_DIR       Check one Skill, print its verdict
   verify-all             Check every Skill in the policy
   digest SKILL_DIR       Print a Skill's tree digest
+  check SKILL_DIR        Show what a Skill's files contain and check its USF declaration
+  attestation verify SKILL_DIR
+                         Check a publisher's published-by attestation for a Skill's exact bytes
+
+ADMISSION RULES  (organisation; preview: hosts do not enforce them yet)
+  admit SKILL_DIR        Decide whether a Skill is admitted under a rule file
+  admission check RULES  Check a rule file
+  admission diff OLD NEW Show which logged decisions a new rule file would change
   diff                   Compare two versions of a Skill
   inspect CERTIFICATE    Print a certificate's contents
   policy check           Check a policy the way a host does
@@ -361,6 +374,72 @@ Exits 1 if any Skill is not VERIFIED, in shadow mode too (shadow mode affects ho
 /* ******************************************************************************************  */
 /** Per-command: digest                                                                        */
 /* ******************************************************************************************  */
+  'attestation verify': `Usage: mago-ski attestation verify SKILL_DIR --bundle FILE --trusted-root FILE --cosign FILE --repo OWNER/NAME
+                                   [--workflow .github/workflows/FILE.yml] [--repo-id ID]
+
+Checks a published-by attestation (made by the mago-ski publish Action through actions/attest) for the
+Skill's exact current bytes, offline:
+
+  - the Sigstore signature, certificate chain and transparency-log proof, against --trusted-root
+    (make one with: cosign trusted-root create --with-default-services --out trusted_root.json);
+  - that the signer is a GitHub Actions workflow of --repo (and --workflow, when given);
+  - that the statement names this Skill's tree digest.
+
+It then recomputes the observed profile and the USF declaration from the bytes and reports any difference
+from what the publisher recorded. It prints who published these bytes, from which repository (with its
+numeric id), workflow and commit. It does not say that the Skill is safe.
+
+  --bundle FILE        the Sigstore bundle (the publish Action's bundle-path, or from the GitHub attestations API)
+  --trusted-root FILE  Sigstore trusted root JSON; nothing is fetched during the check
+  --cosign FILE        Cosign v3.1.3; its SHA-256 must match the official release checksum
+  --repo OWNER/NAME    the repository that must have signed (as GitHub spells it)
+  --workflow PATH      also require this workflow file
+  --repo-id ID         also require this numeric repository id (survives renames; a fork or a new
+                       repository with the same name has a different id)
+
+Exit 0 when the attestation verifies and the record matches the bytes, 1 when it does not, 2 for usage errors.`,
+
+  admit: `Usage: mago-ski admit SKILL_DIR --rules FILE [--policy FILE] [--published-by BUNDLE]
+                         [--base DIR [--base-published-by BUNDLE]] [--trusted-root FILE --cosign FILE] [--log FILE]
+
+Decides whether the Skill is admitted under an admission rule file (mago.admission/v0). The decision is a
+pure function of the facts, the rules and the time: no model and no network.
+
+The facts are computed here: the observed profile and USF declaration from the bytes; a review, when
+--policy names an organisation policy whose trust root has a valid certificate for these exact bytes; the
+publisher, when --published-by holds a published-by bundle that verifies for these bytes (offline, with
+--trusted-root and --cosign). --base names the reviewed version this one updates (its folder), for
+non-escalating update rules.
+
+  --log FILE   append the decision and its facts as one JSON line, for "mago-ski admission diff"
+
+Prints the action (ALLOW, LOG_ONLY, FLAG, REQUIRE_REVIEW or BLOCK), the rule that decided it, and what
+evidence is missing. Exit 0 when admitted (ALLOW, LOG_ONLY, FLAG), 1 when not, 2 for usage errors.`,
+
+  'admission check': `Usage: mago-ski admission check RULES
+
+Parses and checks an admission rule file: unknown keys, duplicate rule ids, BLOCK and REQUIRE_REVIEW
+rules without a reason, ALLOW rules built on capability conditions (they can only make a decision
+stricter) and ALLOW rules that would admit every Skill. Prints the rule ids and the file's digest.
+Exit 0 when the file is valid, 1 when it is not.`,
+
+  'admission diff': `Usage: mago-ski admission diff OLD NEW --against-log FILE
+
+Re-evaluates every decision in a log written by "mago-ski admit --log" under both rule files, each at the
+time it was made, and lists the decisions whose action would change. Run it before switching rules.
+Exit 0 when nothing changes, 1 when something would, 2 for usage errors.`,
+
+  check: `Usage: mago-ski check SKILL_DIR [--require-manifest]
+
+Prints the Skill's observed profile (mago.observed-profile/v1: websites, scripts and shell code, programs
+named in shell code, files not searched) and, when SKILL.md declares its needs in an OWASP Universal Skill
+Format manifest, whether the declaration covers the profile. The same check as the Skill check Action.
+It states what the files contain; it does not say that a Skill is safe.
+
+  --require-manifest   fail when SKILL.md has no readable USF declaration
+
+Exit 0 when the check passes, 1 when it fails, 2 for usage or input errors.`,
+
   digest: `Usage: mago-ski digest SKILL_DIR [--explain]
 
 Prints the Skill's tree digest (sha256:...). --explain also lists every covered file, its hash and
@@ -521,7 +600,7 @@ interface Parsed {
 }
 
 /* The actual boolean flags that should take no value. */
-const BOOLEAN_FLAGS = new Set(['--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
+const BOOLEAN_FLAGS = new Set(['--require-manifest', '--json', '--explain', '--help', '--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
 /* Only `gate init` takes these; everywhere else they are refused, as before 0.4.0. */
 const GATE_INIT_ONLY = new Set(['--force', '--print', '--no-deny-read', '--lock-user-skill-folders', '--new-root']);
 
@@ -819,6 +898,48 @@ async function runRevoke(
     revocations: result.path 
   });
   return 0;
+}
+
+async function runAdmit(parsed: Parsed, now: Date): Promise<number> {
+  allow(parsed, ['--rules', '--policy', '--published-by', '--base', '--base-published-by', '--trusted-root', '--cosign', '--log'], 1);
+  let rules;
+  try {
+    rules = parseRules((await readRegularFile(one(parsed, '--rules'), 'Rule file', 256 * 1024)).toString('utf8'));
+  } catch (error) {
+    if (error instanceof AdmissionRulesError) throw new UsageError(error.message);
+    throw error;
+  }
+  const policyPath = optional(parsed, '--policy');
+  const policy = policyPath ? await loadPolicy(policyPath) : undefined;
+  const trustedRootPath = optional(parsed, '--trusted-root');
+  const cosignPath = optional(parsed, '--cosign');
+  if ((trustedRootPath === undefined) !== (cosignPath === undefined)) throw new UsageError('--trusted-root and --cosign go together');
+  const sigstore = trustedRootPath && cosignPath ? { trustedRootPath, cosignPath } : undefined;
+  const base = optional(parsed, '--base');
+  if (base === undefined && optional(parsed, '--base-published-by') !== undefined) throw new UsageError('--base-published-by needs --base');
+  const evidence = (bundle: string | undefined) => ({ ...(policy ? { policy } : {}), ...(bundle ? { publishedBy: bundle } : {}) });
+  let facts: Facts;
+  try {
+    facts = {
+      skill: await collectSkillFacts(parsed.positional[0]!, evidence(optional(parsed, '--published-by')), sigstore, now),
+      base: base === undefined ? null : await collectSkillFacts(base, evidence(optional(parsed, '--base-published-by')), sigstore, now),
+    };
+  } catch (error) {
+    if (error instanceof RangeError) throw new UsageError(error.message);
+    throw error;
+  }
+  const decision = evaluate(rules, facts, now);
+  const logPath = optional(parsed, '--log');
+  if (logPath) {
+    const record: AdmissionRecord = { decided_at: now.toISOString(), rules_digest: rules.digest, facts, decision };
+    await appendFile(logPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  }
+  print({
+    skill: facts.skill.name, digest: facts.skill.digest, ...decision,
+    evidence: { reviewed_by: facts.skill.reviewed_by, published_by: facts.skill.published_by, declaration: facts.skill.declaration !== null, base: facts.base?.digest ?? null },
+    rules_digest: rules.digest,
+  });
+  return decision.admitted ? 0 : 1;
 }
 
 /** Loads the policy named by --policy, else the host default. The checkout being verified never chooses its own root. */
@@ -1383,7 +1504,7 @@ export async function runCli(
     return 0;
   }
 
-  const hasSub = ['root', 'revoke', 'recovery', 'root-events', 'timestamp', 'policy', 'gate'].includes(command!);
+  const hasSub = ['root', 'revoke', 'recovery', 'root-events', 'timestamp', 'policy', 'gate', 'attestation', 'admission'].includes(command!);
   const parsed = parseArgs(argv.slice(hasSub ? 2 : 1));
   switch (command) {
     case 'keygen': {
@@ -1454,6 +1575,78 @@ export async function runCli(
       return 0;
     }
     
+    case 'attestation': {
+      if (maybeSub !== 'verify') throw new UsageError('Usage: mago-ski attestation verify SKILL_DIR --bundle FILE --trusted-root FILE --cosign FILE --repo OWNER/NAME');
+      allow(parsed, ['--bundle', '--trusted-root', '--cosign', '--repo', '--workflow', '--repo-id'], 1);
+      const workflow = parsed.flags.get('--workflow')?.[0];
+      const repositoryId = parsed.flags.get('--repo-id')?.[0];
+      let facts;
+      try {
+        facts = await verifyPublishedBy(parsed.positional[0]!, {
+          bundlePath: one(parsed, '--bundle'), trustedRootPath: one(parsed, '--trusted-root'), cosignPath: one(parsed, '--cosign'), repository: one(parsed, '--repo'),
+          ...(workflow ? { workflow } : {}), ...(repositoryId ? { repositoryId } : {}),
+        });
+      } catch (error) {
+        if (error instanceof RangeError) throw new UsageError(error.message);
+        print({ result: 'NOT_VERIFIED', reason: (error as Error).message });
+        return 1;
+      }
+      print({ result: facts.differences.length === 0 ? 'PUBLISHED_BY' : 'RECORD_MISMATCH', digest: facts.digest, publisher: facts.publisher, differences: facts.differences, declaration: facts.recorded.declaration, profile: facts.recorded.profile });
+      return facts.differences.length === 0 ? 0 : 1;
+    }
+
+    case 'admit':
+      return await runAdmit(parsed, now);
+
+    case 'admission': {
+      if (maybeSub === 'check') {
+        allow(parsed, [], 1);
+        let rules;
+        try {
+          rules = parseRules((await readRegularFile(parsed.positional[0]!, 'Rule file', 256 * 1024)).toString('utf8'));
+        } catch (error) {
+          if (!(error instanceof AdmissionRulesError)) throw error;
+          print({ valid: false, error: error.message });
+          return 1;
+        }
+        print({ valid: true, digest: rules.digest, default: rules.default, rules: rules.rules.map((rule) => `${rule.id}: ${rule.action}`) });
+        return 0;
+      }
+      if (maybeSub === 'diff') {
+        allow(parsed, ['--against-log'], 2);
+        const load = async (file: string) => {
+          try {
+            return parseRules((await readRegularFile(file, 'Rule file', 256 * 1024)).toString('utf8'));
+          } catch (error) {
+            if (error instanceof AdmissionRulesError) throw new UsageError(`${file}: ${error.message}`);
+            throw error;
+          }
+        };
+        const [previous, next] = [await load(parsed.positional[0]!), await load(parsed.positional[1]!)];
+        const lines = (await readRegularFile(one(parsed, '--against-log'), 'Decision log', 256 * 1024 * 1024)).toString('utf8').split('\n').filter(Boolean);
+        const records = lines.map((line, index) => {
+          try {
+            return JSON.parse(line) as AdmissionRecord;
+          } catch {
+            throw new UsageError(`log line ${index + 1} is not JSON`);
+          }
+        });
+        const flips = replay(previous, next, records);
+        print({ decisions: records.length, changed: flips.length, flips: flips.map((flip) => ({ decided_at: flip.decided_at, skill: flip.skill, digest: flip.digest, from: `${flip.before.action} (${flip.before.rule_id})`, to: `${flip.after.action} (${flip.after.rule_id})` })) });
+        return flips.length === 0 ? 0 : 1;
+      }
+      throw new UsageError('Usage: mago-ski admission check RULES | mago-ski admission diff OLD NEW --against-log FILE');
+    }
+
+    case 'check': {
+      allow(parsed, [], 1);
+      const skillDir = path.resolve(parsed.positional[0]!);
+      const result = await checkSkill(skillDir, path.dirname(skillDir), { requireManifest: parsed.booleans.has('--require-manifest') });
+      const { format: _format, dir: _dir, ...rest } = result;
+      print({ skill_dir: skillDir, usf_format: result.format, ...rest });
+      return result.ok ? 0 : 1;
+    }
+
     case 'diff': {
       if (parsed.positional.length > 0)
         throw new UsageError(`diff takes the two directories as options: mago-ski diff --base ${parsed.positional[0]} --candidate ${parsed.positional[1] ?? 'DIR'}`);
