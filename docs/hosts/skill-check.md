@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: mago-foundation/mago-ski/check@v0.5.0
+      - uses: mago-foundation/mago-ski/check@v0.5.0-beta.1
 ```
 
 Pin the Action to a full commit SHA if your repository pins its Actions. Use `pull_request`, not `pull_request_target`: the check needs no secrets and no write access. The Action installs its single dependency (`yaml`) from mago-ski's lockfile, with install scripts turned off.

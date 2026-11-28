@@ -65,7 +65,7 @@ CHECKING SKILLS
   attestation verify SKILL_DIR
                          Check a publisher's published-by attestation for a Skill's exact bytes
 
-ADMISSION RULES  (organisation)
+ADMISSION RULES  (organisation; preview: hosts do not enforce them yet)
   admit SKILL_DIR        Decide whether a Skill is admitted under a rule file
   admission check RULES  Check a rule file
   admission diff OLD NEW Show which logged decisions a new rule file would change

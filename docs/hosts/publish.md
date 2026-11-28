@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: mago-foundation/mago-ski/publish@v0.5.0
+      - uses: mago-foundation/mago-ski/publish@v0.5.0-beta.1
 ```
 
 Inputs: `path` and `require-manifest`, as in the [Skill check Action](skill-check.md). Outputs: `bundle-path` (the Sigstore bundle) and `attestation-url`.

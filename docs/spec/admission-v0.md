@@ -1,6 +1,6 @@
 # Admission rules v0 (`mago.admission/v0`)
 
-Status: draft, part of mago-ski 0.5.0.
+Status: preview in mago-ski 0.5.0-beta.1; the format may change before 0.5.0.
 
 An admission rule file is an organisation's short, readable statement of which evidence is enough to admit a Skill. It is the admission language only: it decides whether an exact Skill version may be loaded, and never describes what an agent may do while it works. That belongs to a separate runtime language under a different name.
 
